@@ -1,0 +1,49 @@
+{
+  "name": "foundry-agent-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An autonomous, deterministic Architect-to-Reviewer workflow orchestrator.",
+  "type": "module",
+  "bin": {
+    "foundry": "dist/cli/index.js"
+  },
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
+  "packageManager": "npm@11.9.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "node -e \"import('node:fs').then(({ rmSync }) => rmSync('dist', { recursive: true, force: true }))\"",
+    "effect:diagnostics": "effect-language-service diagnostics --project tsconfig.json",
+    "effect:diagnostics:eslint": "effect-language-service diagnostics --project tsconfig.eslint.json",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "lint:anti-slop": "oxlint .",
+    "prepare": "effect-language-service patch",
+    "start": "node dist/cli/index.js",
+    "test": "vitest run",
+    "test:architecture": "vitest run tests/eslint-architecture.test.ts",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "verify": "npm run format:check && npm run lint && npm run lint:anti-slop && npm run typecheck && npm run effect:diagnostics && npm test && npm run build"
+  },
+  "dependencies": {
+    "effect": "4.0.0-rc.112"
+  },
+  "devDependencies": {
+    "@effect/language-service": "0.87.2",
+    "@effect/vitest": "4.0.0-rc.112",
+    "@oxlint/plugins": "1.81.0",
+    "@types/node": "24.0.0",
+    "@typescript-eslint/eslint-plugin": "8.31.1",
+    "@typescript-eslint/parser": "8.31.1",
+    "eslint": "9.25.1",
+    "oxlint": "1.81.0",
+    "prettier": "3.5.3",
+    "tsx": "4.19.4",
+    "typescript": "5.8.3",
+    "typescript-eslint": "8.31.1",
+    "vitest": "4.1.11"
+  }
+}

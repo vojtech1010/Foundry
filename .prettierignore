@@ -1,0 +1,6 @@
+dist
+node_modules
+.agent
+.agents
+tools/oxlint/anti-slop
+package-lock.json
