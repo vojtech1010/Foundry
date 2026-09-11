@@ -23,9 +23,11 @@ statistics.
 | `planning`, `coding`, `verifying`, `testing`, `reviewing`, `correcting` | Automatic work is active or queued                                             |
 | `human_decision_required`                                               | Reviewer produced a decision question and an exact draft PR should be recorded |
 | `publishing`                                                            | Foundry is creating or reconciling that decision PR                            |
-| `blocked`, `failed`                                                     | Automatic progress stopped; inspect the primary issue                          |
+| `blocked`                                                               | Progress can resume after its recorded prerequisite is corrected               |
+| `failed`                                                                | The run is terminal; inspect the cause before starting a new run               |
 | `publish_failed`                                                        | Decision publication is uncertain or failed; recover the same run              |
 | `completed`, `completed_no_change`                                      | Read the final handoff and result                                              |
+| `abandoned`                                                             | The run was explicitly ended; inspect its reason and cleanup                   |
 
 Status is not proof that an artifact is valid or a PR exists. Durable validation
 and publication journals remain authoritative.
@@ -79,7 +81,8 @@ When state is `human_decision_required`, inspection must expose:
 - unresolved findings and limitations;
 - source/result commits;
 - draft PR URL and publication checkpoint; and
-- the fact that GitHub activity is not yet a machine-readable resolution.
+- the exact authenticated option commands and whether a decision comment has
+  been accepted.
 
 Normal approved runs have no human decision and no Foundry-created PR.
 
@@ -93,7 +96,7 @@ cost estimate remains unknown. Missing verification/publication telemetry does
 not mean those operations did not happen; consult their reports and journals.
 Statistics never determine acceptance.
 
-Distinguish a Foundry role retry, artifact repair, or correction from a command
+Distinguish a Foundry role retry, control repair, or correction from a command
 failure handled inside one Coder/worker session. Zero workflow retries can
 coexist with failed local test invocations followed by same-session fixes.
 Bounded terminal logs retain that diagnostic context; do not promote every
@@ -120,6 +123,10 @@ The output must be new or empty and outside live `.agent` storage. The manifest
 records included entries, byte counts, hashes, redaction counts, and truncation.
 A bundle is not a complete archive and is not automatically safe to publish.
 
+All JSON CLI output uses the single versioned success/error envelope in
+[protocol contracts](protocol-contracts.md#cli-result-contract). Human-readable
+output is a presentation of the same durable facts.
+
 ## Retention cleanup
 
 Status and inspection distinguish result completion from cleanup completion.
@@ -132,6 +139,13 @@ List eligible terminal runs before deleting them, then confirm through the
 supported cleanup command. Cleanup validates state, event logs, workers,
 worktrees, branches, and ownership before each deletion. It may partially
 succeed, so list again after any failure. Never delete `.agent/runs` manually.
+
+Use `cleanup --list` to report eligibility and
+`cleanup --run-id <id> --confirm <id>` to act. Cleanup is explicit, never
+background retention work; normal end-of-run resource disposal remains
+automatic. It preserves the task branch and canonical handoff while disposing
+verified owned sessions, worktrees, worker branches, and eligible bounded
+evidence.
 
 ## When to intervene
 

@@ -87,7 +87,7 @@ schema repair, semantic validation, and another attempt is observable even in a
 terminally successful run. It is not permission to rewrite failures as passes.
 
 Applied to [role recovery](recovery.md#role-recovery) and
-[repair versus retest](quality-and-decisions.md#validation-repair-versus-retest).
+[control repair versus retest](quality-and-decisions.md#control-repair-versus-retest).
 
 ### Runtime identity, criterion evidence, and observations
 

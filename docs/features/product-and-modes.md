@@ -13,6 +13,12 @@ request -> Architect -> Coder -> deterministic checks -> optional Tester -> Revi
                                                 human decision needed --+--> draft GitHub PR
 ```
 
+## Supported host platforms
+
+Foundry supports running on Linux and Windows. Platform-specific command and
+path handling must preserve the same autonomous workflow, role permissions,
+Git-safety guarantees, and recovery behavior on both operating systems.
+
 ## One operating model
 
 Foundry has one operating model: autonomous execution. There is no manual,
@@ -29,10 +35,14 @@ shadow, pilot, or adoption mode.
 - **Foundry** advances accepted work and routes bounded corrections without
   asking a person to approve ordinary stages.
 
-Runtime selection is an implementation concern, not a product mode. A fake
-runtime may be used for deterministic development tests; a configured live
-runtime performs real role work. Neither changes permissions or publication
-policy.
+Role-host selection is an implementation concern, not a product mode. An
+in-process fake Layer is used for deterministic development tests; a configured
+`foundry-role-host-v1` adapter performs real role work. Neither changes
+permissions or publication policy.
+
+Role handoffs are free-form Markdown with only a narrow machine control
+envelope for workflow routing. Agents never need to reproduce Foundry's durable
+state or evidence schemas. See [protocol contracts](protocol-contracts.md).
 
 ## Human interruption policy
 
@@ -57,10 +67,10 @@ unavailable runtimes, malformed state, lock uncertainty, or failed commands are
 handled by bounded retry and [recovery](recovery.md). They do not create a PR
 unless Reviewer has already produced a reviewable decision escalation.
 
-The protocol for resolving a decision from GitHub back into the run is deferred
-for later design. Until specified, the durable run and PR must preserve the
-question, commit, evidence, and URL without guessing that a comment, approval,
-or merge resolved it.
+The draft PR presents explicit option commands. `resume` accepts only a nonce-
+bound command from a human with `maintain` or `admin` permission; it never
+guesses from ordinary comments, approval, closure, merge, or other GitHub
+activity. See [results and publication](results-and-publication.md#applying-a-human-decision).
 
 ## What Foundry never does
 

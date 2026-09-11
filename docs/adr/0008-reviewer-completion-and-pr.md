@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-09-08
+- Inbound decision reconciliation superseded by: ADR-0012
 - Relates to: `docs/features/quality-and-decisions.md`,
   `docs/features/results-and-publication.md`
 

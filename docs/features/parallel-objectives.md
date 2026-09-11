@@ -11,14 +11,17 @@ same source commit and finish without another objective's unfinished output.
 Prefer sequential implementation when objectives share generated files,
 migrations, dependency updates, or ordering constraints.
 
-The accepted plan is authoritative. It must declare either:
+The accepted plan is authoritative. Foundry compiles the Architect's free-form
+narrative and narrow control envelope into either:
 
 - one sequential objective; or
 - at least two independent parallel objectives with unique IDs and complete
   acceptance-criterion coverage.
 
 There is no public `--parallel` flag. Foundry validates the plan and selects the
-execution path automatically.
+execution path automatically. Parallelism is opt-in: missing, overlapping, or
+incomplete objective metadata falls back to one sequential objective without a
+human question.
 
 ## Worker contract
 
@@ -31,8 +34,18 @@ execution path automatically.
 6. The integrated commit enters the same deterministic checks, optional Tester,
    Reviewer, correction, and decision-escalation path as sequential work.
 
-The top-level concurrency limit bounds active workers. Fewer objectives than
+Worker branch names are derived, not agent-selected:
+`<task-branch>--worker-<objective-id>-<run-hash>`, where `run-hash` is the first
+12 lowercase hexadecimal characters of SHA-256 over the run ID. Lead Coder owns
+the configured task branch. Branch and worktree collision rules are identical
+to the top-level run: reuse requires the same durable owner and recorded head;
+otherwise Foundry blocks without moving either resource.
+
+The configured `maxParallelCoders` limit bounds active workers. Fewer objectives than
 slots leave capacity unused; concurrency never changes the plan's dependencies.
+Each objective and Lead Coder receives the configured Coder role-retry budget;
+the run-wide correction-round budget begins only after an aggregate commit
+enters verification.
 
 ## Worker lifecycle and integration provenance
 

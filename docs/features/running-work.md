@@ -75,12 +75,27 @@ A request already satisfied by the source may complete as
 `completed_no_change`. It has no implementation commit and cannot require a
 review-decision PR.
 
+Architect or Coder may nominate a no-change candidate, but neither declaration
+is authoritative. Foundry first verifies that the task branch is clean and has
+no source-relative diff, runs the deterministic profile against the frozen
+source commit, and sends the request, rationale, source, and verification report
+to Reviewer. Reviewer approval produces `completed_no_change`; requested
+implementation enters Coder without consuming a correction round.
+`human_decision_required` is invalid for a no-change candidate because there is
+no reviewable implementation to publish; unresolved ambiguity routes to Coder
+or `blocked`.
+
 ## Plan-controlled validation
 
 The accepted, machine-validated plan records stable acceptance-criterion IDs,
 affected path scopes, whether runtime validation is required, and the rationale
 for that decision. These fields determine validation routing; a role's prose
 claim or preference cannot silently enable or omit Tester.
+
+Architect writes the plan as ordinary Markdown and supplies only the compact
+routing envelope described in [protocol contracts](protocol-contracts.md). Foundry
+assigns stable criterion and objective IDs. Sequential execution is the safe
+default whenever parallel metadata is absent or cannot prove independence.
 
 Deterministic verification runs before required runtime preparation. When the
 plan does not require Tester, Foundry records an explicit skip with its reason
@@ -119,14 +134,56 @@ records the limitation for Reviewer rather than granting Tester write access.
 
 ## Important states
 
-| State                                                     | Meaning                               | Automatic action                                             |
-| --------------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------ |
-| `planning`, `coding`, `verifying`, `testing`, `reviewing` | A stage is active                     | Continue within configured bounds                            |
-| `correcting`                                              | Coder is addressing accepted findings | Reverify and rereview the new commit                         |
-| `human_decision_required`                                 | Reviewer needs a product decision     | Create or reuse the exact draft PR and preserve the question |
-| `completed`, `completed_no_change`                        | Successful terminal result            | Produce the final handoff and clean owned resources          |
-| `blocked`, `failed`                                       | Safe automatic progress stopped       | Preserve evidence and use recovery; do not invent approval   |
+| State                                                     | Meaning                                        | Automatic action                                            |
+| --------------------------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------- |
+| `planning`, `coding`, `verifying`, `testing`, `reviewing` | A stage is active                              | Continue within configured bounds                           |
+| `correcting`                                              | Coder is addressing accepted findings          | Reverify and rereview the new commit                        |
+| `human_decision_required`                                 | Reviewer needs a product decision              | Wait for one authenticated option command                   |
+| `completed`, `completed_no_change`                        | Successful terminal result                     | Produce the final handoff and clean owned resources         |
+| `abandoned`                                               | An operator explicitly ended a nonterminal run | Preserve the reason and clean only verified owned resources |
+| `blocked`                                                 | A recoverable prerequisite stopped progress    | Preserve evidence and resume after correction               |
+| `failed`                                                  | No safe route or reviewable result remains     | Preserve evidence; start a new run only for a new attempt   |
 
 Never infer success from files in `.agent`. A successful change requires a
 validated state transition and Git-derived result commit. See
 [inspection and reporting](inspection-and-reporting.md).
+
+## Legal transition routes
+
+Retries and control repairs retain the current workflow state and append a new
+attempt or repair event. State changes use only these routes:
+
+| From                                 | To                        | Required fact                                                                                        |
+| ------------------------------------ | ------------------------- | ---------------------------------------------------------------------------------------------------- |
+| run creation                         | `planning`                | source, lease, storage, and worktree provisioning checkpoints are durable                            |
+| `planning`                           | `coding`                  | accepted plan requires implementation                                                                |
+| `planning`                           | `verifying`               | accepted no-change candidate                                                                         |
+| `coding`, `correcting`               | `verifying`               | clean assigned branch with a new Git-derived candidate commit, or a validated no-change candidate    |
+| `verifying`                          | `testing`                 | checks passed and accepted plan requires runtime validation                                          |
+| `verifying`                          | `reviewing`               | checks passed and Tester is not required, or correction budget is exhausted with a reviewable commit |
+| `verifying`, `testing`, `reviewing`  | `correcting`              | evidence-backed Coder work remains and a correction round is available                               |
+| `testing`                            | `reviewing`               | settled Tester observations or a retained runtime limitation                                         |
+| `reviewing`                          | `testing`                 | Reviewer requested another observation against the same commit and a Tester retry remains            |
+| `reviewing`                          | `completed`               | Reviewer approved the exact changed commit and current evidence                                      |
+| `reviewing`                          | `completed_no_change`     | Reviewer approved the verified source as already satisfying the request                              |
+| `reviewing`                          | `publishing`              | valid `human_decision_required` envelope and a reviewable changed commit                             |
+| `reviewing`                          | `blocked`                 | valid human-decision result but decision publication is not configured or eligible                   |
+| `publishing`                         | `human_decision_required` | exact draft PR URL durably reconciled                                                                |
+| `publishing`                         | `publish_failed`          | publication cannot yet be reconciled safely                                                          |
+| `human_decision_required`            | `completed`               | authenticated `accept` option                                                                        |
+| `human_decision_required`            | `correcting`              | authenticated `correct` option; downstream evidence is invalidated                                   |
+| any nonterminal state                | `abandoned`               | explicit abandonment request and reason are durably recorded                                         |
+| any active state                     | `blocked`                 | a recoverable prerequisite or integrity condition prevents safe progress                             |
+| any active state except `publishing` | `failed`                  | a non-recoverable validated failure or exhausted budget leaves no reviewable result                  |
+
+`changes_requested` is valid only when a correction round remains. With a
+reviewable commit but no remaining automatic correction, Reviewer must choose
+`human_decision_required` for a genuine product/risk choice or `blocked` for an
+operational/integrity problem. Failed required checks or missing required
+runtime evidence can never lead to `approved`.
+
+`resume` reconciles `blocked` or `publish_failed` from its durable checkpoint
+and returns to the recorded active state only after the prerequisite is valid.
+`failed`, `abandoned`, `completed`, and `completed_no_change` are terminal.
+Cleanup progress is recorded separately and never changes an accepted result
+state.

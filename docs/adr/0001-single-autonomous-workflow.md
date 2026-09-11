@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-09-08
+- Human-decision terminal routes refined by: ADR-0012
 - Relates to: `docs/features/product-and-modes.md`,
   `docs/features/running-work.md`
 
