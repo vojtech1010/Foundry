@@ -1,0 +1,423 @@
+import { Effect, Result, Schema } from 'effect';
+
+import { executePublicCommand } from '../application/public-commands.js';
+import {
+  INVALID_INVOCATION_KIND,
+  NOT_AVAILABLE,
+  PUBLIC_COMMANDS,
+  REPORT_FAILURE_KINDS,
+  REPORT_SCHEMA_VERSION,
+  exitCodeForOutcome,
+  isNonProductCommand,
+  isPublicCommand,
+} from '../domain/public-commands.js';
+
+import type { PublicCommand } from '../domain/public-commands.js';
+
+const UNKNOWN_COMMAND_LABEL = 'foundry';
+
+const BOOLEAN_FLAGS = ['--json', '--dry-run', '--abandon', '--list'] as const;
+
+type BooleanFlag = (typeof BOOLEAN_FLAGS)[number];
+
+const VALUE_FLAGS = [
+  '--config',
+  '--request',
+  '--task-id',
+  '--run-id',
+  '--reason',
+  '--output',
+  '--confirm',
+] as const;
+
+type ValueFlag = (typeof VALUE_FLAGS)[number];
+
+type FlagName = BooleanFlag | ValueFlag;
+
+function isFlagName(token: string): token is FlagName {
+  return BOOLEAN_FLAGS.some((flag) => flag === token) || VALUE_FLAGS.some((flag) => flag === token);
+}
+
+function isBooleanFlag(token: FlagName): token is BooleanFlag {
+  return BOOLEAN_FLAGS.some((flag) => flag === token);
+}
+
+interface RawArgv {
+  readonly command: string | undefined;
+  readonly booleans: ReadonlySet<BooleanFlag>;
+  readonly values: ReadonlyMap<ValueFlag, string>;
+  readonly error: string | undefined;
+}
+
+function tokenizeArgv(argv: ReadonlyArray<string>): RawArgv {
+  let command: string | undefined;
+  let error: string | undefined;
+  const booleans = new Set<BooleanFlag>();
+  const values = new Map<ValueFlag, string>();
+
+  let index = 0;
+  while (index < argv.length) {
+    const token = argv[index];
+    index += 1;
+    if (token === undefined) {
+      continue;
+    }
+    if (!token.startsWith('--')) {
+      if (command === undefined) {
+        command = token;
+      } else {
+        error ??= `Unexpected argument: ${token}`;
+      }
+      continue;
+    }
+    if (token.includes('=')) {
+      error ??= `Flag values must be separate arguments: ${token}`;
+      continue;
+    }
+    if (!isFlagName(token)) {
+      error ??= `Unknown flag: ${token}`;
+      continue;
+    }
+    if (isBooleanFlag(token)) {
+      if (booleans.has(token)) {
+        error ??= `Duplicate flag: ${token}`;
+      } else {
+        booleans.add(token);
+      }
+      continue;
+    }
+    const value = argv[index];
+    index += value === undefined ? 0 : 1;
+    if (value === undefined) {
+      error ??= `Missing value for flag: ${token}`;
+      continue;
+    }
+    if (values.has(token)) {
+      error ??= `Duplicate flag: ${token}`;
+      continue;
+    }
+    values.set(token, value);
+  }
+
+  return { command, booleans, values, error };
+}
+
+const Identifier = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(64),
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+);
+
+const PathValue = Schema.NonEmptyString;
+
+const Invocation = Schema.Union([
+  Schema.Struct({
+    command: Schema.Literal('run'),
+    config: PathValue,
+    request: PathValue,
+    taskId: Identifier,
+    runId: Identifier,
+  }),
+  Schema.Struct({
+    command: Schema.Literal('resume'),
+    config: PathValue,
+    runId: Identifier,
+    abandon: Schema.Literal(true),
+    reason: PathValue,
+  }),
+  Schema.Struct({
+    command: Schema.Literal('resume'),
+    config: PathValue,
+    runId: Identifier,
+  }),
+  Schema.Struct({
+    command: Schema.Literal('status'),
+    config: PathValue,
+    runId: Identifier,
+  }),
+  Schema.Struct({
+    command: Schema.Literal('inspect'),
+    config: PathValue,
+    runId: Identifier,
+  }),
+  Schema.Struct({
+    command: Schema.Literal('doctor'),
+    config: PathValue,
+  }),
+  Schema.Struct({
+    command: Schema.Literal('init'),
+    config: PathValue,
+    taskId: Identifier,
+    dryRun: Schema.Literal(true),
+  }),
+  Schema.Struct({
+    command: Schema.Literal('profile-check'),
+    config: PathValue,
+  }),
+  Schema.Struct({
+    command: Schema.Literal('diagnostic-bundle'),
+    config: PathValue,
+    output: PathValue,
+  }),
+  Schema.Struct({
+    command: Schema.Literal('cleanup'),
+    config: PathValue,
+    list: Schema.Literal(true),
+  }),
+  Schema.Struct({
+    command: Schema.Literal('cleanup'),
+    config: PathValue,
+    runId: Identifier,
+    confirm: Identifier,
+  }),
+]);
+
+const ReportError = Schema.Struct({
+  kind: Schema.Literals(REPORT_FAILURE_KINDS),
+  message: Schema.String,
+  retryable: Schema.Boolean,
+  runId: Schema.optional(Schema.String),
+});
+
+const ReportData = Schema.Struct({
+  availability: Schema.Literal(NOT_AVAILABLE),
+  message: Schema.String,
+  runId: Schema.optional(Schema.String),
+  taskId: Schema.optional(Schema.String),
+});
+
+const SuccessEnvelope = Schema.Struct({
+  schemaVersion: Schema.Literal(REPORT_SCHEMA_VERSION),
+  command: Schema.String,
+  ok: Schema.Literal(true),
+  data: ReportData,
+});
+
+const FailureEnvelope = Schema.Struct({
+  schemaVersion: Schema.Literal(REPORT_SCHEMA_VERSION),
+  command: Schema.String,
+  ok: Schema.Literal(false),
+  error: ReportError,
+});
+
+export const ReportEnvelope = Schema.Union([SuccessEnvelope, FailureEnvelope]);
+
+export type ReportEnvelopeValue = (typeof ReportEnvelope)['Type'];
+
+export interface CliResult {
+  readonly exitCode: number;
+  readonly stdout: string;
+}
+
+class InvalidInvocation extends Schema.TaggedError<InvalidInvocation>()('InvalidInvocation', {
+  command: Schema.String,
+  message: Schema.String,
+  json: Schema.Boolean,
+  runId: Schema.optional(Schema.String),
+}) {}
+
+interface DecodedInvocation {
+  readonly invocation: (typeof Invocation)['Type'];
+  readonly json: boolean;
+}
+
+interface InvocationCandidate {
+  command: string;
+  config?: string | undefined;
+  request?: string | undefined;
+  taskId?: string | undefined;
+  runId?: string | undefined;
+  reason?: string | undefined;
+  output?: string | undefined;
+  confirm?: string | undefined;
+  dryRun?: boolean | undefined;
+  abandon?: boolean | undefined;
+  list?: boolean | undefined;
+}
+
+function buildCandidate(command: PublicCommand, raw: RawArgv): InvocationCandidate {
+  const candidate: InvocationCandidate = { command };
+
+  const config = raw.values.get('--config');
+  if (config !== undefined) {
+    candidate.config = config;
+  }
+  const request = raw.values.get('--request');
+  if (request !== undefined) {
+    candidate.request = request;
+  }
+  const taskId = raw.values.get('--task-id');
+  if (taskId !== undefined) {
+    candidate.taskId = taskId;
+  }
+  const runId = raw.values.get('--run-id');
+  if (runId !== undefined) {
+    candidate.runId = runId;
+  }
+  const reason = raw.values.get('--reason');
+  if (reason !== undefined) {
+    candidate.reason = reason;
+  }
+  const output = raw.values.get('--output');
+  if (output !== undefined) {
+    candidate.output = output;
+  }
+  const confirm = raw.values.get('--confirm');
+  if (confirm !== undefined) {
+    candidate.confirm = confirm;
+  }
+
+  if (raw.booleans.has('--dry-run')) {
+    candidate.dryRun = true;
+  }
+  if (raw.booleans.has('--abandon')) {
+    candidate.abandon = true;
+  }
+  if (raw.booleans.has('--list')) {
+    candidate.list = true;
+  }
+
+  return candidate;
+}
+
+function validRunId(value: string | undefined): string | undefined {
+  return value !== undefined && Schema.is(Identifier)(value) ? value : undefined;
+}
+
+const decodeInvocation = Effect.fn('decodeInvocation')(function* (
+  argv: ReadonlyArray<string>,
+): Effect.fn.Return<DecodedInvocation, InvalidInvocation> {
+  const raw = tokenizeArgv(argv);
+  const json = raw.booleans.has('--json');
+  const runId = validRunId(raw.values.get('--run-id'));
+  const attempted = raw.command;
+  const command = attempted ?? UNKNOWN_COMMAND_LABEL;
+
+  if (raw.error !== undefined) {
+    return yield* new InvalidInvocation({ command, message: raw.error, json, runId });
+  }
+  if (attempted === undefined) {
+    return yield* new InvalidInvocation({
+      command: UNKNOWN_COMMAND_LABEL,
+      message: `Missing command. Expected one of: ${PUBLIC_COMMANDS.join(', ')}.`,
+      json,
+      runId,
+    });
+  }
+  if (isNonProductCommand(attempted)) {
+    return yield* new InvalidInvocation({
+      command: attempted,
+      message: `Command "${attempted}" is not part of the Foundry product.`,
+      json,
+      runId,
+    });
+  }
+  if (!isPublicCommand(attempted)) {
+    return yield* new InvalidInvocation({
+      command: attempted,
+      message: `Unknown command: ${attempted}.`,
+      json,
+      runId,
+    });
+  }
+
+  const decoded = yield* Schema.decodeUnknownEffect(Invocation, {
+    onExcessProperty: 'error',
+  })(buildCandidate(attempted, raw)).pipe(
+    Effect.mapError(
+      (error) =>
+        new InvalidInvocation({
+          command: attempted,
+          message: `Invalid invocation: ${error.message.replaceAll(/\s+/gu, ' ').trim()}`,
+          json,
+          runId,
+        }),
+    ),
+  );
+
+  if ('confirm' in decoded && decoded.confirm !== decoded.runId) {
+    return yield* new InvalidInvocation({
+      command: attempted,
+      message: 'Value for --confirm must match --run-id.',
+      json,
+      runId: decoded.runId,
+    });
+  }
+
+  return { invocation: decoded, json };
+});
+
+function renderHuman(envelope: ReportEnvelopeValue): string {
+  const lines = [
+    `schemaVersion: ${envelope.schemaVersion}`,
+    `command: ${envelope.command}`,
+    `ok: ${envelope.ok}`,
+  ];
+  if (envelope.ok) {
+    lines.push(
+      `data.availability: ${envelope.data.availability}`,
+      `data.message: ${envelope.data.message}`,
+    );
+    if (envelope.data.runId !== undefined) {
+      lines.push(`data.runId: ${envelope.data.runId}`);
+    }
+    if (envelope.data.taskId !== undefined) {
+      lines.push(`data.taskId: ${envelope.data.taskId}`);
+    }
+  } else {
+    lines.push(
+      `error.kind: ${envelope.error.kind}`,
+      `error.message: ${envelope.error.message}`,
+      `error.retryable: ${envelope.error.retryable}`,
+    );
+    if (envelope.error.runId !== undefined) {
+      lines.push(`error.runId: ${envelope.error.runId}`);
+    }
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function renderEnvelope(envelope: ReportEnvelopeValue, json: boolean): string {
+  if (!json) {
+    return renderHuman(envelope);
+  }
+  return `${JSON.stringify(Schema.encodeSync(ReportEnvelope)(envelope))}\n`;
+}
+
+export const runCli = Effect.fn('runCli')(function* (
+  argv: ReadonlyArray<string>,
+): Effect.fn.Return<CliResult> {
+  const decoded = yield* decodeInvocation(argv).pipe(Effect.result);
+
+  if (Result.isFailure(decoded)) {
+    const error = decoded.failure;
+    const envelope: ReportEnvelopeValue = {
+      schemaVersion: REPORT_SCHEMA_VERSION,
+      command: error.command,
+      ok: false,
+      error: {
+        kind: INVALID_INVOCATION_KIND,
+        message: error.message,
+        retryable: false,
+        runId: error.runId,
+      },
+    };
+    return {
+      exitCode: exitCodeForOutcome({ ok: false, kind: INVALID_INVOCATION_KIND }),
+      stdout: renderEnvelope(envelope, error.json),
+    };
+  }
+
+  const { invocation, json } = decoded.success;
+  const report = yield* executePublicCommand(invocation);
+  const envelope: ReportEnvelopeValue = {
+    schemaVersion: REPORT_SCHEMA_VERSION,
+    command: invocation.command,
+    ok: true,
+    data: report,
+  };
+  return {
+    exitCode: exitCodeForOutcome({ ok: true }),
+    stdout: renderEnvelope(envelope, json),
+  };
+});

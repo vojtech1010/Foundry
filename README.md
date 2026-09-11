@@ -29,6 +29,8 @@ Run all checks with `npm run verify`.
 
 ## Current scope
 
-The repository currently contains the toolchain, architectural boundaries, a
-minimal Effect entry point, one test, and the feature specification. Production
-orchestration behavior has not yet been implemented.
+The repository contains the toolchain, architectural boundaries, and the public
+command surface: `run`, `resume`, `status`, `inspect`, `doctor`, `init`,
+`profile-check`, `diagnostic-bundle`, and `cleanup` answer with one versioned
+success or error envelope and stable exit-code meanings. Commands currently
+report `not_available`; workflow execution has not yet been implemented.

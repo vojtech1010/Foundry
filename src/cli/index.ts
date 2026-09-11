@@ -1,11 +1,22 @@
 #!/usr/bin/env node
-import { Console, Effect } from 'effect';
+import { Cause, Effect, Exit } from 'effect';
 
-import { summarizeFoundry } from '../application/foundry.js';
+import { interruptExitCodeFor } from '../domain/public-commands.js';
 
-const program = Effect.gen(function* () {
-  const summary = yield* summarizeFoundry();
-  yield* Console.log(summary);
+import { runCli } from './program.js';
+
+process.on('SIGINT', () => {
+  process.exit(interruptExitCodeFor(process.platform));
 });
 
-await Effect.runPromise(program);
+const exit = await Effect.runPromiseExit(runCli(process.argv.slice(2)));
+
+if (Exit.isSuccess(exit)) {
+  process.stdout.write(exit.value.stdout);
+  process.exitCode = exit.value.exitCode;
+} else if (Cause.hasInterruptsOnly(exit.cause)) {
+  process.exitCode = interruptExitCodeFor(process.platform);
+} else {
+  process.stderr.write(`${Cause.pretty(exit.cause)}\n`);
+  process.exitCode = 1;
+}
