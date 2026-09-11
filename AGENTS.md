@@ -49,6 +49,9 @@ Effect error channel.
 - `tools/oxlint/anti-slop/`: vendored lint plugin; do not hand-edit casually.
 - `.agents/skills/agent-friendly-codebase/`: maintainability workflow and
   references for agents.
+- `.codex/agents/`: role-specific project guidance for Architect, Coder,
+  Tester, and Reviewer. Reviewer uses the skill in AUDIT mode and treats
+  medium-or-higher findings as a return to Coder.
 
 Add deeper modules only when their ownership is clear. Keep public seams narrow
 and keep infrastructure details behind application-owned contracts.
