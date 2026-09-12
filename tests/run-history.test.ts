@@ -1,0 +1,583 @@
+import { describe, expect, it } from '@effect/vitest';
+import { Effect, Layer, Schema } from 'effect';
+import { createHash } from 'node:crypto';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import {
+  RunHistoryConflict,
+  RunHistoryIntegrityError,
+  RunHistoryStorage,
+  RunHistoryStorageError,
+  appendRunEvent,
+  readVerifiedRunHistory,
+} from '../src/application/run-history/index.js';
+import { RunIdentityStore } from '../src/application/run-identity/index.js';
+import {
+  IllegalWorkflowTransition,
+  transitionWorkflow,
+} from '../src/application/workflow-transitions/index.js';
+import {
+  RUN_HISTORY_FILENAME,
+  RUN_HISTORY_WITNESS_FILENAME,
+  RunEventSchema,
+  RunHistoryWitnessSchema,
+  computeRunEventHash,
+  encodeRunEventLine,
+  encodeRunHistoryWitness,
+  sealRunEvent,
+  unsignedRunEvent,
+  verifyRunHistoryEvents,
+} from '../src/domain/run-history.js';
+import { RunHistoryLive } from '../src/platform/run-history.js';
+import { RunIdentityLive } from '../src/platform/run-identity.js';
+
+import type { RunEvent, RunEventDraft, RunEventEnvelope } from '../src/domain/run-history.js';
+import type { WorkflowTransitionRequest } from '../src/domain/workflow.js';
+
+const RUN_ID = 'RUN-HISTORY';
+
+const GENESIS_EVENT_ID = '00000000-0000-4000-8000-000000000001';
+
+const SECOND_EVENT_ID = '00000000-0000-4000-8000-000000000002';
+
+const OCCURRED_AT = '2026-09-13T00:00:00.000Z';
+
+const RUN_CREATED: WorkflowTransitionRequest = {
+  route: 'run-created',
+  provisioning: { source: true, lease: true, storage: true, worktree: true },
+};
+
+const PLAN_ACCEPTED: WorkflowTransitionRequest = {
+  route: 'plan-accepted',
+  planRequiresImplementation: true,
+};
+
+const PLAN_NO_CHANGE: WorkflowTransitionRequest = {
+  route: 'plan-no-change',
+  noChangeCandidateAccepted: true,
+};
+
+const AppLive = Layer.mergeAll(RunHistoryLive, RunIdentityLive);
+
+interface Fixture {
+  readonly runDirectory: string;
+  readonly streamPath: string;
+  readonly witnessPath: string;
+  readonly cleanup: () => void;
+}
+
+function setupFixture(): Fixture {
+  const base = mkdtempSync(join(tmpdir(), 'foundry-run-history-'));
+  const runDirectory = join(base, '.agent', 'runs', RUN_ID);
+  mkdirSync(runDirectory, { recursive: true });
+  return {
+    runDirectory,
+    streamPath: join(runDirectory, RUN_HISTORY_FILENAME),
+    witnessPath: join(runDirectory, RUN_HISTORY_WITNESS_FILENAME),
+    cleanup: () => {
+      rmSync(base, { recursive: true, force: true });
+    },
+  };
+}
+
+function createRun(runDirectory: string) {
+  return transitionWorkflow({
+    runDirectory,
+    runId: RUN_ID,
+    request: RUN_CREATED,
+  }).pipe(Effect.provide(AppLive));
+}
+
+function verifyHistory(runDirectory: string) {
+  return readVerifiedRunHistory({
+    runDirectory,
+    runId: RUN_ID,
+    createIfMissing: false,
+  }).pipe(Effect.provide(RunHistoryLive));
+}
+
+const RunEventJson = Schema.fromJsonString(RunEventSchema);
+
+function readEvents(runDirectory: string): ReadonlyArray<RunEvent> {
+  const lines = readFileSync(join(runDirectory, RUN_HISTORY_FILENAME), 'utf8').split('\n');
+  lines.pop();
+  return lines.map((line) =>
+    Schema.decodeUnknownSync(RunEventJson, { onExcessProperty: 'error' })(line),
+  );
+}
+
+function writeStream(runDirectory: string, text: string): void {
+  writeFileSync(join(runDirectory, RUN_HISTORY_FILENAME), text);
+}
+
+function expectIntegrity(cause: unknown, expectedText: string): RunHistoryIntegrityError {
+  expect(cause).toBeInstanceOf(RunHistoryIntegrityError);
+  if (!(cause instanceof RunHistoryIntegrityError)) {
+    throw new Error(`Expected a run history integrity error but received: ${String(cause)}`);
+  }
+  expect(cause.message).toContain('investigate run integrity');
+  expect(cause.message).toContain(expectedText);
+  return cause;
+}
+
+function genesisEnvelope(runId: string): RunEventEnvelope {
+  return {
+    schemaVersion: 1,
+    runId,
+    revision: 1,
+    eventId: GENESIS_EVENT_ID,
+    occurredAt: OCCURRED_AT,
+    previousEventHash: null,
+  };
+}
+
+describe('run history event contract', () => {
+  it('seals closed events with a canonical chained hash', () => {
+    const envelope = genesisEnvelope('RUN-1');
+    const draft = {
+      type: 'workflow-transition',
+      payload: { route: 'run-created', from: null, to: 'planning', checkpoint: null },
+    } satisfies RunEventDraft;
+    const sealed = sealRunEvent(envelope, draft);
+
+    const canonicalBody =
+      '{"eventId":"00000000-0000-4000-8000-000000000001","occurredAt":"2026-09-13T00:00:00.000Z","payload":{"checkpoint":null,"from":null,"route":"run-created","to":"planning"},"previousEventHash":null,"revision":1,"runId":"RUN-1","schemaVersion":1,"type":"workflow-transition"}';
+    const expectedHash = createHash('sha256').update(`\n${canonicalBody}`, 'utf8').digest('hex');
+
+    expect(sealed.eventHash).toBe(expectedHash);
+    expect(computeRunEventHash(unsignedRunEvent(sealed))).toBe(expectedHash);
+
+    const decoded = Schema.decodeUnknownSync(RunEventJson, { onExcessProperty: 'error' })(
+      JSON.stringify(sealed),
+    );
+    expect(decoded).toEqual(sealed);
+
+    for (const invalid of [
+      { ...sealed, type: 'unknown-event' },
+      { ...sealed, payload: { ...sealed.payload, extra: true } },
+      { ...sealed, revision: 1.5 },
+      { ...sealed, eventId: 'not-a-uuid' },
+      { ...sealed, occurredAt: '2026-09-13' },
+      { ...sealed, eventHash: 'not-a-hash' },
+    ]) {
+      expect(() =>
+        Schema.decodeUnknownSync(RunEventJson, { onExcessProperty: 'error' })(
+          JSON.stringify(invalid),
+        ),
+      ).toThrow();
+    }
+  });
+
+  it('keeps the chain verifiable and rejects broken payload semantics', () => {
+    const genesis = sealRunEvent(genesisEnvelope('RUN-1'), {
+      type: 'run-created',
+      payload: { taskId: 'TASK-1' },
+    });
+    const transition = sealRunEvent(
+      {
+        ...genesisEnvelope('RUN-1'),
+        revision: 2,
+        eventId: SECOND_EVENT_ID,
+        previousEventHash: genesis.eventHash,
+      },
+      {
+        type: 'workflow-transition',
+        payload: { route: 'review-approved', from: 'planning', to: 'completed', checkpoint: null },
+      },
+    );
+
+    const illegal = verifyRunHistoryEvents([genesis, transition], 'RUN-1');
+    expect(illegal.ok).toBe(false);
+    if (!illegal.ok) {
+      expect(illegal.problem).toContain('not allowed from');
+    }
+
+    const mismatchedRun = verifyRunHistoryEvents([genesis], 'RUN-OTHER');
+    expect(mismatchedRun.ok).toBe(false);
+    if (!mismatchedRun.ok) {
+      expect(mismatchedRun.problem).toContain('RUN-1');
+    }
+
+    const tamperedHash: RunEvent = { ...genesis, eventHash: 'f'.repeat(64) };
+    const hashProblem = verifyRunHistoryEvents([tamperedHash], 'RUN-1');
+    expect(hashProblem.ok).toBe(false);
+    if (!hashProblem.ok) {
+      expect(hashProblem.problem).toContain('hash does not match');
+    }
+
+    const gap = verifyRunHistoryEvents([genesis, transition], 'RUN-1');
+    expect(gap.ok).toBe(false);
+  });
+});
+
+describe('append-only run history with live storage', () => {
+  it.effect('appends consecutive chained events and preserves rejected operations', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* createRun(fixture.runDirectory);
+        yield* transitionWorkflow({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          request: PLAN_ACCEPTED,
+        }).pipe(Effect.provide(AppLive));
+
+        const events = readEvents(fixture.runDirectory);
+        expect(events.map((event) => event.revision)).toEqual([1, 2]);
+        expect(events[0]).toMatchObject({ previousEventHash: null });
+        expect(events[1]).toMatchObject({ previousEventHash: events[0]?.eventHash });
+        expect(verifyRunHistoryEvents(events, RUN_ID).ok).toBe(true);
+
+        const witness = Schema.decodeUnknownSync(Schema.fromJsonString(RunHistoryWitnessSchema), {
+          onExcessProperty: 'error',
+        })(readFileSync(fixture.witnessPath, 'utf8'));
+        expect(witness).toEqual({
+          schemaVersion: 1,
+          runId: RUN_ID,
+          revision: 2,
+          eventHash: events[1]?.eventHash,
+        });
+
+        const before = readFileSync(fixture.streamPath, 'utf8');
+        const refusal = yield* transitionWorkflow({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          request: PLAN_ACCEPTED,
+        }).pipe(Effect.provide(AppLive), Effect.flip);
+        expect(refusal).toBeInstanceOf(IllegalWorkflowTransition);
+        expect(readFileSync(fixture.streamPath, 'utf8')).toBe(before);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('detects every truncated, malformed, or discontinuous history', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* createRun(fixture.runDirectory);
+        yield* transitionWorkflow({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          request: PLAN_ACCEPTED,
+        }).pipe(Effect.provide(AppLive));
+
+        const validStream = readFileSync(fixture.streamPath, 'utf8');
+        const validWitness = readFileSync(fixture.witnessPath, 'utf8');
+
+        const removeLastLine = (text: string): string => {
+          const lines = text.split('\n');
+          lines.pop();
+          lines.pop();
+          return `${lines.join('\n')}\n`;
+        };
+
+        writeStream(fixture.runDirectory, removeLastLine(validStream));
+        const truncated = yield* verifyHistory(fixture.runDirectory).pipe(Effect.flip);
+        expectIntegrity(truncated, 'witness does not match');
+        expect(readFileSync(fixture.streamPath, 'utf8')).toBe(removeLastLine(validStream));
+
+        writeStream(fixture.runDirectory, `${validStream}not json\n`);
+        const malformed = yield* verifyHistory(fixture.runDirectory).pipe(Effect.flip);
+        expectIntegrity(malformed, 'not a valid event');
+
+        writeStream(fixture.runDirectory, validStream.slice(0, -1));
+        const noTerminalNewline = yield* verifyHistory(fixture.runDirectory).pipe(Effect.flip);
+        expectIntegrity(noTerminalNewline, 'terminal newline');
+
+        writeStream(fixture.runDirectory, validStream.replace('"revision":2', '"revision":3'));
+        const revisionGap = yield* verifyHistory(fixture.runDirectory).pipe(Effect.flip);
+        expectIntegrity(revisionGap, 'revision');
+
+        writeStream(fixture.runDirectory, validStream.replace('"to":"coding"', '"to":"reviewing"'));
+        const tamperedPayload = yield* verifyHistory(fixture.runDirectory).pipe(Effect.flip);
+        expectIntegrity(tamperedPayload, 'hash does not match');
+
+        writeStream(fixture.runDirectory, validStream);
+        rmSync(fixture.witnessPath);
+        const missingWitness = yield* verifyHistory(fixture.runDirectory).pipe(Effect.flip);
+        expectIntegrity(missingWitness, 'witness is missing');
+
+        writeFileSync(fixture.witnessPath, validWitness);
+        rmSync(fixture.streamPath);
+        const missingStream = yield* verifyHistory(fixture.runDirectory).pipe(Effect.flip);
+        expectIntegrity(missingStream, 'witness remains');
+
+        mkdirSync(fixture.streamPath);
+        const directoryStream = yield* verifyHistory(fixture.runDirectory).pipe(Effect.flip);
+        expectIntegrity(directoryStream, 'not a regular file');
+
+        rmSync(fixture.streamPath, { recursive: true });
+        rmSync(fixture.witnessPath);
+        const absentHistory = yield* verifyHistory(fixture.runDirectory).pipe(Effect.flip);
+        expectIntegrity(absentHistory, 'no canonical history stream');
+
+        writeFileSync(fixture.witnessPath, validWitness);
+        writeStream(fixture.runDirectory, '');
+        const emptyStream = yield* verifyHistory(fixture.runDirectory).pipe(Effect.flip);
+        expectIntegrity(emptyStream, 'terminal newline');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('detects a history that belongs to another run', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        const foreignGenesis = sealRunEvent(genesisEnvelope('RUN-OTHER'), {
+          type: 'run-created',
+          payload: { taskId: 'TASK-1' },
+        });
+        writeFileSync(fixture.streamPath, Buffer.from(encodeRunEventLine(foreignGenesis)));
+        writeFileSync(
+          fixture.witnessPath,
+          Buffer.from(
+            encodeRunHistoryWitness({
+              schemaVersion: 1,
+              runId: RUN_ID,
+              revision: 1,
+              eventHash: foreignGenesis.eventHash,
+            }),
+          ),
+        );
+
+        const error = yield* verifyHistory(fixture.runDirectory).pipe(Effect.flip);
+        expectIntegrity(error, 'RUN-OTHER');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+});
+
+describe('collision handling and interrupted publication', () => {
+  it.effect('re-reads and re-evaluates a stale writer against the real latest history', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* createRun(fixture.runDirectory);
+        const live = yield* RunHistoryStorage.pipe(Effect.provide(RunHistoryLive));
+        const identity = yield* RunIdentityStore.pipe(Effect.provide(RunIdentityLive));
+
+        let injected = false;
+        const proxy = RunHistoryStorage.of({
+          ...live,
+          readHistoryFiles: (runDirectory: string) =>
+            Effect.gen(function* () {
+              const snapshot = yield* live.readHistoryFiles(runDirectory);
+              if (!injected) {
+                injected = true;
+                yield* appendRunEvent({
+                  runDirectory,
+                  runId: RUN_ID,
+                  createIfMissing: false,
+                  build: () =>
+                    Effect.succeed<RunEventDraft>({
+                      type: 'cleanup-progress',
+                      payload: { outcome: 'warning', detail: 'competing writer' },
+                    }),
+                }).pipe(Effect.provideService(RunHistoryStorage, live), Effect.orDie);
+              }
+              return snapshot;
+            }),
+        });
+
+        const report = yield* transitionWorkflow({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          request: PLAN_ACCEPTED,
+        }).pipe(
+          Effect.provideService(RunHistoryStorage, proxy),
+          Effect.provideService(RunIdentityStore, identity),
+        );
+        expect(report.workflowState).toBe('coding');
+
+        const events = readEvents(fixture.runDirectory);
+        expect(events).toHaveLength(3);
+        expect(events.map((event) => event.revision)).toEqual([1, 2, 3]);
+        expect(events[1]).toMatchObject({
+          type: 'cleanup-progress',
+          payload: { outcome: 'warning', detail: 'competing writer' },
+        });
+        expect(events[2]).toMatchObject({
+          type: 'workflow-transition',
+          payload: { route: 'plan-accepted', from: 'planning', to: 'coding' },
+        });
+        expect(verifyRunHistoryEvents(events, RUN_ID).ok).toBe(true);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('returns a typed refusal when the winner made the operation illegal', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* createRun(fixture.runDirectory);
+        const live = yield* RunHistoryStorage.pipe(Effect.provide(RunHistoryLive));
+        const identity = yield* RunIdentityStore.pipe(Effect.provide(RunIdentityLive));
+
+        let injected = false;
+        const proxy = RunHistoryStorage.of({
+          ...live,
+          readHistoryFiles: (runDirectory: string) =>
+            Effect.gen(function* () {
+              const snapshot = yield* live.readHistoryFiles(runDirectory);
+              if (!injected) {
+                injected = true;
+                yield* transitionWorkflow({
+                  runDirectory,
+                  runId: RUN_ID,
+                  request: PLAN_ACCEPTED,
+                }).pipe(
+                  Effect.provideService(RunHistoryStorage, live),
+                  Effect.provideService(RunIdentityStore, identity),
+                  Effect.orDie,
+                );
+              }
+              return snapshot;
+            }),
+        });
+
+        const refusal = yield* transitionWorkflow({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          request: PLAN_NO_CHANGE,
+        }).pipe(
+          Effect.provideService(RunHistoryStorage, proxy),
+          Effect.provideService(RunIdentityStore, identity),
+          Effect.flip,
+        );
+        expect(refusal).toBeInstanceOf(IllegalWorkflowTransition);
+        if (!(refusal instanceof IllegalWorkflowTransition)) {
+          throw new Error('Expected an IllegalWorkflowTransition.');
+        }
+        expect(refusal.from).toBe('coding');
+        expect(refusal.route).toBe('plan-no-change');
+
+        const events = readEvents(fixture.runDirectory);
+        expect(events).toHaveLength(2);
+        expect(events[1]).toMatchObject({
+          type: 'workflow-transition',
+          payload: { route: 'plan-accepted', from: 'planning', to: 'coding' },
+        });
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('bounded retries stop with a typed conflict instead of overwriting', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* createRun(fixture.runDirectory);
+        const live = yield* RunHistoryStorage.pipe(Effect.provide(RunHistoryLive));
+        const conflicting = RunHistoryStorage.of({
+          ...live,
+          commitHistory: () =>
+            Effect.fail(new RunHistoryConflict({ message: 'forced conflict', runId: RUN_ID })),
+        });
+
+        const error = yield* appendRunEvent({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          createIfMissing: false,
+          build: () =>
+            Effect.succeed<RunEventDraft>({
+              type: 'cleanup-progress',
+              payload: { outcome: 'succeeded', detail: 'never accepted' },
+            }),
+        }).pipe(Effect.provideService(RunHistoryStorage, conflicting), Effect.flip);
+        expect(error).toBeInstanceOf(RunHistoryConflict);
+        expect(readEvents(fixture.runDirectory)).toHaveLength(1);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('stops for human investigation when publication was interrupted', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* createRun(fixture.runDirectory);
+        const live = yield* RunHistoryStorage.pipe(Effect.provide(RunHistoryLive));
+        const interrupted = RunHistoryStorage.of({
+          ...live,
+          commitHistory: (options) =>
+            Effect.gen(function* () {
+              yield* live.commitHistory({
+                ...options,
+                nextStreamBytes: options.expectedStreamBytes ?? new Uint8Array(),
+              });
+              return yield* new RunHistoryStorageError({
+                message: 'simulated interruption after the witness write',
+                runId: RUN_ID,
+              });
+            }),
+        });
+
+        const error = yield* appendRunEvent({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          createIfMissing: false,
+          build: () =>
+            Effect.succeed<RunEventDraft>({
+              type: 'cleanup-progress',
+              payload: { outcome: 'failed', detail: 'interrupted' },
+            }),
+        }).pipe(Effect.provideService(RunHistoryStorage, interrupted), Effect.flip);
+        expect(error).toBeInstanceOf(RunHistoryStorageError);
+
+        const events = readEvents(fixture.runDirectory);
+        expect(events).toHaveLength(1);
+        const integrity = yield* verifyHistory(fixture.runDirectory).pipe(Effect.flip);
+        expectIntegrity(integrity, 'witness does not match');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('keeps the accepted prefix intact when a publication fails outright', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* createRun(fixture.runDirectory);
+        const before = readFileSync(fixture.streamPath, 'utf8');
+        const live = yield* RunHistoryStorage.pipe(Effect.provide(RunHistoryLive));
+        const failing = RunHistoryStorage.of({
+          ...live,
+          commitHistory: () =>
+            Effect.fail(new RunHistoryStorageError({ message: 'disk is full', runId: RUN_ID })),
+        });
+
+        const error = yield* appendRunEvent({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          createIfMissing: false,
+          build: () =>
+            Effect.succeed<RunEventDraft>({
+              type: 'cleanup-progress',
+              payload: { outcome: 'warning', detail: 'not accepted' },
+            }),
+        }).pipe(Effect.provideService(RunHistoryStorage, failing), Effect.flip);
+        expect(error).toBeInstanceOf(RunHistoryStorageError);
+        expect(readFileSync(fixture.streamPath, 'utf8')).toBe(before);
+
+        const history = yield* verifyHistory(fixture.runDirectory);
+        expect(history.head.revision).toBe(1);
+        expect(history.derived.state).toBe('planning');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+});

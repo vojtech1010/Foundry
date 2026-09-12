@@ -358,6 +358,16 @@ the canonical stream. The platform storage adapter must pass crash-injection
 tests for Linux and Windows. A stale writer receives a revision conflict and
 replays; it never overwrites newer events.
 
+The implemented slice records run creation, workflow transitions, retry or
+repair attempts, and cleanup progress. A same-directory `events.witness.json`
+records the last accepted revision and hash as an independently durable
+append-integrity floor: a missing witness, a stream without its terminal
+newline, or a revision, link, or payload discontinuity stops the run for human
+integrity investigation instead of repairing or truncating history.
+`workflow-state.json` and `cleanup-progress.json` remain derived reports that
+never advance a run, and a report that disagrees with verified history is
+refused. Open/resume replay and repository ownership remain later slices.
+
 The repository lease records a random owner ID, host identity, process ID and
 process start identity, acquisition time, heartbeat, and expiry. The owner
 renews before half the lease duration. Automatic takeover requires both an

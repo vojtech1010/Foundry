@@ -107,6 +107,23 @@ export const WorkflowStateRecordSchema = Schema.Union([
 
 export type WorkflowStateRecord = (typeof WorkflowStateRecordSchema)['Type'];
 
+export interface WorkflowProgressView {
+  readonly state: WorkflowState;
+  readonly checkpoint: WorkflowState | null;
+  readonly attempts: ReadonlyArray<WorkflowAttempt>;
+}
+
+export function workflowProgressViewOf(record: WorkflowStateRecord): WorkflowProgressView {
+  if (record.schemaVersion === WORKFLOW_STATE_PROGRESS_SCHEMA_VERSION) {
+    return {
+      state: record.state,
+      checkpoint: record.checkpoint,
+      attempts: record.attempts,
+    };
+  }
+  return { state: record.state, checkpoint: null, attempts: [] };
+}
+
 export const CLEANUP_PROGRESS_FILENAME = 'cleanup-progress.json' as const;
 
 export const CLEANUP_PROGRESS_SCHEMA_VERSION = 1 as const;
@@ -398,7 +415,10 @@ function hasText(value: string | null): boolean {
   return value !== null && value.trim().length > 0;
 }
 
-function allowsRouteFrom(scope: WorkflowRouteScope, state: WorkflowState | null): boolean {
+export function allowsWorkflowRouteFrom(
+  scope: WorkflowRouteScope,
+  state: WorkflowState | null,
+): boolean {
   if (scope === 'creation') {
     return state === null;
   }
@@ -821,7 +841,7 @@ export function evaluateWorkflowTransition(
       `Workflow state "${context.state}" is terminal; no further workflow transition is allowed.`,
     );
   }
-  if (!allowsRouteFrom(definition.from, context.state)) {
+  if (!allowsWorkflowRouteFrom(definition.from, context.state)) {
     const from = context.state ?? 'a run with no recorded state';
     return refused(
       nominalTarget,

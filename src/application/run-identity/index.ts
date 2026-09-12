@@ -17,12 +17,20 @@ import {
   WORKFLOW_STATE_FILENAME,
   WORKFLOW_STATE_SCHEMA_VERSION,
   WorkflowStateRecordSchema,
+  workflowProgressViewOf,
 } from '../../domain/workflow.js';
 import { decodeProjectConfiguration } from '../project-configuration.js';
 import { ReadinessFiles } from '../readiness/index.js';
+import {
+  RunHistoryIntegrityError,
+  appendRunEvent,
+  readVerifiedRunHistory,
+} from '../run-history/index.js';
 
+import type { RunHistoryStorage, RunHistoryStorageError } from '../run-history/index.js';
+import type { RunEventDraft } from '../../domain/run-history.js';
 import type { ProjectConfiguration } from '../../domain/project-configuration.js';
-import type { WorkflowState, WorkflowStateRecord } from '../../domain/workflow.js';
+import type { WorkflowAttempt, WorkflowState, WorkflowStateRecord } from '../../domain/workflow.js';
 
 export class InvalidRunRequest extends Schema.TaggedError<InvalidRunRequest>()(
   'InvalidRunRequest',
@@ -179,7 +187,7 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
 ): Effect.fn.Return<
   RecordedRunIdentityReport,
   RunIdentityError,
-  ReadinessFiles | RunIdentityStore
+  ReadinessFiles | RunIdentityStore | RunHistoryStorage
 > {
   const store = yield* RunIdentityStore;
   const runId = options.runId;
@@ -294,6 +302,16 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
     yield* store.writeFileBytes(originalPath, originalBytes);
     yield* store.writeFileBytes(normalizedPath, normalizedBytes);
     yield* store.writeFileBytes(identityPath, identityBytes);
+    yield* appendRunEvent({
+      runDirectory,
+      runId,
+      createIfMissing: true,
+      build: () =>
+        Effect.succeed<RunEventDraft>({
+          type: 'run-created',
+          payload: { taskId: options.taskId },
+        }),
+    });
     yield* store.writeFileBytes(statePath, stateBytes);
   }).pipe(
     Effect.mapError(
@@ -326,12 +344,32 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   };
 });
 
+function attemptsMatch(
+  derived: ReadonlyArray<WorkflowAttempt>,
+  reported: ReadonlyArray<WorkflowAttempt>,
+): boolean {
+  return (
+    derived.length === reported.length &&
+    derived.every((attempt, index) => {
+      const other = reported[index];
+      return (
+        other !== undefined &&
+        attempt.sequence === other.sequence &&
+        attempt.kind === other.kind &&
+        attempt.role === other.role &&
+        attempt.state === other.state &&
+        attempt.reason === other.reason
+      );
+    })
+  );
+}
+
 export const readRunWorkflowState = Effect.fn('readRunWorkflowState')(function* (
   options: ReadRunWorkflowStateOptions,
 ): Effect.fn.Return<
   RunWorkflowStateReport,
-  RunStateUnavailable,
-  ReadinessFiles | RunIdentityStore
+  RunStateUnavailable | RunHistoryIntegrityError | RunHistoryStorageError,
+  ReadinessFiles | RunIdentityStore | RunHistoryStorage
 > {
   const runId = options.runId;
 
@@ -347,10 +385,44 @@ export const readRunWorkflowState = Effect.fn('readRunWorkflowState')(function* 
   );
 
   const runDirectory = runDirectoryOf(configuration, runId);
+  const history = yield* readVerifiedRunHistory({ runDirectory, runId, createIfMissing: false });
   const record = yield* readWorkflowStateRecord(runDirectory, runId);
+  const reported = workflowProgressViewOf(record);
+  const derived = history.derived;
 
-  return { runId, workflowState: record.state };
+  if (derived.state === null) {
+    return yield* historyDisagreement(
+      runId,
+      runDirectory,
+      'the verified history records no workflow state',
+    );
+  }
+  if (
+    reported.state !== derived.state ||
+    reported.checkpoint !== derived.checkpoint ||
+    !attemptsMatch(derived.attempts, reported.attempts)
+  ) {
+    return yield* historyDisagreement(
+      runId,
+      runDirectory,
+      `the derived workflow report records state "${reported.state}" while the verified history records "${derived.state}"`,
+    );
+  }
+
+  return { runId, workflowState: derived.state };
 });
+
+function historyDisagreement(
+  runId: string,
+  runDirectory: string,
+  problem: string,
+): RunHistoryIntegrityError {
+  return new RunHistoryIntegrityError({
+    message: `The derived workflow report for run "${runId}" at ${runDirectory} disagrees with the verified run history: ${problem}. A person must investigate run integrity before this run advances.`,
+    runId,
+    problem,
+  });
+}
 
 export const readWorkflowStateRecord = Effect.fn('readWorkflowStateRecord')(function* (
   runDirectory: string,
