@@ -32,16 +32,24 @@ statistics.
 Status is not proof that an artifact is valid or a PR exists. Durable validation
 and publication journals remain authoritative.
 
-The current implementation writes exactly one authoritative workflow state per
-run to `.agent/runs/<run-id>/workflow-state.json` as a versioned record with the
-run ID and one named state. `run` retains the request files and the initial
-`planning` record as one initialization; if any write fails, initialization
-removes the run directory and reports failure, so request files or a directory
-alone never establish success. `status` validates and reports that single state.
-A missing, malformed, unknown, or wrong-run record fails the command with a
-`failed` report and never synthesizes a state or infers one from other files.
-Active role/attempt details, elapsed time, last event, branch/commit reporting,
-transition enforcement, and resume/recovery are not delivered yet.
+The current implementation keeps the canonical append-only history at
+`.agent/runs/<run-id>/events.jsonl` with its `events.witness.json` integrity
+floor. `run` retains the request files and appends the run-creation event as one
+initialization; if any write fails, initialization removes the run directory and
+reports failure, so request files or a directory alone never establish success.
+`status` verifies the complete history first, rebuilds current progress from it,
+and returns the verified state, checkpoint, attempts, cleanup progress, and the
+canonical history path with the accepted revision so a later inspection surface
+can point at the source of truth; its presented output still contains only the
+run ID and verified state. `workflow-state.json` is a disposable derived report:
+missing, malformed, wrong-run, or disagreeing records are replaced atomically
+from verified history and are never read to infer status, while a report that
+disagrees with a verified history is never reported. Cleanup progress is rebuilt
+the same way from cleanup events without changing the accepted result. An
+incomplete or invalid stream or witness fails the command with a typed integrity
+report naming the canonical history and never repairs, truncates, appends, or
+synthesizes state. Active role/attempt details, elapsed time, last event,
+branch/commit reporting, and resume/recovery are not delivered yet.
 
 ## Inspect artifacts and findings
 

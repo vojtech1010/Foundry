@@ -363,10 +363,17 @@ repair attempts, and cleanup progress. A same-directory `events.witness.json`
 records the last accepted revision and hash as an independently durable
 append-integrity floor: a missing witness, a stream without its terminal
 newline, or a revision, link, or payload discontinuity stops the run for human
-integrity investigation instead of repairing or truncating history.
-`workflow-state.json` and `cleanup-progress.json` remain derived reports that
-never advance a run, and a report that disagrees with verified history is
-refused. Open/resume replay and repository ownership remain later slices.
+integrity investigation instead of repairing or truncating history, and the
+stream, witness, and reports stay untouched.
+
+Whenever an existing run is opened or read, Foundry replays and verifies the
+complete stream and witness before reading any report, then rebuilds workflow
+state, checkpoint, attempts, and the latest cleanup progress from that history.
+`workflow-state.json` and `cleanup-progress.json` are derived reports that never
+advance a run: a missing, malformed, wrong-run, or disagreeing report is
+disposable and is replaced atomically from verified history, a report with no
+backing event is removed, and no report is used to choose a transition, retry,
+completion, or resume. Repository ownership remains a later slice.
 
 The repository lease records a random owner ID, host identity, process ID and
 process start identity, acquisition time, heartbeat, and expiry. The owner

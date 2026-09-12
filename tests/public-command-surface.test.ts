@@ -109,6 +109,7 @@ const UntouchedReadiness = Layer.mergeAll(
       readHistoryFiles: (_runDirectory: string) =>
         untouchedReadiness('runHistory.readHistoryFiles'),
       commitHistory: (_options) => untouchedReadiness('runHistory.commitHistory'),
+      replaceDerivedReports: (_options) => untouchedReadiness('runHistory.replaceDerivedReports'),
     }),
   ),
 );

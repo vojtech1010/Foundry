@@ -4,26 +4,21 @@ import { join } from 'node:path';
 import { Identifier } from '../../domain/run-identity.js';
 import {
   CLEANUP_PROGRESS_FILENAME,
-  CLEANUP_PROGRESS_SCHEMA_VERSION,
   WORKFLOW_ATTEMPT_KINDS,
-  WORKFLOW_STATE_FILENAME,
-  WORKFLOW_STATE_PROGRESS_SCHEMA_VERSION,
   WORKFLOW_TRANSITION_ROUTE_KINDS,
   WorkflowStateSchema,
   evaluateWorkflowTransition,
   isActiveWorkflowState,
   isTerminalWorkflowState,
 } from '../../domain/workflow.js';
-import { RunIdentityStore, RunStateUnavailable } from '../run-identity/index.js';
+import { RunStateUnavailable, reconcileRunReports } from '../run-identity/index.js';
 import { RunHistoryIntegrityError, appendRunEvent } from '../run-history/index.js';
 
 import type {
   CleanupOutcome,
-  CleanupProgressDocument,
   WorkflowAttempt,
   WorkflowAttemptKind,
   WorkflowAttemptRequest,
-  WorkflowProgressDocument,
   WorkflowState,
   WorkflowTransitionEvaluation,
   WorkflowTransitionRequest,
@@ -31,7 +26,6 @@ import type {
 } from '../../domain/workflow.js';
 import type { RunEventDraft } from '../../domain/run-history.js';
 import type { RunHistoryError, RunHistoryStorage } from '../run-history/index.js';
-import type { RunIdentityStorageError } from '../run-identity/index.js';
 
 export class IllegalWorkflowTransition extends Schema.TaggedError<IllegalWorkflowTransition>()(
   'IllegalWorkflowTransition',
@@ -96,14 +90,6 @@ export interface CleanupProgressReport {
   readonly outcome: CleanupOutcome;
 }
 
-function statePathOf(runDirectory: string): string {
-  return join(runDirectory, WORKFLOW_STATE_FILENAME);
-}
-
-function encodeDocument(document: WorkflowProgressDocument | CleanupProgressDocument): Uint8Array {
-  return new TextEncoder().encode(`${JSON.stringify(document, null, 2)}\n`);
-}
-
 function invalidRunId(runId: string): RunStateUnavailable {
   return new RunStateUnavailable({
     message: `Run ID "${runId}" is not a valid run identifier.`,
@@ -149,10 +135,9 @@ export const transitionWorkflow = Effect.fn('transitionWorkflow')(function* (
   options: TransitionWorkflowOptions,
 ): Effect.fn.Return<
   WorkflowTransitionReport,
-  IllegalWorkflowTransition | RunStateUnavailable | RunIdentityStorageError | RunHistoryError,
-  RunIdentityStore | RunHistoryStorage
+  IllegalWorkflowTransition | RunStateUnavailable | RunHistoryError,
+  RunHistoryStorage
 > {
-  const store = yield* RunIdentityStore;
   const runId = options.runId;
   if (!Schema.is(Identifier)(runId)) {
     return yield* invalidRunId(runId);
@@ -188,14 +173,7 @@ export const transitionWorkflow = Effect.fn('transitionWorkflow')(function* (
       }),
   });
 
-  const document: WorkflowProgressDocument = {
-    schemaVersion: WORKFLOW_STATE_PROGRESS_SCHEMA_VERSION,
-    runId,
-    state: appended.event.payload.to,
-    checkpoint: appended.event.payload.checkpoint,
-    attempts: appended.previous.derived.attempts,
-  };
-  yield* store.writeFileBytes(statePathOf(options.runDirectory), encodeDocument(document));
+  yield* reconcileRunReports({ runDirectory: options.runDirectory, runId });
   return {
     runId,
     route: options.request.route,
@@ -208,10 +186,9 @@ export const recordWorkflowAttempt = Effect.fn('recordWorkflowAttempt')(function
   options: RecordWorkflowAttemptOptions,
 ): Effect.fn.Return<
   WorkflowAttemptReport,
-  IllegalWorkflowAttempt | RunStateUnavailable | RunIdentityStorageError | RunHistoryError,
-  RunIdentityStore | RunHistoryStorage
+  IllegalWorkflowAttempt | RunStateUnavailable | RunHistoryError,
+  RunHistoryStorage
 > {
-  const store = yield* RunIdentityStore;
   const runId = options.runId;
   if (!Schema.is(Identifier)(runId)) {
     return yield* invalidRunId(runId);
@@ -282,26 +259,17 @@ export const recordWorkflowAttempt = Effect.fn('recordWorkflowAttempt')(function
       }),
   });
 
-  const recorded = appended.event.payload;
-  const document: WorkflowProgressDocument = {
-    schemaVersion: WORKFLOW_STATE_PROGRESS_SCHEMA_VERSION,
-    runId,
-    state: recorded.state,
-    checkpoint: appended.previous.derived.checkpoint,
-    attempts: [...appended.previous.derived.attempts, recorded],
-  };
-  yield* store.writeFileBytes(statePathOf(options.runDirectory), encodeDocument(document));
-  return { runId, workflowState: recorded.state, attempt: recorded };
+  yield* reconcileRunReports({ runDirectory: options.runDirectory, runId });
+  return { runId, workflowState: appended.event.payload.state, attempt: appended.event.payload };
 });
 
 export const recordCleanupProgress = Effect.fn('recordCleanupProgress')(function* (
   options: RecordCleanupProgressOptions,
 ): Effect.fn.Return<
   CleanupProgressReport,
-  RunStateUnavailable | RunIdentityStorageError | RunHistoryError,
-  RunIdentityStore | RunHistoryStorage
+  RunStateUnavailable | RunHistoryError,
+  RunHistoryStorage
 > {
-  const store = yield* RunIdentityStore;
   const runId = options.runId;
   if (!Schema.is(Identifier)(runId)) {
     return yield* invalidRunId(runId);
@@ -318,13 +286,10 @@ export const recordCleanupProgress = Effect.fn('recordCleanupProgress')(function
       }),
   });
 
-  const cleanupProgressPath = join(options.runDirectory, CLEANUP_PROGRESS_FILENAME);
-  const document: CleanupProgressDocument = {
-    schemaVersion: CLEANUP_PROGRESS_SCHEMA_VERSION,
+  yield* reconcileRunReports({ runDirectory: options.runDirectory, runId });
+  return {
     runId,
+    cleanupProgressPath: join(options.runDirectory, CLEANUP_PROGRESS_FILENAME),
     outcome: options.outcome,
-    detail: options.detail,
   };
-  yield* store.writeFileBytes(cleanupProgressPath, encodeDocument(document));
-  return { runId, cleanupProgressPath, outcome: options.outcome };
 });

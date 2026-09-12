@@ -196,7 +196,9 @@ checks both the route and the fact against the durable record. An unsupported
 jump or an unproven fact is refused with the current state, the requested state,
 and the missing route or fact; a refused operation writes nothing.
 
-Accepted transitions write one version 2 `workflow-state.json` document:
+Accepted transitions append a chained event to the canonical history and then
+rebuild the derived `workflow-state.json` report from that accepted history. The
+rebuilt report is one version 2 document:
 
 ```json
 {
@@ -208,10 +210,13 @@ Accepted transitions write one version 2 `workflow-state.json` document:
 }
 ```
 
-Version 1 records written by run creation remain readable and are upgraded to
-version 2 by the next accepted transition. `checkpoint` records the resume
-destination while a run is `blocked` or `publish_failed`, and `resume` may
-return only to that recorded checkpoint once its prerequisite is valid.
+Version 1 records written by earlier Foundry versions remain readable and are
+replaced by the version 2 rebuild on the next open or accepted transition. The
+report is disposable: a missing, malformed, wrong-run, or disagreeing report is
+regenerated atomically from verified history, and no report is ever used to
+advance the run. `checkpoint` records the resume destination while a run is
+`blocked` or `publish_failed`, and `resume` may return only to that recorded
+checkpoint once its prerequisite is valid.
 
 Same-state retries and control repairs append a distinct
 `{ sequence, kind, role, state, reason }` attempt while keeping the workflow
@@ -219,7 +224,8 @@ state. They are recorded only while a stage is active; terminal and recoverable
 states accept no attempt. A rejected operation appends nothing, and an exhausted
 correction or retry budget never advances a state.
 
-Cleanup progress is a separate record at `cleanup-progress.json` in the run
-directory with outcome `succeeded`, `warning`, or `failed`. Recording cleanup
-never reads or rewrites `workflow-state.json`, so a `completed`,
-`completed_no_change`, `failed`, or `abandoned` result is preserved.
+Cleanup progress is rebuilt from the latest cleanup event into
+`cleanup-progress.json` in the run directory with outcome `succeeded`,
+`warning`, or `failed`. The same rebuild verifies the workflow report against the
+same history, so a `completed`, `completed_no_change`, `failed`, or `abandoned`
+result is preserved rather than changed by cleanup.

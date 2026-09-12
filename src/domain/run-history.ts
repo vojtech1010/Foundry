@@ -147,6 +147,7 @@ export interface RunHistoryDerivedState {
   readonly state: WorkflowState | null;
   readonly checkpoint: WorkflowState | null;
   readonly attempts: ReadonlyArray<WorkflowAttempt>;
+  readonly cleanupProgress: CleanupProgressPayload | null;
 }
 
 export type RunHistoryVerification =
@@ -329,6 +330,7 @@ export function verifyRunHistoryEvents(
 ): RunHistoryVerification {
   let state: WorkflowState | null = null;
   let checkpoint: WorkflowState | null = null;
+  let cleanupProgress: CleanupProgressPayload | null = null;
   const attempts: Array<WorkflowAttempt> = [];
   let previousHash: string | null = null;
 
@@ -397,6 +399,7 @@ export function verifyRunHistoryEvents(
         break;
       }
       case 'cleanup-progress': {
+        cleanupProgress = event.payload;
         break;
       }
     }
@@ -406,6 +409,6 @@ export function verifyRunHistoryEvents(
   return {
     ok: true,
     head: { revision: events.length, eventHash: previousHash },
-    derived: { state, checkpoint, attempts },
+    derived: { state, checkpoint, attempts, cleanupProgress },
   };
 }
