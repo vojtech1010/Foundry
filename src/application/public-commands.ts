@@ -3,6 +3,7 @@ import { Effect } from 'effect';
 import { NOT_AVAILABLE } from '../domain/public-commands.js';
 import { PRODUCT_NAME } from '../domain/workflow.js';
 import { checkReadiness } from './readiness/index.js';
+import { previewRunLocations } from './preview-run-locations/index.js';
 
 import type { PublicCommandInvocation } from '../domain/public-commands.js';
 import type {
@@ -12,6 +13,10 @@ import type {
   ReadinessGit,
   ReadinessHost,
 } from './readiness/index.js';
+import type {
+  PreviewLocationsError,
+  PreviewLocationsReport,
+} from './preview-run-locations/index.js';
 
 export interface StubCommandReport {
   readonly availability: typeof NOT_AVAILABLE;
@@ -20,7 +25,7 @@ export interface StubCommandReport {
   readonly taskId?: string | undefined;
 }
 
-export type PublicCommandReport = StubCommandReport | DoctorReport;
+export type PublicCommandReport = StubCommandReport | DoctorReport | PreviewLocationsReport;
 
 function stubReport(invocation: PublicCommandInvocation): StubCommandReport {
   const report: StubCommandReport = {
@@ -39,16 +44,25 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
   invocation: PublicCommandInvocation,
 ): Effect.fn.Return<
   PublicCommandReport,
-  ReadinessError,
+  ReadinessError | PreviewLocationsError,
   ReadinessHost | ReadinessFiles | ReadinessGit
 > {
-  if (invocation.command !== 'doctor') {
-    return stubReport(invocation);
+  if (invocation.command === 'doctor') {
+    const configArg = invocation.config;
+    const cwd = invocation.cwd;
+    if (configArg === undefined || cwd === undefined) {
+      return stubReport(invocation);
+    }
+    return yield* checkReadiness({ configArg, cwd });
   }
-  const configArg = invocation.config;
-  const cwd = invocation.cwd;
-  if (configArg === undefined || cwd === undefined) {
-    return stubReport(invocation);
+  if (invocation.command === 'init') {
+    const configArg = invocation.config;
+    const cwd = invocation.cwd;
+    const taskId = invocation.taskId;
+    if (configArg === undefined || cwd === undefined || taskId === undefined) {
+      return stubReport(invocation);
+    }
+    return yield* previewRunLocations({ configArg, cwd, taskId });
   }
-  return yield* checkReadiness({ configArg, cwd });
+  return stubReport(invocation);
 });

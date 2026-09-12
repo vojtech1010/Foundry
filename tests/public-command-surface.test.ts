@@ -143,12 +143,6 @@ const validScenarios: ReadonlyArray<ValidScenario> = [
     taskId: undefined,
   },
   {
-    command: 'init',
-    argv: ['init', '--dry-run', '--config', 'foundry.config.json', '--task-id', 'TASK-1'],
-    runId: undefined,
-    taskId: 'TASK-1',
-  },
-  {
     command: 'profile-check',
     argv: ['profile-check', '--config', 'foundry.config.json'],
     runId: undefined,

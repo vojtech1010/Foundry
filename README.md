@@ -34,5 +34,7 @@ command surface: `run`, `resume`, `status`, `inspect`, `doctor`, `init`,
 `profile-check`, `diagnostic-bundle`, and `cleanup` answer with one versioned
 success or error envelope and stable exit-code meanings. `doctor` validates
 host tooling, the configuration document, run storage, and target repository
-identity without creating a live run; the remaining commands still report
+identity without creating a live run; `init --dry-run` previews the resolved
+source, task branch, workspace, role harness, and artifact locations for a task
+ID without changing anything. The remaining commands still report
 `not_available` because workflow execution has not yet been implemented.

@@ -133,7 +133,19 @@ node dist/cli/index.js profile-check --config .\target\.agent\foundry.config.jso
 - `doctor` validates tooling, configuration, storage, target identity, runtime,
   and optional GitHub decision-publication readiness.
 - `init --dry-run` displays resolved source, branch, worktree, harness, and
-  artifact paths without mutation.
+  artifact paths without mutation. It first reuses the `doctor` readiness check,
+  so every configuration and identity problem `doctor` would catch also fails
+  the preview. It then reports:
+  - `source`: the configured `sourceRemote` and `sourceBranch` plus the reachable
+    `commit` from `ls-remote`;
+  - `branch`: `taskBranchPolicy` with its single `<task-id>` placeholder replaced
+    by the invocation task ID, which must be a legal Git branch ref and must not
+    equal the source branch;
+  - `workspace`: `<target>/.agent/worktrees/<task-id>`;
+  - `roleHarness`: the configured `protocol` and resolved `command` vector; and
+  - `artifacts.root`: `<target>/.agent/runs`, under which later run directories
+    appear. The preview creates nothing and leaves Git status, HEAD, and the
+    current branch unchanged.
 - `profile-check` runs configured project commands in order and fails if they
   mutate tracked Git state.
 
