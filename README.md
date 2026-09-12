@@ -36,5 +36,7 @@ success or error envelope and stable exit-code meanings. `doctor` validates
 host tooling, the configuration document, run storage, and target repository
 identity without creating a live run; `init --dry-run` previews the resolved
 source, task branch, workspace, role harness, and artifact locations for a task
-ID without changing anything. The remaining commands still report
+ID without changing anything; `profile-check` runs the configured bootstrap
+(when present) and verification commands directly without a shell and fails
+when a command rewrites tracked Git state, without recording a live run. The remaining commands still report
 `not_available` because workflow execution has not yet been implemented.

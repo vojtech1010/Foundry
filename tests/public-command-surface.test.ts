@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
+import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
 import { ReadinessFiles, ReadinessGit, ReadinessHost } from '../src/application/readiness/index.js';
 import {
   EXIT_CODES,
@@ -79,6 +80,13 @@ const UntouchedReadiness = Layer.mergeAll(
       run: (_args: ReadonlyArray<string>, _cwd: string) => untouchedReadiness('git.run'),
     }),
   ),
+  Layer.succeed(
+    ProjectCommandProcess,
+    ProjectCommandProcess.of({
+      run: (_options: { readonly command: ReadonlyArray<string>; readonly cwd: string }) =>
+        untouchedReadiness('process.run'),
+    }),
+  ),
 );
 
 function runStubCli(argv: ReadonlyArray<string>) {
@@ -140,12 +148,6 @@ const validScenarios: ReadonlyArray<ValidScenario> = [
     command: 'inspect',
     argv: ['inspect', '--config', 'foundry.config.json', '--run-id', 'RUN-1'],
     runId: 'RUN-1',
-    taskId: undefined,
-  },
-  {
-    command: 'profile-check',
-    argv: ['profile-check', '--config', 'foundry.config.json'],
-    runId: undefined,
     taskId: undefined,
   },
   {
