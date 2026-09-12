@@ -21,6 +21,7 @@ import {
 import { RUN_HISTORY_FILENAME } from '../../domain/run-history.js';
 import { decodeProjectConfiguration } from '../project-configuration.js';
 import { ReadinessFiles } from '../readiness/index.js';
+import { withRepositoryLease } from '../repository-lease/index.js';
 import {
   RunHistoryConflict,
   RunHistoryIntegrityError,
@@ -30,6 +31,11 @@ import {
 } from '../run-history/index.js';
 
 import type { DerivedReportWrite, RunHistoryStorageError } from '../run-history/index.js';
+import type {
+  RepositoryHostIdentity,
+  RepositoryLeaseError,
+  RepositoryLeaseStore,
+} from '../repository-lease/index.js';
 import type { CleanupProgressPayload, RunEventDraft } from '../../domain/run-history.js';
 import type { ProjectConfiguration } from '../../domain/project-configuration.js';
 import type {
@@ -68,7 +74,11 @@ export class RunStateUnavailable extends Schema.TaggedError<RunStateUnavailable>
   },
 ) {}
 
-export type RunIdentityError = InvalidRunRequest | DuplicateRunId | RunIdentityStorageError;
+export type RunIdentityError =
+  | InvalidRunRequest
+  | DuplicateRunId
+  | RunIdentityStorageError
+  | RepositoryLeaseError;
 
 export interface RunStorageFileStatus {
   readonly exists: boolean;
@@ -201,7 +211,11 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
 ): Effect.fn.Return<
   RecordedRunIdentityReport,
   RunIdentityError,
-  ReadinessFiles | RunIdentityStore | RunHistoryStorage
+  | ReadinessFiles
+  | RunIdentityStore
+  | RunHistoryStorage
+  | RepositoryLeaseStore
+  | RepositoryHostIdentity
 > {
   const store = yield* RunIdentityStore;
   const runId = options.runId;
@@ -281,17 +295,6 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   const normalizedPath = join(runDirectory, REQUEST_NORMALIZED_FILENAME);
   const identityPath = join(runDirectory, REQUEST_IDENTITY_FILENAME);
 
-  yield* store.ensureParentDirectory(runsRoot).pipe(
-    Effect.mapError(
-      (error) =>
-        new InvalidRunRequest({
-          message: `Cannot prepare run storage at ${runsRoot}: ${excerpt(error.message)}.`,
-          runId,
-        }),
-    ),
-  );
-  yield* store.createRunDirectoryExclusive(runDirectory, runId);
-
   const identityDocument = {
     schemaVersion: REQUEST_IDENTITY_SCHEMA_VERSION,
     runId,
@@ -304,33 +307,55 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   } as const;
   const identityBytes = new TextEncoder().encode(`${JSON.stringify(identityDocument, null, 2)}\n`);
 
-  const persist = Effect.gen(function* () {
-    yield* store.writeFileBytes(originalPath, originalBytes);
-    yield* store.writeFileBytes(normalizedPath, normalizedBytes);
-    yield* store.writeFileBytes(identityPath, identityBytes);
-    yield* appendRunEvent({
-      runDirectory,
-      runId,
-      createIfMissing: true,
-      build: () =>
-        Effect.succeed<RunEventDraft>({
-          type: 'run-created',
-          payload: { taskId: options.taskId },
-        }),
-    });
-    yield* reconcileRunReports({ runDirectory, runId });
-  }).pipe(
-    Effect.mapError(
-      (error) =>
-        new RunIdentityStorageError({
-          message: `Cannot retain request for run "${runId}" at ${runDirectory}: ${excerpt(error.message)}.`,
-          runId,
-        }),
-    ),
-  );
+  const createRun = Effect.gen(function* () {
+    yield* store.ensureParentDirectory(runsRoot).pipe(
+      Effect.mapError(
+        (error) =>
+          new InvalidRunRequest({
+            message: `Cannot prepare run storage at ${runsRoot}: ${excerpt(error.message)}.`,
+            runId,
+          }),
+      ),
+    );
+    yield* store.createRunDirectoryExclusive(runDirectory, runId);
 
-  yield* persist.pipe(
-    Effect.onError(() => store.removeDirectory(runDirectory).pipe(Effect.ignore)),
+    const persist = Effect.gen(function* () {
+      yield* store.writeFileBytes(originalPath, originalBytes);
+      yield* store.writeFileBytes(normalizedPath, normalizedBytes);
+      yield* store.writeFileBytes(identityPath, identityBytes);
+      yield* appendRunEvent({
+        runDirectory,
+        runId,
+        createIfMissing: true,
+        build: () =>
+          Effect.succeed<RunEventDraft>({
+            type: 'run-created',
+            payload: { taskId: options.taskId },
+          }),
+      });
+      yield* reconcileRunReports({ runDirectory, runId });
+    }).pipe(
+      Effect.mapError(
+        (error) =>
+          new RunIdentityStorageError({
+            message: `Cannot retain request for run "${runId}" at ${runDirectory}: ${excerpt(error.message)}.`,
+            runId,
+          }),
+      ),
+    );
+
+    yield* persist.pipe(
+      Effect.onError(() => store.removeDirectory(runDirectory).pipe(Effect.ignore)),
+    );
+  });
+
+  yield* withRepositoryLease(
+    {
+      repositoryRoot: configuration.targetRepository,
+      runId,
+      leaseMs: configuration.timeouts.leaseMs,
+    },
+    () => createRun,
   );
 
   return {

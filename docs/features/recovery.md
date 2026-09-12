@@ -64,9 +64,11 @@ sufficient identity evidence.
 
 ## Git and lock recovery
 
-Repository locks are lease-backed and identity-bound. A confirmed dead owner may
-be recovered automatically. Live or indeterminate ownership remains blocking;
-a PID alone does not prove identity.
+Repository locks are lease-backed and identity-bound. `run` takes the lease
+before it creates run storage, so a denial leaves no run files and reports a
+`blocked` command result with the run ID. A confirmed dead owner may be
+recovered automatically once the lease is expired. Live or indeterminate
+ownership remains blocking; a PID alone does not prove identity.
 
 Interrupted Coder files are evidence, not an accepted implementation. Foundry
 accepts only a verified commit on the assigned branch and derives changes from

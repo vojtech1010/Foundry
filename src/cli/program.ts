@@ -20,6 +20,10 @@ import type { PublicCommandError, PublicCommandReport } from '../application/pub
 import type { ProjectCommandProcess } from '../application/profile-check/index.js';
 import type { RunHistoryStorage } from '../application/run-history/index.js';
 import type {
+  RepositoryHostIdentity,
+  RepositoryLeaseStore,
+} from '../application/repository-lease/index.js';
+import type {
   ReadinessFiles,
   ReadinessGit,
   ReadinessHost,
@@ -529,7 +533,12 @@ function failureKindFor(error: PublicCommandError): ReportFailureKind {
     case 'RunHistoryIntegrityError':
     case 'RunHistoryStorageError':
     case 'RunHistoryConflict':
+    case 'RepositoryLeaseOwnershipLost':
+    case 'RepositoryLeaseStorageError':
       return 'failed';
+    case 'RepositoryLeaseContended':
+    case 'RepositoryLeaseAmbiguous':
+      return 'blocked';
     default:
       return INVALID_INVOCATION_KIND;
   }
@@ -722,6 +731,8 @@ export const runCli = Effect.fn('runCli')(function* (
   | ProjectCommandProcess
   | RunIdentityStore
   | RunHistoryStorage
+  | RepositoryLeaseStore
+  | RepositoryHostIdentity
 > {
   const decoded = yield* decodeInvocation(argv).pipe(Effect.result);
 

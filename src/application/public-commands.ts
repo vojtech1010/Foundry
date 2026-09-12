@@ -41,6 +41,7 @@ import type {
   RunProgressReport,
   RunStateUnavailable,
 } from './run-identity/index.js';
+import type { RepositoryHostIdentity, RepositoryLeaseStore } from './repository-lease/index.js';
 
 export interface StubCommandReport {
   readonly availability: typeof NOT_AVAILABLE;
@@ -91,6 +92,8 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
   | ProjectCommandProcess
   | RunIdentityStore
   | RunHistoryStorage
+  | RepositoryLeaseStore
+  | RepositoryHostIdentity
 > {
   if (invocation.command === 'run') {
     const configArg = invocation.config;

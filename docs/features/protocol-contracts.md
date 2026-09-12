@@ -373,11 +373,18 @@ state, checkpoint, attempts, and the latest cleanup progress from that history.
 advance a run: a missing, malformed, wrong-run, or disagreeing report is
 disposable and is replaced atomically from verified history, a report with no
 backing event is removed, and no report is used to choose a transition, retry,
-completion, or resume. Repository ownership remains a later slice.
+completion, or resume. Repository ownership is enforced by the repository lease
+described below before `run` creates any run storage.
 
 The repository lease records a random owner ID, host identity, process ID and
 process start identity, acquisition time, heartbeat, and expiry. The owner
 renews before half the lease duration. Automatic takeover requires both an
 expired lease and proof that the recorded local process identity is dead; an
 unreachable foreign host or unverifiable identity remains `human_recovery`.
-Release and renewal use compare-and-swap on the owner ID.
+Release and renewal use compare-and-swap on the owner ID. `run` acquires the
+lease after request and configuration validation and before preparing
+`.agent/runs`, renews while the mutating operation continues, and releases it on
+success, failure, or interruption. A competing healthy owner, or an owner that
+cannot be verified as dead, stops the run as `blocked` with exit code `1` and
+the run ID; an invalid request or configuration still fails validation with exit
+code `2` and takes no lease.

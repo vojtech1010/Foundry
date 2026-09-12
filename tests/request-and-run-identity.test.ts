@@ -1,8 +1,9 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer, Schema } from 'effect';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
@@ -20,6 +21,10 @@ import {
   recordCleanupProgress,
   transitionWorkflow,
 } from '../src/application/workflow-transitions/index.js';
+import {
+  RepositoryHostIdentity,
+  acquireRepositoryLease,
+} from '../src/application/repository-lease/index.js';
 import {
   RunHistoryIntegrityError,
   RunHistoryStorage,
@@ -43,6 +48,7 @@ import {
   normalizeRequestPromptText,
 } from '../src/domain/run-identity.js';
 import { EXIT_CODES } from '../src/domain/public-commands.js';
+import { REPOSITORY_LEASE_FILENAME } from '../src/domain/repository-lease.js';
 import {
   ACTIVE_WORKFLOW_STATES,
   CLEANUP_PROGRESS_FILENAME,
@@ -62,6 +68,7 @@ import {
   WorkflowStateSchema,
 } from '../src/domain/workflow.js';
 import { ReadinessFilesLive } from '../src/platform/readiness.js';
+import { RepositoryLeaseLive } from '../src/platform/repository-lease.js';
 import { RunHistoryLive } from '../src/platform/run-history.js';
 import { RunIdentityLive } from '../src/platform/run-identity.js';
 
@@ -183,7 +190,12 @@ function setupFixture(options?: { readonly maxRequestBytes?: number }): Fixture 
   };
 }
 
-const LiveFilesAndStore = Layer.mergeAll(ReadinessFilesLive, RunIdentityLive, RunHistoryLive);
+const LiveFilesAndStore = Layer.mergeAll(
+  ReadinessFilesLive,
+  RunIdentityLive,
+  RunHistoryLive,
+  RepositoryLeaseLive,
+);
 
 function dieService(message: string) {
   return Effect.die(new Error(message));
@@ -215,6 +227,7 @@ const CliLayer = Layer.mergeAll(
   ),
   RunIdentityLive,
   RunHistoryLive,
+  RepositoryLeaseLive,
 );
 
 function recordWithLive(options: {
@@ -688,6 +701,7 @@ describe('workflow state through run storage', () => {
           ReadinessFilesLive,
           RunIdentityLive,
           Layer.succeed(RunHistoryStorage, failingHistory),
+          RepositoryLeaseLive,
         );
         const error = yield* recordRunIdentity({
           configArg: fixture.configPath,
@@ -1477,6 +1491,205 @@ describe('status command through the cli envelope', () => {
           workflowState: 'planning',
         });
         expect(readFileSync(statePath, 'utf8')).toContain('"state": "planning"');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+});
+
+function leasePathOf(fixture: Fixture): string {
+  return join(fixture.target, '.agent', REPOSITORY_LEASE_FILENAME);
+}
+
+interface SeedRepositoryLeaseOverrides {
+  readonly hostIdentity?: string;
+  readonly processId?: number;
+  readonly processStartIdentity?: string | null;
+}
+
+function seedRepositoryLease(fixture: Fixture, overrides?: SeedRepositoryLeaseOverrides): void {
+  mkdirSync(join(fixture.target, '.agent'), { recursive: true });
+  writeFileSync(
+    leasePathOf(fixture),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      ownerId: '33333333-3333-4333-8333-333333333333',
+      hostIdentity: hostname(),
+      processId: 2147483000,
+      processStartIdentity: 'linux:seed:1',
+      acquiredAt: '1969-12-31T23:58:00.000Z',
+      heartbeatAt: '1969-12-31T23:58:00.000Z',
+      expiresAt: '1969-12-31T23:59:59.000Z',
+      ...overrides,
+    })}\n`,
+  );
+}
+
+function runCommand(fixture: Fixture, runId: string): ReadonlyArray<string> {
+  return [
+    'run',
+    '--config',
+    fixture.configPath,
+    '--request',
+    fixture.requestPath,
+    '--task-id',
+    'TASK-LEASE',
+    '--run-id',
+    runId,
+    '--json',
+  ];
+}
+
+describe('repository lease through the run command', () => {
+  it.effect('releases the repository lease after a successful run', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        writeFileSync(fixture.requestPath, 'lease ask\n');
+        const result = yield* runCli(runCommand(fixture, 'RUN-LEASE-OK')).pipe(
+          Effect.provide(CliLayer),
+        );
+
+        expect(result.exitCode).toBe(EXIT_CODES.reported);
+        expect(existsSync(fixture.runDirectory('RUN-LEASE-OK'))).toBe(true);
+        expect(existsSync(leasePathOf(fixture))).toBe(false);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('denies a competing run while a healthy live lease is held', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        writeFileSync(fixture.requestPath, 'competing ask\n');
+        const lease = yield* acquireRepositoryLease({
+          repositoryRoot: fixture.target,
+          runId: 'RUN-LEASE-HOLDER',
+          leaseMs: 60000,
+        }).pipe(Effect.provide(RepositoryLeaseLive));
+
+        yield* Effect.ensuring(
+          Effect.gen(function* () {
+            const result = yield* runCli(runCommand(fixture, 'RUN-LEASE-DENIED')).pipe(
+              Effect.provide(CliLayer),
+            );
+
+            expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
+            const failure = expectRecordedFailure(result.stdout);
+            expect(failure.command).toBe('run');
+            expect(failure.error.kind).toBe('blocked');
+            expect(failure.error.retryable).toBe(false);
+            expect(failure.error.runId).toBe('RUN-LEASE-DENIED');
+            expect(existsSync(fixture.runDirectory('RUN-LEASE-DENIED'))).toBe(false);
+            expect(existsSync(leasePathOf(fixture))).toBe(true);
+          }),
+          lease.release.pipe(Effect.ignore),
+        );
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('takes over an expired lease whose recorded process is dead', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        writeFileSync(fixture.requestPath, 'takeover ask\n');
+        const deadProcessId = Number(
+          execFileSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], {
+            encoding: 'utf8',
+          }).trim(),
+        );
+        seedRepositoryLease(fixture, { processId: deadProcessId });
+        const seeded = readFileSync(leasePathOf(fixture), 'utf8');
+        expect(seeded).toContain(String(deadProcessId));
+
+        const result = yield* runCli(runCommand(fixture, 'RUN-LEASE-TAKEOVER')).pipe(
+          Effect.provide(CliLayer),
+        );
+
+        expect(result.exitCode).toBe(EXIT_CODES.reported);
+        expect(existsSync(fixture.runDirectory('RUN-LEASE-TAKEOVER'))).toBe(true);
+        expect(existsSync(leasePathOf(fixture))).toBe(false);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('fails closed when an expired lease owner is still live', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        writeFileSync(fixture.requestPath, 'live ask\n');
+        const identity = yield* RepositoryHostIdentity.pipe(Effect.provide(RepositoryLeaseLive));
+        const hostIdentity = yield* identity.hostIdentity;
+        const current = yield* identity.currentProcess;
+        seedRepositoryLease(fixture, {
+          hostIdentity,
+          processId: current.processId,
+          processStartIdentity: current.processStartIdentity,
+        });
+        const before = readFileSync(leasePathOf(fixture), 'utf8');
+
+        const result = yield* runCli(runCommand(fixture, 'RUN-LEASE-LIVE')).pipe(
+          Effect.provide(CliLayer),
+        );
+
+        expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
+        const failure = expectRecordedFailure(result.stdout);
+        expect(failure.error.kind).toBe('blocked');
+        expect(failure.error.runId).toBe('RUN-LEASE-LIVE');
+        expect(existsSync(fixture.runDirectory('RUN-LEASE-LIVE'))).toBe(false);
+        expect(readFileSync(leasePathOf(fixture), 'utf8')).toBe(before);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('fails closed on a corrupt lease record and preserves it', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        writeFileSync(fixture.requestPath, 'corrupt ask\n');
+        mkdirSync(join(fixture.target, '.agent'), { recursive: true });
+        writeFileSync(leasePathOf(fixture), '{"schemaVersion": 1');
+
+        const result = yield* runCli(runCommand(fixture, 'RUN-LEASE-CORRUPT')).pipe(
+          Effect.provide(CliLayer),
+        );
+
+        expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
+        const failure = expectRecordedFailure(result.stdout);
+        expect(failure.error.kind).toBe('blocked');
+        expect(failure.error.message).toContain('not a valid closed record');
+        expect(existsSync(fixture.runDirectory('RUN-LEASE-CORRUPT'))).toBe(false);
+        expect(readFileSync(leasePathOf(fixture), 'utf8')).toBe('{"schemaVersion": 1');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('does not take a lease when request validation fails', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        writeFileSync(fixture.requestPath, '');
+        const result = yield* runCli(runCommand(fixture, 'RUN-LEASE-INVALID')).pipe(
+          Effect.provide(CliLayer),
+        );
+
+        expect(result.exitCode).toBe(EXIT_CODES.invalidInvocation);
+        const failure = expectRecordedFailure(result.stdout);
+        expect(failure.error.kind).toBe('invalid_invocation');
+        expect(existsSync(leasePathOf(fixture))).toBe(false);
+        expect(existsSync(join(fixture.target, '.agent', 'runs'))).toBe(false);
       } finally {
         fixture.cleanup();
       }
