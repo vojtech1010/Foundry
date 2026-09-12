@@ -32,5 +32,7 @@ Run all checks with `npm run verify`.
 The repository contains the toolchain, architectural boundaries, and the public
 command surface: `run`, `resume`, `status`, `inspect`, `doctor`, `init`,
 `profile-check`, `diagnostic-bundle`, and `cleanup` answer with one versioned
-success or error envelope and stable exit-code meanings. Commands currently
-report `not_available`; workflow execution has not yet been implemented.
+success or error envelope and stable exit-code meanings. `doctor` validates
+host tooling, the configuration document, run storage, and target repository
+identity without creating a live run; the remaining commands still report
+`not_available` because workflow execution has not yet been implemented.

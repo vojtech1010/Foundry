@@ -1,10 +1,11 @@
 import { describe, expect, it } from '@effect/vitest';
-import { Effect, Schema } from 'effect';
+import { Effect, Layer, Schema } from 'effect';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
+import { ReadinessFiles, ReadinessGit, ReadinessHost } from '../src/application/readiness/index.js';
 import {
   EXIT_CODES,
   INTERRUPT_EXIT_CODES,
@@ -39,6 +40,49 @@ function expectFailureEnvelope(stdout: string) {
     throw new Error(`Expected a failure envelope but received: ${stdout}`);
   }
   return envelope;
+}
+
+function expectStubEnvelope(stdout: string) {
+  const envelope = expectSuccessEnvelope(stdout);
+  const data = envelope.data;
+  if (!('availability' in data)) {
+    throw new Error(`Expected a stub envelope but received: ${stdout}`);
+  }
+  return { envelope, data };
+}
+
+function untouchedReadiness(name: string) {
+  return Effect.die(new Error(`Stub commands must not access readiness ${name}`));
+}
+
+const UntouchedReadiness = Layer.mergeAll(
+  Layer.succeed(
+    ReadinessHost,
+    ReadinessHost.of({
+      platform: untouchedReadiness('host.platform'),
+      nodeVersion: untouchedReadiness('host.nodeVersion'),
+      npmVersion: untouchedReadiness('host.npmVersion'),
+      gitVersionOutput: untouchedReadiness('host.gitVersionOutput'),
+    }),
+  ),
+  Layer.succeed(
+    ReadinessFiles,
+    ReadinessFiles.of({
+      readFile: (_path: string) => untouchedReadiness('files.readFile'),
+      statPath: (_path: string) => untouchedReadiness('files.statPath'),
+      isWritable: (_path: string) => untouchedReadiness('files.isWritable'),
+    }),
+  ),
+  Layer.succeed(
+    ReadinessGit,
+    ReadinessGit.of({
+      run: (_args: ReadonlyArray<string>, _cwd: string) => untouchedReadiness('git.run'),
+    }),
+  ),
+);
+
+function runStubCli(argv: ReadonlyArray<string>) {
+  return runCli(argv).pipe(Effect.provide(UntouchedReadiness));
 }
 
 interface ValidScenario {
@@ -96,12 +140,6 @@ const validScenarios: ReadonlyArray<ValidScenario> = [
     command: 'inspect',
     argv: ['inspect', '--config', 'foundry.config.json', '--run-id', 'RUN-1'],
     runId: 'RUN-1',
-    taskId: undefined,
-  },
-  {
-    command: 'doctor',
-    argv: ['doctor', '--config', 'foundry.config.json'],
-    runId: undefined,
     taskId: undefined,
   },
   {
@@ -289,35 +327,35 @@ describe('public command surface', () => {
     expect(isPublicCommand('frobnicate')).toBe(false);
   });
 
-  it.effect('accepts every public command with well-formed flags', () =>
+  it.effect('accepts every stub command with well-formed flags', () =>
     Effect.gen(function* () {
       for (const scenario of validScenarios) {
-        const result = yield* runCli([...scenario.argv, '--json']);
+        const result = yield* runStubCli([...scenario.argv, '--json']);
         expect(result.exitCode, scenario.command).toBe(EXIT_CODES.reported);
         expect(result.stdout.endsWith('\n'), scenario.command).toBe(true);
-        const envelope = expectSuccessEnvelope(result.stdout);
+        const { envelope, data } = expectStubEnvelope(result.stdout);
         expect(envelope.schemaVersion).toBe(REPORT_SCHEMA_VERSION);
         expect(envelope.command).toBe(scenario.command);
-        expect(envelope.data.availability).toBe(NOT_AVAILABLE);
-        expect(envelope.data.message.length).toBeGreaterThan(0);
+        expect(data.availability).toBe(NOT_AVAILABLE);
+        expect(data.message.length).toBeGreaterThan(0);
 
         const expectedEnvelopeKeys = ['schemaVersion', 'command', 'ok', 'data'];
         expect(Object.keys(envelope)).toEqual(expectedEnvelopeKeys);
 
         const expectedDataKeys = ['availability', 'message'];
         if (scenario.runId === undefined) {
-          expect('runId' in envelope.data).toBe(false);
+          expect('runId' in data).toBe(false);
         } else {
           expectedDataKeys.push('runId');
-          expect(envelope.data.runId).toBe(scenario.runId);
+          expect(data.runId).toBe(scenario.runId);
         }
         if (scenario.taskId === undefined) {
-          expect('taskId' in envelope.data).toBe(false);
+          expect('taskId' in data).toBe(false);
         } else {
           expectedDataKeys.push('taskId');
-          expect(envelope.data.taskId).toBe(scenario.taskId);
+          expect(data.taskId).toBe(scenario.taskId);
         }
-        expect(Object.keys(envelope.data)).toEqual(expectedDataKeys);
+        expect(Object.keys(data)).toEqual(expectedDataKeys);
       }
     }),
   );
@@ -325,7 +363,7 @@ describe('public command surface', () => {
   it.effect('rejects forbidden, unknown, and malformed invocations with exit code 2', () =>
     Effect.gen(function* () {
       for (const scenario of invalidScenarios) {
-        const result = yield* runCli(scenario.argv);
+        const result = yield* runStubCli(scenario.argv);
         expect(result.exitCode, scenario.label).toBe(EXIT_CODES.invalidInvocation);
         const envelope = expectFailureEnvelope(result.stdout);
         expect(envelope.schemaVersion, scenario.label).toBe(REPORT_SCHEMA_VERSION);
@@ -354,7 +392,7 @@ describe('public command surface', () => {
   it.effect('names forbidden commands without treating them as product commands', () =>
     Effect.gen(function* () {
       for (const command of NON_PRODUCT_COMMANDS) {
-        const result = yield* runCli([command, '--json']);
+        const result = yield* runStubCli([command, '--json']);
         expect(result.exitCode, command).toBe(EXIT_CODES.invalidInvocation);
         const envelope = expectFailureEnvelope(result.stdout);
         expect(envelope.command).toBe(command);
@@ -366,7 +404,7 @@ describe('public command surface', () => {
   it.effect('rejects every mode flag', () =>
     Effect.gen(function* () {
       for (const flag of ['--manual', '--pilot', '--shadow', '--adoption']) {
-        const result = yield* runCli([
+        const result = yield* runStubCli([
           flag,
           'status',
           '--config',
@@ -383,30 +421,37 @@ describe('public command surface', () => {
 
   it.effect('accepts --json before the command name', () =>
     Effect.gen(function* () {
-      const result = yield* runCli(['--json', 'doctor', '--config', 'cfg.json']);
+      const result = yield* runStubCli([
+        '--json',
+        'status',
+        '--config',
+        'cfg.json',
+        '--run-id',
+        'RUN-1',
+      ]);
       expect(result.exitCode).toBe(EXIT_CODES.reported);
-      const envelope = expectSuccessEnvelope(result.stdout);
-      expect(envelope.command).toBe('doctor');
-      expect(envelope.data.availability).toBe(NOT_AVAILABLE);
+      const { envelope, data } = expectStubEnvelope(result.stdout);
+      expect(envelope.command).toBe('status');
+      expect(data.availability).toBe(NOT_AVAILABLE);
     }),
   );
 
   it.effect('presents the same facts in human output as in JSON output', () =>
     Effect.gen(function* () {
       const argv = ['status', '--config', 'cfg.json', '--run-id', 'RUN-PARITY'];
-      const jsonResult = yield* runCli([...argv, '--json']);
-      const humanResult = yield* runCli(argv);
+      const jsonResult = yield* runStubCli([...argv, '--json']);
+      const humanResult = yield* runStubCli(argv);
       expect(jsonResult.exitCode).toBe(EXIT_CODES.reported);
       expect(humanResult.exitCode).toBe(EXIT_CODES.reported);
 
-      const envelope = expectSuccessEnvelope(jsonResult.stdout);
+      const { envelope, data } = expectStubEnvelope(jsonResult.stdout);
       expect(humanResult.stdout).toContain(`schemaVersion: ${envelope.schemaVersion}`);
       expect(humanResult.stdout).toContain(`command: ${envelope.command}`);
       expect(humanResult.stdout).toContain(`ok: ${envelope.ok}`);
-      expect(humanResult.stdout).toContain(`data.availability: ${envelope.data.availability}`);
-      expect(humanResult.stdout).toContain(`data.message: ${envelope.data.message}`);
-      if (envelope.data.runId !== undefined) {
-        expect(humanResult.stdout).toContain(`data.runId: ${envelope.data.runId}`);
+      expect(humanResult.stdout).toContain(`data.availability: ${data.availability}`);
+      expect(humanResult.stdout).toContain(`data.message: ${data.message}`);
+      if (data.runId !== undefined) {
+        expect(humanResult.stdout).toContain(`data.runId: ${data.runId}`);
       }
       expect(humanResult.stdout.endsWith('\n')).toBe(true);
     }),
@@ -414,19 +459,20 @@ describe('public command surface', () => {
 
   it.effect('renders human success and failure reports without a JSON prefix', () =>
     Effect.gen(function* () {
-      const success = yield* runCli(['doctor', '--config', 'cfg.json']);
+      const success = yield* runStubCli(['status', '--config', 'cfg.json', '--run-id', 'RUN-1']);
       expect(success.stdout).toBe(
         [
           'schemaVersion: 1',
-          'command: doctor',
+          'command: status',
           'ok: true',
           `data.availability: ${NOT_AVAILABLE}`,
-          'data.message: Foundry doctor is not available yet.',
+          'data.message: Foundry status is not available yet.',
+          'data.runId: RUN-1',
           '',
         ].join('\n'),
       );
 
-      const failure = yield* runCli(['run', '--config', 'cfg.json']);
+      const failure = yield* runStubCli(['run', '--config', 'cfg.json']);
       expect(failure.exitCode).toBe(EXIT_CODES.invalidInvocation);
       expect(failure.stdout).toContain('schemaVersion: 1');
       expect(failure.stdout).toContain('command: run');
@@ -439,7 +485,7 @@ describe('public command surface', () => {
 
   it.effect('writes exactly one JSON envelope per invocation', () =>
     Effect.gen(function* () {
-      const result = yield* runCli([
+      const result = yield* runStubCli([
         'status',
         '--config',
         'cfg.json',
@@ -459,7 +505,7 @@ describe('public command surface', () => {
       const output = join(tmpdir(), `foundry-public-surface-output-${process.pid}`);
       expect(existsSync(output)).toBe(false);
 
-      const result = yield* runCli([
+      const result = yield* runStubCli([
         'diagnostic-bundle',
         '--config',
         missingConfig,
@@ -468,9 +514,9 @@ describe('public command surface', () => {
         '--json',
       ]);
       expect(result.exitCode).toBe(EXIT_CODES.reported);
-      const envelope = expectSuccessEnvelope(result.stdout);
+      const { envelope, data } = expectStubEnvelope(result.stdout);
       expect(envelope.command).toBe('diagnostic-bundle');
-      expect(envelope.data.availability).toBe(NOT_AVAILABLE);
+      expect(data.availability).toBe(NOT_AVAILABLE);
       expect(existsSync(output)).toBe(false);
     }),
   );

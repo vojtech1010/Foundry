@@ -12,7 +12,13 @@ import {
   isPublicCommand,
 } from '../domain/public-commands.js';
 
-import type { PublicCommand } from '../domain/public-commands.js';
+import type { PublicCommand, PublicCommandInvocation } from '../domain/public-commands.js';
+import type { PublicCommandReport } from '../application/public-commands.js';
+import type {
+  ReadinessFiles,
+  ReadinessGit,
+  ReadinessHost,
+} from '../application/readiness/index.js';
 
 const UNKNOWN_COMMAND_LABEL = 'foundry';
 
@@ -179,12 +185,38 @@ const ReportError = Schema.Struct({
   runId: Schema.optional(Schema.String),
 });
 
-const ReportData = Schema.Struct({
+const StubReportData = Schema.Struct({
   availability: Schema.Literal(NOT_AVAILABLE),
   message: Schema.String,
   runId: Schema.optional(Schema.String),
   taskId: Schema.optional(Schema.String),
 });
+
+const DoctorReportData = Schema.Struct({
+  readiness: Schema.Literal('ready'),
+  host: Schema.Struct({
+    platform: Schema.String,
+    nodeVersion: Schema.String,
+    npmVersion: Schema.String,
+    gitVersion: Schema.String,
+  }),
+  config: Schema.Struct({
+    path: Schema.String,
+    schemaVersion: Schema.Number,
+  }),
+  storage: Schema.Struct({
+    path: Schema.String,
+    ignored: Schema.Literal(true),
+  }),
+  repository: Schema.Struct({
+    path: Schema.String,
+    remote: Schema.String,
+    branch: Schema.String,
+    commit: Schema.String,
+  }),
+});
+
+const ReportData = Schema.Union([StubReportData, DoctorReportData]);
 
 const SuccessEnvelope = Schema.Struct({
   schemaVersion: Schema.Literal(REPORT_SCHEMA_VERSION),
@@ -354,15 +386,31 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
     `ok: ${envelope.ok}`,
   ];
   if (envelope.ok) {
-    lines.push(
-      `data.availability: ${envelope.data.availability}`,
-      `data.message: ${envelope.data.message}`,
-    );
-    if (envelope.data.runId !== undefined) {
-      lines.push(`data.runId: ${envelope.data.runId}`);
-    }
-    if (envelope.data.taskId !== undefined) {
-      lines.push(`data.taskId: ${envelope.data.taskId}`);
+    const data = envelope.data;
+    if ('availability' in data) {
+      lines.push(`data.availability: ${data.availability}`, `data.message: ${data.message}`);
+      if (data.runId !== undefined) {
+        lines.push(`data.runId: ${data.runId}`);
+      }
+      if (data.taskId !== undefined) {
+        lines.push(`data.taskId: ${data.taskId}`);
+      }
+    } else {
+      lines.push(
+        `data.readiness: ${data.readiness}`,
+        `data.host.platform: ${data.host.platform}`,
+        `data.host.nodeVersion: ${data.host.nodeVersion}`,
+        `data.host.npmVersion: ${data.host.npmVersion}`,
+        `data.host.gitVersion: ${data.host.gitVersion}`,
+        `data.config.path: ${data.config.path}`,
+        `data.config.schemaVersion: ${data.config.schemaVersion}`,
+        `data.storage.path: ${data.storage.path}`,
+        `data.storage.ignored: ${data.storage.ignored}`,
+        `data.repository.path: ${data.repository.path}`,
+        `data.repository.remote: ${data.repository.remote}`,
+        `data.repository.branch: ${data.repository.branch}`,
+        `data.repository.commit: ${data.repository.commit}`,
+      );
     }
   } else {
     lines.push(
@@ -384,9 +432,122 @@ function renderEnvelope(envelope: ReportEnvelopeValue, json: boolean): string {
   return `${JSON.stringify(Schema.encodeSync(ReportEnvelope)(envelope))}\n`;
 }
 
+function toDomainInvocation(
+  invocation: (typeof Invocation)['Type'],
+  cwd: string,
+): PublicCommandInvocation {
+  switch (invocation.command) {
+    case 'run': {
+      return {
+        command: 'run',
+        runId: invocation.runId,
+        taskId: invocation.taskId,
+        config: invocation.config,
+        cwd,
+      };
+    }
+    case 'resume':
+    case 'status':
+    case 'inspect': {
+      return {
+        command: invocation.command,
+        runId: invocation.runId,
+        config: invocation.config,
+        cwd,
+      };
+    }
+    case 'doctor': {
+      return { command: 'doctor', config: invocation.config, cwd };
+    }
+    case 'init': {
+      return {
+        command: 'init',
+        taskId: invocation.taskId,
+        config: invocation.config,
+        cwd,
+      };
+    }
+    case 'profile-check': {
+      return { command: 'profile-check', config: invocation.config, cwd };
+    }
+    case 'diagnostic-bundle': {
+      return { command: 'diagnostic-bundle', config: invocation.config, cwd };
+    }
+    case 'cleanup': {
+      if ('runId' in invocation) {
+        return {
+          command: 'cleanup',
+          runId: invocation.runId,
+          config: invocation.config,
+          cwd,
+        };
+      }
+      return { command: 'cleanup', config: invocation.config, cwd };
+    }
+    default: {
+      const exhaustive: never = invocation;
+      return exhaustive;
+    }
+  }
+}
+
+function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'] {
+  if ('availability' in report) {
+    if (report.runId !== undefined && report.taskId !== undefined) {
+      return {
+        availability: report.availability,
+        message: report.message,
+        runId: report.runId,
+        taskId: report.taskId,
+      };
+    }
+    if (report.runId !== undefined) {
+      return {
+        availability: report.availability,
+        message: report.message,
+        runId: report.runId,
+      };
+    }
+    if (report.taskId !== undefined) {
+      return {
+        availability: report.availability,
+        message: report.message,
+        taskId: report.taskId,
+      };
+    }
+    return {
+      availability: report.availability,
+      message: report.message,
+    };
+  }
+  return {
+    readiness: 'ready',
+    host: {
+      platform: report.host.platform,
+      nodeVersion: report.host.nodeVersion,
+      npmVersion: report.host.npmVersion,
+      gitVersion: report.host.gitVersion,
+    },
+    config: {
+      path: report.config.path,
+      schemaVersion: report.config.schemaVersion,
+    },
+    storage: {
+      path: report.storage.path,
+      ignored: report.storage.ignored,
+    },
+    repository: {
+      path: report.repository.path,
+      remote: report.repository.remote,
+      branch: report.repository.branch,
+      commit: report.repository.commit,
+    },
+  };
+}
+
 export const runCli = Effect.fn('runCli')(function* (
   argv: ReadonlyArray<string>,
-): Effect.fn.Return<CliResult> {
+): Effect.fn.Return<CliResult, never, ReadinessHost | ReadinessFiles | ReadinessGit> {
   const decoded = yield* decodeInvocation(argv).pipe(Effect.result);
 
   if (Result.isFailure(decoded)) {
@@ -409,12 +570,33 @@ export const runCli = Effect.fn('runCli')(function* (
   }
 
   const { invocation, json } = decoded.success;
-  const report = yield* executePublicCommand(invocation);
+  const cwd = yield* Effect.sync(() => process.cwd());
+  const outcome = yield* executePublicCommand(toDomainInvocation(invocation, cwd)).pipe(
+    Effect.result,
+  );
+
+  if (Result.isFailure(outcome)) {
+    const failure: ReportEnvelopeValue = {
+      schemaVersion: REPORT_SCHEMA_VERSION,
+      command: invocation.command,
+      ok: false,
+      error: {
+        kind: INVALID_INVOCATION_KIND,
+        message: outcome.failure.message,
+        retryable: false,
+      },
+    };
+    return {
+      exitCode: exitCodeForOutcome({ ok: false, kind: INVALID_INVOCATION_KIND }),
+      stdout: renderEnvelope(failure, json),
+    };
+  }
+
   const envelope: ReportEnvelopeValue = {
     schemaVersion: REPORT_SCHEMA_VERSION,
     command: invocation.command,
     ok: true,
-    data: report,
+    data: toEnvelopeData(outcome.success),
   };
   return {
     exitCode: exitCodeForOutcome({ ok: true }),

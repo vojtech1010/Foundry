@@ -2,6 +2,7 @@
 import { Cause, Effect, Exit } from 'effect';
 
 import { interruptExitCodeFor } from '../domain/public-commands.js';
+import { ReadinessLive } from '../platform/readiness.js';
 
 import { runCli } from './program.js';
 
@@ -9,7 +10,9 @@ process.on('SIGINT', () => {
   process.exit(interruptExitCodeFor(process.platform));
 });
 
-const exit = await Effect.runPromiseExit(runCli(process.argv.slice(2)));
+const program = runCli(process.argv.slice(2)).pipe(Effect.provide(ReadinessLive));
+
+const exit = await Effect.runPromiseExit(program);
 
 if (Exit.isSuccess(exit)) {
   process.stdout.write(exit.value.stdout);
