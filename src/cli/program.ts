@@ -216,7 +216,25 @@ const DoctorReportData = Schema.Struct({
   }),
 });
 
-const ReportData = Schema.Union([StubReportData, DoctorReportData]);
+const InitPreviewReportData = Schema.Struct({
+  taskId: Schema.String,
+  source: Schema.Struct({
+    remote: Schema.String,
+    branch: Schema.String,
+    commit: Schema.String,
+  }),
+  branch: Schema.String,
+  workspace: Schema.String,
+  roleHarness: Schema.Struct({
+    protocol: Schema.String,
+    command: Schema.NonEmptyArray(Schema.String),
+  }),
+  artifacts: Schema.Struct({
+    root: Schema.String,
+  }),
+});
+
+const ReportData = Schema.Union([StubReportData, DoctorReportData, InitPreviewReportData]);
 
 const SuccessEnvelope = Schema.Struct({
   schemaVersion: Schema.Literal(REPORT_SCHEMA_VERSION),
@@ -395,7 +413,7 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
       if (data.taskId !== undefined) {
         lines.push(`data.taskId: ${data.taskId}`);
       }
-    } else {
+    } else if ('readiness' in data) {
       lines.push(
         `data.readiness: ${data.readiness}`,
         `data.host.platform: ${data.host.platform}`,
@@ -410,6 +428,18 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         `data.repository.remote: ${data.repository.remote}`,
         `data.repository.branch: ${data.repository.branch}`,
         `data.repository.commit: ${data.repository.commit}`,
+      );
+    } else {
+      lines.push(
+        `data.taskId: ${data.taskId}`,
+        `data.source.remote: ${data.source.remote}`,
+        `data.source.branch: ${data.source.branch}`,
+        `data.source.commit: ${data.source.commit}`,
+        `data.branch: ${data.branch}`,
+        `data.workspace: ${data.workspace}`,
+        `data.roleHarness.protocol: ${data.roleHarness.protocol}`,
+        `data.roleHarness.command: ${data.roleHarness.command.join(' ')}`,
+        `data.artifacts.root: ${data.artifacts.root}`,
       );
     }
   } else {
@@ -520,27 +550,46 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       message: report.message,
     };
   }
+  if ('host' in report) {
+    return {
+      readiness: 'ready',
+      host: {
+        platform: report.host.platform,
+        nodeVersion: report.host.nodeVersion,
+        npmVersion: report.host.npmVersion,
+        gitVersion: report.host.gitVersion,
+      },
+      config: {
+        path: report.config.path,
+        schemaVersion: report.config.schemaVersion,
+      },
+      storage: {
+        path: report.storage.path,
+        ignored: report.storage.ignored,
+      },
+      repository: {
+        path: report.repository.path,
+        remote: report.repository.remote,
+        branch: report.repository.branch,
+        commit: report.repository.commit,
+      },
+    };
+  }
   return {
-    readiness: 'ready',
-    host: {
-      platform: report.host.platform,
-      nodeVersion: report.host.nodeVersion,
-      npmVersion: report.host.npmVersion,
-      gitVersion: report.host.gitVersion,
+    taskId: report.taskId,
+    source: {
+      remote: report.source.remote,
+      branch: report.source.branch,
+      commit: report.source.commit,
     },
-    config: {
-      path: report.config.path,
-      schemaVersion: report.config.schemaVersion,
+    branch: report.branch,
+    workspace: report.workspace,
+    roleHarness: {
+      protocol: report.roleHarness.protocol,
+      command: [...report.roleHarness.command],
     },
-    storage: {
-      path: report.storage.path,
-      ignored: report.storage.ignored,
-    },
-    repository: {
-      path: report.repository.path,
-      remote: report.repository.remote,
-      branch: report.repository.branch,
-      commit: report.repository.commit,
+    artifacts: {
+      root: report.artifacts.root,
     },
   };
 }
