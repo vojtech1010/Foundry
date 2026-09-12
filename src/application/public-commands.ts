@@ -5,6 +5,7 @@ import { PRODUCT_NAME } from '../domain/workflow.js';
 import { checkProjectProfile } from './profile-check/index.js';
 import { checkReadiness } from './readiness/index.js';
 import { previewRunLocations } from './preview-run-locations/index.js';
+import { InvalidRunRequest, recordRunIdentity } from './run-identity/index.js';
 
 import type { PublicCommandInvocation } from '../domain/public-commands.js';
 import type {
@@ -23,6 +24,11 @@ import type {
   ProfileCheckReport,
   ProjectCommandProcess,
 } from './profile-check/index.js';
+import type {
+  RecordedRunIdentityReport,
+  RunIdentityError,
+  RunIdentityStore,
+} from './run-identity/index.js';
 
 export interface StubCommandReport {
   readonly availability: typeof NOT_AVAILABLE;
@@ -35,7 +41,14 @@ export type PublicCommandReport =
   | StubCommandReport
   | DoctorReport
   | PreviewLocationsReport
-  | ProfileCheckReport;
+  | ProfileCheckReport
+  | RecordedRunIdentityReport;
+
+export type PublicCommandError =
+  | ReadinessError
+  | PreviewLocationsError
+  | ProfileCheckError
+  | RunIdentityError;
 
 function stubReport(invocation: PublicCommandInvocation): StubCommandReport {
   const report: StubCommandReport = {
@@ -54,9 +67,29 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
   invocation: PublicCommandInvocation,
 ): Effect.fn.Return<
   PublicCommandReport,
-  ReadinessError | PreviewLocationsError | ProfileCheckError,
-  ReadinessHost | ReadinessFiles | ReadinessGit | ProjectCommandProcess
+  PublicCommandError,
+  ReadinessHost | ReadinessFiles | ReadinessGit | ProjectCommandProcess | RunIdentityStore
 > {
+  if (invocation.command === 'run') {
+    const configArg = invocation.config;
+    const cwd = invocation.cwd;
+    const requestArg = invocation.request;
+    const taskId = invocation.taskId;
+    const runId = invocation.runId;
+    if (
+      configArg === undefined ||
+      cwd === undefined ||
+      requestArg === undefined ||
+      taskId === undefined ||
+      runId === undefined
+    ) {
+      return yield* new InvalidRunRequest({
+        message: 'The run command requires --config, --request, --task-id, and --run-id.',
+        runId,
+      });
+    }
+    return yield* recordRunIdentity({ configArg, cwd, requestArg, taskId, runId });
+  }
   if (invocation.command === 'doctor') {
     const configArg = invocation.config;
     const cwd = invocation.cwd;

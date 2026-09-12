@@ -11,6 +11,7 @@ import {
   isNonProductCommand,
   isPublicCommand,
 } from '../domain/public-commands.js';
+import { Identifier } from '../domain/run-identity.js';
 
 import type { PublicCommand, PublicCommandInvocation } from '../domain/public-commands.js';
 import type { PublicCommandReport } from '../application/public-commands.js';
@@ -20,6 +21,7 @@ import type {
   ReadinessGit,
   ReadinessHost,
 } from '../application/readiness/index.js';
+import type { RunIdentityStore } from '../application/run-identity/index.js';
 
 const UNKNOWN_COMMAND_LABEL = 'foundry';
 
@@ -108,12 +110,6 @@ function tokenizeArgv(argv: ReadonlyArray<string>): RawArgv {
 
   return { command, booleans, values, error };
 }
-
-const Identifier = Schema.String.check(
-  Schema.isMinLength(1),
-  Schema.isMaxLength(64),
-  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
-);
 
 const PathValue = Schema.NonEmptyString;
 
@@ -249,11 +245,28 @@ const ProfileCheckReportData = Schema.Struct({
   ),
 });
 
+const RecordedRunReportData = Schema.Struct({
+  runId: Schema.String,
+  taskId: Schema.String,
+  runDirectory: Schema.String,
+  request: Schema.Struct({
+    sourcePath: Schema.String,
+    originalPath: Schema.String,
+    normalizedPath: Schema.String,
+    identityPath: Schema.String,
+    originalByteLength: Schema.Number,
+    originalContentHash: Schema.String,
+    normalizedByteLength: Schema.Number,
+    normalizedPromptHash: Schema.String,
+  }),
+});
+
 const ReportData = Schema.Union([
   StubReportData,
   DoctorReportData,
   InitPreviewReportData,
   ProfileCheckReportData,
+  RecordedRunReportData,
 ]);
 
 const SuccessEnvelope = Schema.Struct({
@@ -459,6 +472,20 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
           `data.commands: ${command.name} ${command.command.join(' ')} ${command.exitCode}`,
         );
       }
+    } else if ('request' in data) {
+      lines.push(
+        `data.runId: ${data.runId}`,
+        `data.taskId: ${data.taskId}`,
+        `data.runDirectory: ${data.runDirectory}`,
+        `data.request.sourcePath: ${data.request.sourcePath}`,
+        `data.request.originalPath: ${data.request.originalPath}`,
+        `data.request.normalizedPath: ${data.request.normalizedPath}`,
+        `data.request.identityPath: ${data.request.identityPath}`,
+        `data.request.originalByteLength: ${data.request.originalByteLength}`,
+        `data.request.originalContentHash: ${data.request.originalContentHash}`,
+        `data.request.normalizedByteLength: ${data.request.normalizedByteLength}`,
+        `data.request.normalizedPromptHash: ${data.request.normalizedPromptHash}`,
+      );
     } else {
       lines.push(
         `data.taskId: ${data.taskId}`,
@@ -503,6 +530,7 @@ function toDomainInvocation(
         runId: invocation.runId,
         taskId: invocation.taskId,
         config: invocation.config,
+        request: invocation.request,
         cwd,
       };
     }
@@ -618,6 +646,23 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       })),
     };
   }
+  if ('request' in report) {
+    return {
+      runId: report.runId,
+      taskId: report.taskId,
+      runDirectory: report.runDirectory,
+      request: {
+        sourcePath: report.request.sourcePath,
+        originalPath: report.request.originalPath,
+        normalizedPath: report.request.normalizedPath,
+        identityPath: report.request.identityPath,
+        originalByteLength: report.request.originalByteLength,
+        originalContentHash: report.request.originalContentHash,
+        normalizedByteLength: report.request.normalizedByteLength,
+        normalizedPromptHash: report.request.normalizedPromptHash,
+      },
+    };
+  }
   return {
     taskId: report.taskId,
     source: {
@@ -642,7 +687,7 @@ export const runCli = Effect.fn('runCli')(function* (
 ): Effect.fn.Return<
   CliResult,
   never,
-  ReadinessHost | ReadinessFiles | ReadinessGit | ProjectCommandProcess
+  ReadinessHost | ReadinessFiles | ReadinessGit | ProjectCommandProcess | RunIdentityStore
 > {
   const decoded = yield* decodeInvocation(argv).pipe(Effect.result);
 
@@ -672,14 +717,18 @@ export const runCli = Effect.fn('runCli')(function* (
   );
 
   if (Result.isFailure(outcome)) {
+    const failureValue = outcome.failure;
+    const errorRunId = 'runId' in failureValue ? failureValue.runId : undefined;
+    const invocationRunId = 'runId' in invocation ? invocation.runId : undefined;
     const failure: ReportEnvelopeValue = {
       schemaVersion: REPORT_SCHEMA_VERSION,
       command: invocation.command,
       ok: false,
       error: {
         kind: INVALID_INVOCATION_KIND,
-        message: outcome.failure.message,
+        message: failureValue.message,
         retryable: false,
+        runId: errorRunId ?? invocationRunId,
       },
     };
     return {

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
 import { ReadinessFiles, ReadinessGit, ReadinessHost } from '../src/application/readiness/index.js';
+import { RunIdentityStore } from '../src/application/run-identity/index.js';
 import {
   EXIT_CODES,
   INTERRUPT_EXIT_CODES,
@@ -87,6 +88,20 @@ const UntouchedReadiness = Layer.mergeAll(
         untouchedReadiness('process.run'),
     }),
   ),
+  Layer.succeed(
+    RunIdentityStore,
+    RunIdentityStore.of({
+      statRequest: (_path: string) => untouchedReadiness('runIdentity.statRequest'),
+      readRequestBytes: (_path: string) => untouchedReadiness('runIdentity.readRequestBytes'),
+      ensureParentDirectory: (_path: string) =>
+        untouchedReadiness('runIdentity.ensureParentDirectory'),
+      createRunDirectoryExclusive: (_path: string, _runId: string) =>
+        untouchedReadiness('runIdentity.createRunDirectoryExclusive'),
+      writeFileBytes: (_path: string, _bytes: Uint8Array) =>
+        untouchedReadiness('runIdentity.writeFileBytes'),
+      removeDirectory: (_path: string) => untouchedReadiness('runIdentity.removeDirectory'),
+    }),
+  ),
 );
 
 function runStubCli(argv: ReadonlyArray<string>) {
@@ -101,22 +116,6 @@ interface ValidScenario {
 }
 
 const validScenarios: ReadonlyArray<ValidScenario> = [
-  {
-    command: 'run',
-    argv: [
-      'run',
-      '--config',
-      'foundry.config.json',
-      '--request',
-      'request.md',
-      '--task-id',
-      'TASK-1',
-      '--run-id',
-      'RUN-1',
-    ],
-    runId: 'RUN-1',
-    taskId: 'TASK-1',
-  },
   {
     command: 'resume',
     argv: ['resume', '--config', 'foundry.config.json', '--run-id', 'RUN-1'],
