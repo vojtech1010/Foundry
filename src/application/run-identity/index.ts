@@ -16,13 +16,13 @@ import {
   INITIAL_WORKFLOW_STATE,
   WORKFLOW_STATE_FILENAME,
   WORKFLOW_STATE_SCHEMA_VERSION,
-  WorkflowStateDocumentSchema,
+  WorkflowStateRecordSchema,
 } from '../../domain/workflow.js';
 import { decodeProjectConfiguration } from '../project-configuration.js';
 import { ReadinessFiles } from '../readiness/index.js';
 
 import type { ProjectConfiguration } from '../../domain/project-configuration.js';
-import type { WorkflowState } from '../../domain/workflow.js';
+import type { WorkflowState, WorkflowStateRecord } from '../../domain/workflow.js';
 
 export class InvalidRunRequest extends Schema.TaggedError<InvalidRunRequest>()(
   'InvalidRunRequest',
@@ -333,7 +333,6 @@ export const readRunWorkflowState = Effect.fn('readRunWorkflowState')(function* 
   RunStateUnavailable,
   ReadinessFiles | RunIdentityStore
 > {
-  const store = yield* RunIdentityStore;
   const runId = options.runId;
 
   if (!isRunIdentifier(runId)) {
@@ -348,6 +347,16 @@ export const readRunWorkflowState = Effect.fn('readRunWorkflowState')(function* 
   );
 
   const runDirectory = runDirectoryOf(configuration, runId);
+  const record = yield* readWorkflowStateRecord(runDirectory, runId);
+
+  return { runId, workflowState: record.state };
+});
+
+export const readWorkflowStateRecord = Effect.fn('readWorkflowStateRecord')(function* (
+  runDirectory: string,
+  runId: string,
+): Effect.fn.Return<WorkflowStateRecord, RunStateUnavailable, RunIdentityStore> {
+  const store = yield* RunIdentityStore;
   const statePath = join(runDirectory, WORKFLOW_STATE_FILENAME);
 
   const status = yield* store.statPath(statePath).pipe(
@@ -403,7 +412,7 @@ export const readRunWorkflowState = Effect.fn('readRunWorkflowState')(function* 
     ),
   );
 
-  const record = yield* Schema.decodeUnknownEffect(WorkflowStateDocumentSchema, {
+  const record = yield* Schema.decodeUnknownEffect(WorkflowStateRecordSchema, {
     onExcessProperty: 'error',
   })(document).pipe(
     Effect.mapError(
@@ -422,5 +431,5 @@ export const readRunWorkflowState = Effect.fn('readRunWorkflowState')(function* 
     });
   }
 
-  return { runId, workflowState: record.state };
+  return record;
 });

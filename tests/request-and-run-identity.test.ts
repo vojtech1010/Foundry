@@ -17,6 +17,7 @@ import {
   readRunWorkflowState,
   recordRunIdentity,
 } from '../src/application/run-identity/index.js';
+import { transitionWorkflow } from '../src/application/workflow-transitions/index.js';
 import {
   Identifier,
   REQUEST_IDENTITY_FILENAME,
@@ -36,6 +37,7 @@ import {
   TERMINAL_WORKFLOW_STATES,
   WORKFLOW_STATES,
   WORKFLOW_STATE_FILENAME,
+  WORKFLOW_STATE_PROGRESS_SCHEMA_VERSION,
   WORKFLOW_STATE_SCHEMA_VERSION,
   WorkflowStateDocumentSchema,
   WorkflowStateSchema,
@@ -677,6 +679,38 @@ describe('workflow state through run storage', () => {
           });
           expect(report).toEqual({ runId: 'RUN-READ', workflowState: state });
         }
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('reads progress records written by the transition gate', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        writeFileSync(fixture.requestPath, 'progress ask\n');
+        const recorded = yield* recordWithLive({
+          configPath: fixture.configPath,
+          requestPath: fixture.requestPath,
+          taskId: 'TASK-1',
+          runId: 'RUN-PROGRESS',
+        });
+        const transitioned = yield* transitionWorkflow({
+          runDirectory: recorded.runDirectory,
+          runId: 'RUN-PROGRESS',
+          request: { route: 'plan-accepted', planRequiresImplementation: true },
+        }).pipe(Effect.provide(LiveFilesAndStore));
+        expect(transitioned.workflowState).toBe('coding');
+
+        const report = yield* readWithLive({
+          configPath: fixture.configPath,
+          runId: 'RUN-PROGRESS',
+        });
+        expect(report).toEqual({ runId: 'RUN-PROGRESS', workflowState: 'coding' });
+
+        const stateText = readFileSync(statePathOf(fixture, 'RUN-PROGRESS'), 'utf8');
+        expect(stateText).toContain(`"schemaVersion": ${WORKFLOW_STATE_PROGRESS_SCHEMA_VERSION}`);
       } finally {
         fixture.cleanup();
       }
