@@ -13,6 +13,12 @@ import {
 
 import type { PublicCommandInvocation } from '../domain/public-commands.js';
 import type {
+  RunHistoryConflict,
+  RunHistoryIntegrityError,
+  RunHistoryStorage,
+  RunHistoryStorageError,
+} from './run-history/index.js';
+import type {
   DoctorReport,
   ReadinessError,
   ReadinessFiles,
@@ -56,7 +62,10 @@ export type PublicCommandError =
   | PreviewLocationsError
   | ProfileCheckError
   | RunIdentityError
-  | RunStateUnavailable;
+  | RunStateUnavailable
+  | RunHistoryIntegrityError
+  | RunHistoryStorageError
+  | RunHistoryConflict;
 
 function stubReport(invocation: PublicCommandInvocation): StubCommandReport {
   const report: StubCommandReport = {
@@ -76,7 +85,12 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
 ): Effect.fn.Return<
   PublicCommandReport,
   PublicCommandError,
-  ReadinessHost | ReadinessFiles | ReadinessGit | ProjectCommandProcess | RunIdentityStore
+  | ReadinessHost
+  | ReadinessFiles
+  | ReadinessGit
+  | ProjectCommandProcess
+  | RunIdentityStore
+  | RunHistoryStorage
 > {
   if (invocation.command === 'run') {
     const configArg = invocation.config;

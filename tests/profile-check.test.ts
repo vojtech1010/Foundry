@@ -18,6 +18,8 @@ import {
   ReadinessGit,
   ReadinessHost,
 } from '../src/application/readiness/index.js';
+import { RunHistoryStorage } from '../src/application/run-history/index.js';
+import { RunIdentityStore } from '../src/application/run-identity/index.js';
 import { EXIT_CODES } from '../src/domain/public-commands.js';
 import { ProjectCommandProcessLive } from '../src/platform/commands.js';
 import { ReadinessFilesLive, ReadinessGitLive } from '../src/platform/readiness.js';
@@ -157,11 +159,20 @@ interface GitCall {
 
 interface BuiltProfileWorld {
   readonly layer: Layer.Layer<
-    ReadinessHost | ReadinessFiles | ReadinessGit | ProjectCommandProcess
+    | ReadinessHost
+    | ReadinessFiles
+    | ReadinessGit
+    | ProjectCommandProcess
+    | RunIdentityStore
+    | RunHistoryStorage
   >;
   readonly processCalls: Array<ProcessCall>;
   readonly gitCalls: Array<GitCall>;
   readonly gitState: MutableGitState;
+}
+
+function mustNotTouchRunStorage(operation: string) {
+  return Effect.die(new Error(`Profile checks must not touch run storage (${operation}).`));
 }
 
 function buildProfileWorld(options: {
@@ -241,6 +252,26 @@ function buildProfileWorld(options: {
           }
           return script(gitState);
         },
+      }),
+    ),
+    Layer.succeed(
+      RunIdentityStore,
+      RunIdentityStore.of({
+        statPath: (_path: string) => mustNotTouchRunStorage('statPath'),
+        readFileBytes: (_path: string) => mustNotTouchRunStorage('readFileBytes'),
+        ensureParentDirectory: (_path: string) => mustNotTouchRunStorage('ensureParentDirectory'),
+        createRunDirectoryExclusive: (_path: string, _runId: string) =>
+          mustNotTouchRunStorage('createRunDirectoryExclusive'),
+        writeFileBytes: (_path: string, _bytes: Uint8Array) =>
+          mustNotTouchRunStorage('writeFileBytes'),
+        removeDirectory: (_path: string) => mustNotTouchRunStorage('removeDirectory'),
+      }),
+    ),
+    Layer.succeed(
+      RunHistoryStorage,
+      RunHistoryStorage.of({
+        readHistoryFiles: (_runDirectory: string) => mustNotTouchRunStorage('readHistoryFiles'),
+        commitHistory: (_options) => mustNotTouchRunStorage('commitHistory'),
       }),
     ),
   );

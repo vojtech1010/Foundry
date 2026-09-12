@@ -18,6 +18,7 @@ import type { PublicCommand, PublicCommandInvocation } from '../domain/public-co
 import type { ReportFailureKind } from '../domain/public-commands.js';
 import type { PublicCommandError, PublicCommandReport } from '../application/public-commands.js';
 import type { ProjectCommandProcess } from '../application/profile-check/index.js';
+import type { RunHistoryStorage } from '../application/run-history/index.js';
 import type {
   ReadinessFiles,
   ReadinessGit,
@@ -523,7 +524,15 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
 }
 
 function failureKindFor(error: PublicCommandError): ReportFailureKind {
-  return error._tag === 'RunStateUnavailable' ? 'failed' : INVALID_INVOCATION_KIND;
+  switch (error._tag) {
+    case 'RunStateUnavailable':
+    case 'RunHistoryIntegrityError':
+    case 'RunHistoryStorageError':
+    case 'RunHistoryConflict':
+      return 'failed';
+    default:
+      return INVALID_INVOCATION_KIND;
+  }
 }
 
 function renderEnvelope(envelope: ReportEnvelopeValue, json: boolean): string {
@@ -707,7 +716,12 @@ export const runCli = Effect.fn('runCli')(function* (
 ): Effect.fn.Return<
   CliResult,
   never,
-  ReadinessHost | ReadinessFiles | ReadinessGit | ProjectCommandProcess | RunIdentityStore
+  | ReadinessHost
+  | ReadinessFiles
+  | ReadinessGit
+  | ProjectCommandProcess
+  | RunIdentityStore
+  | RunHistoryStorage
 > {
   const decoded = yield* decodeInvocation(argv).pipe(Effect.result);
 

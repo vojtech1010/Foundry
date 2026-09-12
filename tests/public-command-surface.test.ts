@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
 import { ReadinessFiles, ReadinessGit, ReadinessHost } from '../src/application/readiness/index.js';
+import { RunHistoryStorage } from '../src/application/run-history/index.js';
 import { RunIdentityStore } from '../src/application/run-identity/index.js';
 import {
   EXIT_CODES,
@@ -100,6 +101,14 @@ const UntouchedReadiness = Layer.mergeAll(
       writeFileBytes: (_path: string, _bytes: Uint8Array) =>
         untouchedReadiness('runIdentity.writeFileBytes'),
       removeDirectory: (_path: string) => untouchedReadiness('runIdentity.removeDirectory'),
+    }),
+  ),
+  Layer.succeed(
+    RunHistoryStorage,
+    RunHistoryStorage.of({
+      readHistoryFiles: (_runDirectory: string) =>
+        untouchedReadiness('runHistory.readHistoryFiles'),
+      commitHistory: (_options) => untouchedReadiness('runHistory.commitHistory'),
     }),
   ),
 );
