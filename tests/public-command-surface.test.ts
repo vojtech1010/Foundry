@@ -7,6 +7,10 @@ import { join } from 'node:path';
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
 import { ReadinessFiles, ReadinessGit, ReadinessHost } from '../src/application/readiness/index.js';
+import {
+  RepositoryHostIdentity,
+  RepositoryLeaseStore,
+} from '../src/application/repository-lease/index.js';
 import { RunHistoryStorage } from '../src/application/run-history/index.js';
 import { RunIdentityStore } from '../src/application/run-identity/index.js';
 import {
@@ -110,6 +114,26 @@ const UntouchedReadiness = Layer.mergeAll(
         untouchedReadiness('runHistory.readHistoryFiles'),
       commitHistory: (_options) => untouchedReadiness('runHistory.commitHistory'),
       replaceDerivedReports: (_options) => untouchedReadiness('runHistory.replaceDerivedReports'),
+    }),
+  ),
+  Layer.succeed(
+    RepositoryLeaseStore,
+    RepositoryLeaseStore.of({
+      ensureDirectory: (_path: string) => untouchedReadiness('repositoryLease.ensureDirectory'),
+      statPath: (_path: string) => untouchedReadiness('repositoryLease.statPath'),
+      createGuardFile: (_path: string, _bytes: Uint8Array) =>
+        untouchedReadiness('repositoryLease.createGuardFile'),
+      writeFileAtomically: (_path: string, _bytes: Uint8Array) =>
+        untouchedReadiness('repositoryLease.writeFileAtomically'),
+      removeFile: (_path: string) => untouchedReadiness('repositoryLease.removeFile'),
+    }),
+  ),
+  Layer.succeed(
+    RepositoryHostIdentity,
+    RepositoryHostIdentity.of({
+      hostIdentity: untouchedReadiness('repositoryLease.hostIdentity'),
+      currentProcess: untouchedReadiness('repositoryLease.currentProcess'),
+      probeProcess: (_processId: number) => untouchedReadiness('repositoryLease.probeProcess'),
     }),
   ),
 );
