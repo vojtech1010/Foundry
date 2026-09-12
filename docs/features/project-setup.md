@@ -109,7 +109,8 @@ This is the intended Foundry contract, not a compatibility promise to the
 source project's configuration schema. Documents are closed and unknown fields
 must be rejected. Projects without a safely prepared application runtime set
 `runtimeProfile` to `null`. Projects that cannot publish a decision PR set
-`decisionPublication` to `null`.
+`decisionPublication` to `null`. Both keys are always present; JSON `null` is
+the omission form.
 
 `decisionPublication.draft` is always `true` and `maintainersCanModify` is
 always `false`; non-draft or mutable-head automated publication is unsupported.
