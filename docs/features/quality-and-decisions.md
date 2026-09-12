@@ -83,8 +83,11 @@ human decision, or block; it cannot approve missing required evidence.
 Finding records are Foundry-owned. A `changes_requested` turn creates one
 blocking correction brief with an assigned ID, category `review`, owner `coder`,
 the full Reviewer Markdown as its required outcome, and automatic references to
-the current commit and evidence set. Reviewer may organize multiple issues
-freely inside that narrative instead of populating one schema object per issue.
+the current commit and evidence set. Coder must close every medium-or-higher
+finding in that Markdown. A low-severity finding is fixed only when Coder
+agrees it should be; disagreement is recorded and does not fail the
+correction. Reviewer may organize multiple issues freely inside that
+narrative instead of populating one schema object per issue.
 Failed deterministic commands get separate Foundry-generated findings.
 Environment and workflow failures use retry/recovery rather than being
 misclassified as product decisions.

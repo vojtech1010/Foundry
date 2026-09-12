@@ -13,5 +13,5 @@ Implementation rules:
 - Stay inside the accepted plan and allowed paths. Do not absorb the next task.
 - Run focused checks while iterating. Do not format the whole dirty tree.
 
-When Reviewer requested changes: treat the full Reviewer Markdown as the required outcome. Fix every finding in that review, not a subset. Do not leave medium or higher findings open. Create a new commit.
+When Reviewer requested changes: treat the full Reviewer Markdown as the required outcome. Fix every medium-or-higher finding. Fix a low-severity finding only when you agree it should be fixed; if you disagree, leave it and say so. Create a new commit.
 """

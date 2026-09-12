@@ -1,6 +1,6 @@
 ---
 name: agent-friendly-codebase
-description: Design, evolve, audit, and refactor codebases for long-term maintainability by coding agents. Use for feature implementation, maintainability audits, bounded refactoring, and when writing or migrating Effect code (services, Layers, tagged errors, TestClock, Promise adapters). Optimizes for locality, deep modules, explicit contracts, mechanically enforced boundaries, deterministic verification, repository legibility, and continuous architectural cleanup.
+description: Design, evolve, audit, review, and refactor codebases for long-term maintainability by coding agents. Use for feature implementation, maintainability audits, diff-bounded reviews, bounded refactoring, and when writing or migrating Effect code (services, Layers, tagged errors, TestClock, Promise adapters). Optimizes for locality, deep modules, explicit contracts, mechanically enforced boundaries, deterministic verification, repository legibility, and continuous architectural cleanup.
 ---
 
 # Agent-Friendly Codebase
@@ -59,6 +59,25 @@ Rules:
 - Produce bounded remediation candidates rather than one giant rewrite proposal.
 
 Read `workflows/audit.md` and `references/scoring.md`.
+
+### REVIEW
+
+Use when judging whether a current change meets this skill's standard, without
+modifying code and without scoring the repository.
+
+Goal: accept or reject the touched slice against the skill as a reference.
+Do not perform a full-repository audit.
+
+Rules:
+
+- Do not edit code.
+- Bound the review to the current-commit diff and its public seams.
+- Do not assign 1–5 dimension scores or produce a refactor backlog.
+- File evidence-backed findings with severity. Taste nits are low, or notes.
+- When Effect is in the diff, read `references/effect.md` then
+  `node_modules/effect/AGENTS.md`.
+
+Read `workflows/review.md`.
 
 ### REFACTOR
 
@@ -265,6 +284,11 @@ Use `templates/architecture-impact.md` when architecture impact is non-trivial.
 ### AUDIT
 
 Use `templates/maintainability-audit.md` and rank findings by severity and leverage.
+
+### REVIEW
+
+List findings with severity and evidence. Do not fill
+`templates/maintainability-audit.md`.
 
 ### REFACTOR
 

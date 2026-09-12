@@ -50,8 +50,7 @@ Effect error channel.
 - `.agents/skills/agent-friendly-codebase/`: maintainability workflow and
   references for agents.
 - `.codex/agents/`: role-specific project guidance for Architect, Coder,
-  Tester, and Reviewer. Reviewer uses the skill in AUDIT mode and treats
-  medium-or-higher findings as a return to Coder.
+  Tester, and Reviewer.
 
 Add deeper modules only when their ownership is clear. Keep public seams narrow
 and keep infrastructure details behind application-owned contracts.
@@ -75,7 +74,8 @@ run broad formatting across a dirty worktree; format only touched files.
 ## Change discipline
 
 - Inspect `git status` first and preserve unrelated changes.
-- Use the `agent-friendly-codebase` skill for features, audits, and refactors.
+- Use the `agent-friendly-codebase` skill for features, audits, reviews, and
+  refactors.
 - Keep domain independent from application and CLI; keep application independent
   from CLI.
 - Define untrusted inputs with explicit Effect Schema contracts at boundaries.

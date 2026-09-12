@@ -1,6 +1,6 @@
 # Agent-Maintainability Scoring
 
-Use this scoring model in AUDIT mode. Scores are directional, not mathematical truth.
+Use this scoring model in AUDIT mode. Scores are directional, not mathematical truth. Do not use this scoring model in REVIEW mode; REVIEW files findings with severity only.
 
 Score each dimension from 1 (poor) to 5 (strong).
 

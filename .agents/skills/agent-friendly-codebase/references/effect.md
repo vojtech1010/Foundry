@@ -4,7 +4,7 @@ Use this reference whenever Foundry production code depends on Effect.
 
 ## Source of truth
 
-Before writing Effect code, read `node_modules/effect/AGENTS.md` completely. It
+Before writing or auditing Effect code, read `node_modules/effect/AGENTS.md` completely. It
 is version-locked to this repository and is authoritative for API style. Search
 `node_modules/effect/src` when that guide omits an API. Do not copy external or
 memory-based Effect APIs into the project.
