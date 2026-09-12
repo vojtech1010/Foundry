@@ -12,9 +12,11 @@ import {
   isPublicCommand,
 } from '../domain/public-commands.js';
 import { Identifier } from '../domain/run-identity.js';
+import { WorkflowStateSchema } from '../domain/workflow.js';
 
 import type { PublicCommand, PublicCommandInvocation } from '../domain/public-commands.js';
-import type { PublicCommandReport } from '../application/public-commands.js';
+import type { ReportFailureKind } from '../domain/public-commands.js';
+import type { PublicCommandError, PublicCommandReport } from '../application/public-commands.js';
 import type { ProjectCommandProcess } from '../application/profile-check/index.js';
 import type {
   ReadinessFiles,
@@ -245,6 +247,11 @@ const ProfileCheckReportData = Schema.Struct({
   ),
 });
 
+const RunWorkflowStateReportData = Schema.Struct({
+  runId: Schema.String,
+  workflowState: WorkflowStateSchema,
+});
+
 const RecordedRunReportData = Schema.Struct({
   runId: Schema.String,
   taskId: Schema.String,
@@ -267,6 +274,7 @@ const ReportData = Schema.Union([
   InitPreviewReportData,
   ProfileCheckReportData,
   RecordedRunReportData,
+  RunWorkflowStateReportData,
 ]);
 
 const SuccessEnvelope = Schema.Struct({
@@ -486,6 +494,8 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         `data.request.normalizedByteLength: ${data.request.normalizedByteLength}`,
         `data.request.normalizedPromptHash: ${data.request.normalizedPromptHash}`,
       );
+    } else if ('workflowState' in data) {
+      lines.push(`data.runId: ${data.runId}`, `data.workflowState: ${data.workflowState}`);
     } else {
       lines.push(
         `data.taskId: ${data.taskId}`,
@@ -510,6 +520,10 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
     }
   }
   return `${lines.join('\n')}\n`;
+}
+
+function failureKindFor(error: PublicCommandError): ReportFailureKind {
+  return error._tag === 'RunStateUnavailable' ? 'failed' : INVALID_INVOCATION_KIND;
 }
 
 function renderEnvelope(envelope: ReportEnvelopeValue, json: boolean): string {
@@ -663,6 +677,12 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       },
     };
   }
+  if ('workflowState' in report) {
+    return {
+      runId: report.runId,
+      workflowState: report.workflowState,
+    };
+  }
   return {
     taskId: report.taskId,
     source: {
@@ -720,19 +740,20 @@ export const runCli = Effect.fn('runCli')(function* (
     const failureValue = outcome.failure;
     const errorRunId = 'runId' in failureValue ? failureValue.runId : undefined;
     const invocationRunId = 'runId' in invocation ? invocation.runId : undefined;
+    const failureKind = failureKindFor(failureValue);
     const failure: ReportEnvelopeValue = {
       schemaVersion: REPORT_SCHEMA_VERSION,
       command: invocation.command,
       ok: false,
       error: {
-        kind: INVALID_INVOCATION_KIND,
+        kind: failureKind,
         message: failureValue.message,
         retryable: false,
         runId: errorRunId ?? invocationRunId,
       },
     };
     return {
-      exitCode: exitCodeForOutcome({ ok: false, kind: INVALID_INVOCATION_KIND }),
+      exitCode: exitCodeForOutcome({ ok: false, kind: failureKind }),
       stdout: renderEnvelope(failure, json),
     };
   }

@@ -91,8 +91,8 @@ const UntouchedReadiness = Layer.mergeAll(
   Layer.succeed(
     RunIdentityStore,
     RunIdentityStore.of({
-      statRequest: (_path: string) => untouchedReadiness('runIdentity.statRequest'),
-      readRequestBytes: (_path: string) => untouchedReadiness('runIdentity.readRequestBytes'),
+      statPath: (_path: string) => untouchedReadiness('runIdentity.statPath'),
+      readFileBytes: (_path: string) => untouchedReadiness('runIdentity.readFileBytes'),
       ensureParentDirectory: (_path: string) =>
         untouchedReadiness('runIdentity.ensureParentDirectory'),
       createRunDirectoryExclusive: (_path: string, _runId: string) =>
@@ -134,12 +134,6 @@ const validScenarios: ReadonlyArray<ValidScenario> = [
       '--reason',
       'superseded by a new request',
     ],
-    runId: 'RUN-1',
-    taskId: undefined,
-  },
-  {
-    command: 'status',
-    argv: ['status', '--config', 'foundry.config.json', '--run-id', 'RUN-1'],
     runId: 'RUN-1',
     taskId: undefined,
   },
@@ -418,7 +412,7 @@ describe('public command surface', () => {
     Effect.gen(function* () {
       const result = yield* runStubCli([
         '--json',
-        'status',
+        'inspect',
         '--config',
         'cfg.json',
         '--run-id',
@@ -426,14 +420,14 @@ describe('public command surface', () => {
       ]);
       expect(result.exitCode).toBe(EXIT_CODES.reported);
       const { envelope, data } = expectStubEnvelope(result.stdout);
-      expect(envelope.command).toBe('status');
+      expect(envelope.command).toBe('inspect');
       expect(data.availability).toBe(NOT_AVAILABLE);
     }),
   );
 
   it.effect('presents the same facts in human output as in JSON output', () =>
     Effect.gen(function* () {
-      const argv = ['status', '--config', 'cfg.json', '--run-id', 'RUN-PARITY'];
+      const argv = ['inspect', '--config', 'cfg.json', '--run-id', 'RUN-PARITY'];
       const jsonResult = yield* runStubCli([...argv, '--json']);
       const humanResult = yield* runStubCli(argv);
       expect(jsonResult.exitCode).toBe(EXIT_CODES.reported);
@@ -454,14 +448,14 @@ describe('public command surface', () => {
 
   it.effect('renders human success and failure reports without a JSON prefix', () =>
     Effect.gen(function* () {
-      const success = yield* runStubCli(['status', '--config', 'cfg.json', '--run-id', 'RUN-1']);
+      const success = yield* runStubCli(['inspect', '--config', 'cfg.json', '--run-id', 'RUN-1']);
       expect(success.stdout).toBe(
         [
           'schemaVersion: 1',
-          'command: status',
+          'command: inspect',
           'ok: true',
           `data.availability: ${NOT_AVAILABLE}`,
-          'data.message: Foundry status is not available yet.',
+          'data.message: Foundry inspect is not available yet.',
           'data.runId: RUN-1',
           '',
         ].join('\n'),
@@ -481,7 +475,7 @@ describe('public command surface', () => {
   it.effect('writes exactly one JSON envelope per invocation', () =>
     Effect.gen(function* () {
       const result = yield* runStubCli([
-        'status',
+        'inspect',
         '--config',
         'cfg.json',
         '--run-id',

@@ -5,14 +5,24 @@ import { dirname, join, resolve } from 'node:path';
 import { RUN_STORAGE_DIRECTORY_NAME } from '../../domain/readiness.js';
 import { RUNS_DIRECTORY_NAME } from '../../domain/run-locations.js';
 import {
+  Identifier,
   REQUEST_IDENTITY_FILENAME,
   REQUEST_IDENTITY_SCHEMA_VERSION,
   REQUEST_NORMALIZED_FILENAME,
   REQUEST_ORIGINAL_FILENAME,
   normalizeRequestPromptText,
 } from '../../domain/run-identity.js';
+import {
+  INITIAL_WORKFLOW_STATE,
+  WORKFLOW_STATE_FILENAME,
+  WORKFLOW_STATE_SCHEMA_VERSION,
+  WorkflowStateDocumentSchema,
+} from '../../domain/workflow.js';
 import { decodeProjectConfiguration } from '../project-configuration.js';
 import { ReadinessFiles } from '../readiness/index.js';
+
+import type { ProjectConfiguration } from '../../domain/project-configuration.js';
+import type { WorkflowState } from '../../domain/workflow.js';
 
 export class InvalidRunRequest extends Schema.TaggedError<InvalidRunRequest>()(
   'InvalidRunRequest',
@@ -35,9 +45,17 @@ export class RunIdentityStorageError extends Schema.TaggedError<RunIdentityStora
   },
 ) {}
 
+export class RunStateUnavailable extends Schema.TaggedError<RunStateUnavailable>()(
+  'RunStateUnavailable',
+  {
+    message: Schema.String,
+    runId: Schema.String,
+  },
+) {}
+
 export type RunIdentityError = InvalidRunRequest | DuplicateRunId | RunIdentityStorageError;
 
-export interface RequestFileStatus {
+export interface RunStorageFileStatus {
   readonly exists: boolean;
   readonly isRegularFile: boolean;
 }
@@ -45,10 +63,10 @@ export interface RequestFileStatus {
 export class RunIdentityStore extends Context.Service<
   RunIdentityStore,
   {
-    readonly statRequest: (
+    readonly statPath: (
       path: string,
-    ) => Effect.Effect<RequestFileStatus, RunIdentityStorageError>;
-    readonly readRequestBytes: (path: string) => Effect.Effect<Uint8Array, RunIdentityStorageError>;
+    ) => Effect.Effect<RunStorageFileStatus, RunIdentityStorageError>;
+    readonly readFileBytes: (path: string) => Effect.Effect<Uint8Array, RunIdentityStorageError>;
     readonly ensureParentDirectory: (path: string) => Effect.Effect<void, RunIdentityStorageError>;
     readonly createRunDirectoryExclusive: (
       path: string,
@@ -88,6 +106,24 @@ export interface RecordRunIdentityOptions {
   readonly runId: string;
 }
 
+export interface RunWorkflowStateReport {
+  readonly runId: string;
+  readonly workflowState: WorkflowState;
+}
+
+export interface ReadRunWorkflowStateOptions {
+  readonly configArg: string;
+  readonly cwd: string;
+  readonly runId: string;
+}
+
+class RunConfigurationInvalid extends Schema.TaggedError<RunConfigurationInvalid>()(
+  'RunConfigurationInvalid',
+  {
+    message: Schema.String,
+  },
+) {}
+
 function excerpt(output: string): string {
   return output.trim().replaceAll(/\s+/gu, ' ').trim().slice(0, 500);
 }
@@ -96,26 +132,30 @@ function sha256HexOfBytes(bytes: Uint8Array): string {
   return createHash('sha256').update(Buffer.from(bytes)).digest('hex');
 }
 
-export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
-  options: RecordRunIdentityOptions,
-): Effect.fn.Return<
-  RecordedRunIdentityReport,
-  RunIdentityError,
-  ReadinessFiles | RunIdentityStore
-> {
+function isRunIdentifier(value: string): boolean {
+  return Schema.is(Identifier)(value);
+}
+
+function runDirectoryOf(configuration: ProjectConfiguration, runId: string): string {
+  return join(
+    configuration.targetRepository,
+    RUN_STORAGE_DIRECTORY_NAME,
+    RUNS_DIRECTORY_NAME,
+    runId,
+  );
+}
+
+const readRunConfiguration = Effect.fn('readRunConfiguration')(function* (
+  configArg: string,
+  cwd: string,
+): Effect.fn.Return<ProjectConfiguration, RunConfigurationInvalid, ReadinessFiles> {
   const files = yield* ReadinessFiles;
-  const store = yield* RunIdentityStore;
-  const runId = options.runId;
-
-  const configPath = resolve(options.cwd, options.configArg);
-  const sourceRequestPath = resolve(options.cwd, options.requestArg);
-
+  const configPath = resolve(cwd, configArg);
   const configText = yield* files.readFile(configPath).pipe(
     Effect.mapError(
       (error) =>
-        new InvalidRunRequest({
+        new RunConfigurationInvalid({
           message: `Cannot read configuration document at ${configPath}: ${excerpt(error.message)}.`,
-          runId,
         }),
     ),
   );
@@ -124,23 +164,33 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   ).pipe(
     Effect.mapError(
       (error) =>
-        new InvalidRunRequest({
+        new RunConfigurationInvalid({
           message: `Configuration document at ${configPath} is not valid JSON: ${excerpt(error.message)}.`,
-          runId,
         }),
     ),
   );
-  const configuration = yield* decodeProjectConfiguration(document, dirname(configPath)).pipe(
-    Effect.mapError(
-      (error) =>
-        new InvalidRunRequest({
-          message: error.message,
-          runId,
-        }),
-    ),
+  return yield* decodeProjectConfiguration(document, dirname(configPath)).pipe(
+    Effect.mapError((error) => new RunConfigurationInvalid({ message: error.message })),
+  );
+});
+
+export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
+  options: RecordRunIdentityOptions,
+): Effect.fn.Return<
+  RecordedRunIdentityReport,
+  RunIdentityError,
+  ReadinessFiles | RunIdentityStore
+> {
+  const store = yield* RunIdentityStore;
+  const runId = options.runId;
+
+  const sourceRequestPath = resolve(options.cwd, options.requestArg);
+
+  const configuration = yield* readRunConfiguration(options.configArg, options.cwd).pipe(
+    Effect.mapError((error) => new InvalidRunRequest({ message: error.message, runId })),
   );
 
-  const status = yield* store.statRequest(sourceRequestPath).pipe(
+  const status = yield* store.statPath(sourceRequestPath).pipe(
     Effect.mapError(
       (error) =>
         new InvalidRunRequest({
@@ -162,7 +212,7 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
     });
   }
 
-  const originalBytes = yield* store.readRequestBytes(sourceRequestPath).pipe(
+  const originalBytes = yield* store.readFileBytes(sourceRequestPath).pipe(
     Effect.mapError(
       (error) =>
         new InvalidRunRequest({
@@ -199,12 +249,7 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   const originalContentHash = sha256HexOfBytes(originalBytes);
   const normalizedPromptHash = sha256HexOfBytes(normalizedBytes);
 
-  const runDirectory = join(
-    configuration.targetRepository,
-    RUN_STORAGE_DIRECTORY_NAME,
-    RUNS_DIRECTORY_NAME,
-    runId,
-  );
+  const runDirectory = runDirectoryOf(configuration, runId);
   const runsRoot = join(
     configuration.targetRepository,
     RUN_STORAGE_DIRECTORY_NAME,
@@ -213,6 +258,7 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   const originalPath = join(runDirectory, REQUEST_ORIGINAL_FILENAME);
   const normalizedPath = join(runDirectory, REQUEST_NORMALIZED_FILENAME);
   const identityPath = join(runDirectory, REQUEST_IDENTITY_FILENAME);
+  const statePath = join(runDirectory, WORKFLOW_STATE_FILENAME);
 
   yield* store.ensureParentDirectory(runsRoot).pipe(
     Effect.mapError(
@@ -237,10 +283,18 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   } as const;
   const identityBytes = new TextEncoder().encode(`${JSON.stringify(identityDocument, null, 2)}\n`);
 
+  const stateDocument = {
+    schemaVersion: WORKFLOW_STATE_SCHEMA_VERSION,
+    runId,
+    state: INITIAL_WORKFLOW_STATE,
+  } as const;
+  const stateBytes = new TextEncoder().encode(`${JSON.stringify(stateDocument, null, 2)}\n`);
+
   const persist = Effect.gen(function* () {
     yield* store.writeFileBytes(originalPath, originalBytes);
     yield* store.writeFileBytes(normalizedPath, normalizedBytes);
     yield* store.writeFileBytes(identityPath, identityBytes);
+    yield* store.writeFileBytes(statePath, stateBytes);
   }).pipe(
     Effect.mapError(
       (error) =>
@@ -270,4 +324,103 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
       normalizedPromptHash,
     },
   };
+});
+
+export const readRunWorkflowState = Effect.fn('readRunWorkflowState')(function* (
+  options: ReadRunWorkflowStateOptions,
+): Effect.fn.Return<
+  RunWorkflowStateReport,
+  RunStateUnavailable,
+  ReadinessFiles | RunIdentityStore
+> {
+  const store = yield* RunIdentityStore;
+  const runId = options.runId;
+
+  if (!isRunIdentifier(runId)) {
+    return yield* new RunStateUnavailable({
+      message: `Run ID "${runId}" is not a valid run identifier.`,
+      runId,
+    });
+  }
+
+  const configuration = yield* readRunConfiguration(options.configArg, options.cwd).pipe(
+    Effect.mapError((error) => new RunStateUnavailable({ message: error.message, runId })),
+  );
+
+  const runDirectory = runDirectoryOf(configuration, runId);
+  const statePath = join(runDirectory, WORKFLOW_STATE_FILENAME);
+
+  const status = yield* store.statPath(statePath).pipe(
+    Effect.mapError(
+      (error) =>
+        new RunStateUnavailable({
+          message: `Cannot inspect workflow state at ${statePath}: ${excerpt(error.message)}.`,
+          runId,
+        }),
+    ),
+  );
+  if (!status.exists) {
+    return yield* new RunStateUnavailable({
+      message: `Run "${runId}" has no recorded workflow state at ${statePath}.`,
+      runId,
+    });
+  }
+  if (!status.isRegularFile) {
+    return yield* new RunStateUnavailable({
+      message: `Workflow state at ${statePath} is not a regular file.`,
+      runId,
+    });
+  }
+
+  const stateBytes = yield* store.readFileBytes(statePath).pipe(
+    Effect.mapError(
+      (error) =>
+        new RunStateUnavailable({
+          message: `Cannot read workflow state at ${statePath}: ${excerpt(error.message)}.`,
+          runId,
+        }),
+    ),
+  );
+
+  const stateText = yield* Effect.try({
+    try: () => new TextDecoder('utf-8', { fatal: true }).decode(stateBytes),
+    catch: () =>
+      new RunStateUnavailable({
+        message: `Workflow state at ${statePath} is not valid UTF-8.`,
+        runId,
+      }),
+  });
+
+  const document = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Json))(
+    stateText,
+  ).pipe(
+    Effect.mapError(
+      (error) =>
+        new RunStateUnavailable({
+          message: `Workflow state at ${statePath} is not valid JSON: ${excerpt(error.message)}.`,
+          runId,
+        }),
+    ),
+  );
+
+  const record = yield* Schema.decodeUnknownEffect(WorkflowStateDocumentSchema, {
+    onExcessProperty: 'error',
+  })(document).pipe(
+    Effect.mapError(
+      (error) =>
+        new RunStateUnavailable({
+          message: `Workflow state at ${statePath} is not a valid state record: ${excerpt(error.message)}.`,
+          runId,
+        }),
+    ),
+  );
+
+  if (record.runId !== runId) {
+    return yield* new RunStateUnavailable({
+      message: `Workflow state at ${statePath} belongs to run "${record.runId}", not "${runId}".`,
+      runId,
+    });
+  }
+
+  return { runId, workflowState: record.state };
 });

@@ -38,5 +38,10 @@ identity without creating a live run; `init --dry-run` previews the resolved
 source, task branch, workspace, role harness, and artifact locations for a task
 ID without changing anything; `profile-check` runs the configured bootstrap
 (when present) and verification commands directly without a shell and fails
-when a command rewrites tracked Git state, without recording a live run. The remaining commands still report
-`not_available` because workflow execution has not yet been implemented.
+when a command rewrites tracked Git state, without recording a live run. `run`
+retains the request and records the initial `planning` workflow state in the run
+directory; a failed retention removes that directory. `status` reads that one
+durable state record and reports its exact name, and fails rather than guessing
+when the record is missing or invalid. The remaining commands still report
+`not_available`: no role runs, no transition enforcement, and no recovery have
+been implemented yet.
