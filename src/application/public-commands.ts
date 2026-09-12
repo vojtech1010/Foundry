@@ -5,7 +5,11 @@ import { PRODUCT_NAME } from '../domain/workflow.js';
 import { checkProjectProfile } from './profile-check/index.js';
 import { checkReadiness } from './readiness/index.js';
 import { previewRunLocations } from './preview-run-locations/index.js';
-import { InvalidRunRequest, recordRunIdentity } from './run-identity/index.js';
+import {
+  InvalidRunRequest,
+  readRunWorkflowState,
+  recordRunIdentity,
+} from './run-identity/index.js';
 
 import type { PublicCommandInvocation } from '../domain/public-commands.js';
 import type {
@@ -28,6 +32,8 @@ import type {
   RecordedRunIdentityReport,
   RunIdentityError,
   RunIdentityStore,
+  RunStateUnavailable,
+  RunWorkflowStateReport,
 } from './run-identity/index.js';
 
 export interface StubCommandReport {
@@ -42,13 +48,15 @@ export type PublicCommandReport =
   | DoctorReport
   | PreviewLocationsReport
   | ProfileCheckReport
-  | RecordedRunIdentityReport;
+  | RecordedRunIdentityReport
+  | RunWorkflowStateReport;
 
 export type PublicCommandError =
   | ReadinessError
   | PreviewLocationsError
   | ProfileCheckError
-  | RunIdentityError;
+  | RunIdentityError
+  | RunStateUnavailable;
 
 function stubReport(invocation: PublicCommandInvocation): StubCommandReport {
   const report: StubCommandReport = {
@@ -89,6 +97,15 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       });
     }
     return yield* recordRunIdentity({ configArg, cwd, requestArg, taskId, runId });
+  }
+  if (invocation.command === 'status') {
+    const configArg = invocation.config;
+    const cwd = invocation.cwd;
+    const runId = invocation.runId;
+    if (configArg === undefined || cwd === undefined || runId === undefined) {
+      return stubReport(invocation);
+    }
+    return yield* readRunWorkflowState({ configArg, cwd, runId });
   }
   if (invocation.command === 'doctor') {
     const configArg = invocation.config;

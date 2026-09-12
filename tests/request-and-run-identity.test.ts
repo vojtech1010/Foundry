@@ -11,6 +11,10 @@ import { ReadinessGit, ReadinessHost } from '../src/application/readiness/index.
 import {
   DuplicateRunId,
   InvalidRunRequest,
+  RunIdentityStorageError,
+  RunIdentityStore,
+  RunStateUnavailable,
+  readRunWorkflowState,
   recordRunIdentity,
 } from '../src/application/run-identity/index.js';
 import {
@@ -23,6 +27,19 @@ import {
   normalizeRequestPromptText,
 } from '../src/domain/run-identity.js';
 import { EXIT_CODES } from '../src/domain/public-commands.js';
+import {
+  ACTIVE_WORKFLOW_STATES,
+  DECISION_OR_PUBLICATION_WORKFLOW_STATES,
+  INITIAL_WORKFLOW_STATE,
+  RECOVERABLE_WORKFLOW_STATES,
+  SUCCESS_WORKFLOW_STATES,
+  TERMINAL_WORKFLOW_STATES,
+  WORKFLOW_STATES,
+  WORKFLOW_STATE_FILENAME,
+  WORKFLOW_STATE_SCHEMA_VERSION,
+  WorkflowStateDocumentSchema,
+  WorkflowStateSchema,
+} from '../src/domain/workflow.js';
 import { ReadinessFilesLive } from '../src/platform/readiness.js';
 import { RunIdentityLive } from '../src/platform/run-identity.js';
 
@@ -188,6 +205,118 @@ function recordWithLive(options: {
     runId: options.runId,
   }).pipe(Effect.provide(LiveFilesAndStore));
 }
+
+function readWithLive(options: { readonly configPath: string; readonly runId: string }) {
+  return readRunWorkflowState({
+    configArg: options.configPath,
+    cwd: '/',
+    runId: options.runId,
+  }).pipe(Effect.provide(LiveFilesAndStore));
+}
+
+function statePathOf(fixture: Fixture, runId: string): string {
+  return join(fixture.runDirectory(runId), WORKFLOW_STATE_FILENAME);
+}
+
+function writeState(fixture: Fixture, runId: string, state: string): string {
+  const statePath = statePathOf(fixture, runId);
+  writeFileSync(
+    statePath,
+    `${JSON.stringify({ schemaVersion: WORKFLOW_STATE_SCHEMA_VERSION, runId, state }, null, 2)}\n`,
+  );
+  return statePath;
+}
+
+describe('workflow state vocabulary', () => {
+  it('names exactly the documented workflow states', () => {
+    expect(WORKFLOW_STATES).toEqual([
+      'planning',
+      'coding',
+      'verifying',
+      'testing',
+      'reviewing',
+      'correcting',
+      'human_decision_required',
+      'publishing',
+      'completed',
+      'completed_no_change',
+      'abandoned',
+      'blocked',
+      'failed',
+      'publish_failed',
+    ]);
+    for (const state of WORKFLOW_STATES) {
+      expect(Schema.is(WorkflowStateSchema)(state), state).toBe(true);
+    }
+    for (const value of ['queued', 'running', 'approved', 'changes_requested', '']) {
+      expect(Schema.is(WorkflowStateSchema)(value), value).toBe(false);
+    }
+  });
+
+  it('classifies every state through the documented groups', () => {
+    const groups: ReadonlyArray<ReadonlyArray<string>> = [
+      ACTIVE_WORKFLOW_STATES,
+      DECISION_OR_PUBLICATION_WORKFLOW_STATES,
+      SUCCESS_WORKFLOW_STATES,
+      RECOVERABLE_WORKFLOW_STATES,
+      TERMINAL_WORKFLOW_STATES,
+    ];
+    const covered = new Set(groups.flat());
+    for (const state of WORKFLOW_STATES) {
+      expect(covered.has(state), state).toBe(true);
+    }
+    for (const state of covered) {
+      expect(
+        WORKFLOW_STATES.some((candidate) => candidate === state),
+        state,
+      ).toBe(true);
+    }
+    expect(INITIAL_WORKFLOW_STATE).toBe('planning');
+    expect(ACTIVE_WORKFLOW_STATES).toEqual([
+      'planning',
+      'coding',
+      'verifying',
+      'testing',
+      'reviewing',
+      'correcting',
+    ]);
+    expect(DECISION_OR_PUBLICATION_WORKFLOW_STATES).toEqual([
+      'human_decision_required',
+      'publishing',
+    ]);
+    expect(SUCCESS_WORKFLOW_STATES).toEqual(['completed', 'completed_no_change']);
+    expect(TERMINAL_WORKFLOW_STATES).toEqual([
+      'completed',
+      'completed_no_change',
+      'abandoned',
+      'failed',
+    ]);
+    expect(RECOVERABLE_WORKFLOW_STATES).toEqual(['blocked', 'publish_failed']);
+  });
+
+  it('decodes versioned state records and rejects unknown or malformed records', () => {
+    const decode = (value: Schema.Json) =>
+      Schema.decodeUnknownSync(WorkflowStateDocumentSchema, { onExcessProperty: 'error' })(value);
+    for (const state of WORKFLOW_STATES) {
+      expect(
+        decode({ schemaVersion: WORKFLOW_STATE_SCHEMA_VERSION, runId: 'RUN-1', state }),
+      ).toEqual({ schemaVersion: WORKFLOW_STATE_SCHEMA_VERSION, runId: 'RUN-1', state });
+    }
+    expect(() =>
+      decode({ schemaVersion: WORKFLOW_STATE_SCHEMA_VERSION, runId: 'RUN-1', state: 'queued' }),
+    ).toThrow();
+    expect(() => decode({ schemaVersion: 2, runId: 'RUN-1', state: 'planning' })).toThrow();
+    expect(() => decode({ runId: 'RUN-1', state: 'planning' })).toThrow();
+    expect(() =>
+      decode({
+        schemaVersion: WORKFLOW_STATE_SCHEMA_VERSION,
+        runId: 'RUN-1',
+        state: 'planning',
+        extra: true,
+      }),
+    ).toThrow();
+  });
+});
 
 describe('run identity vocabulary', () => {
   it('normalizes line endings to LF only', () => {
@@ -456,6 +585,164 @@ describe('recordRunIdentity with live storage', () => {
   );
 });
 
+describe('workflow state through run storage', () => {
+  it.effect('records exactly one planning state with the run ID on initialization', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        writeFileSync(fixture.requestPath, 'state ask\n');
+        const report = yield* recordWithLive({
+          configPath: fixture.configPath,
+          requestPath: fixture.requestPath,
+          taskId: 'TASK-1',
+          runId: 'RUN-STATE',
+        });
+        const statePath = statePathOf(fixture, 'RUN-STATE');
+        expect(statePath).toBe(join(report.runDirectory, WORKFLOW_STATE_FILENAME));
+        expect(existsSync(statePath)).toBe(true);
+
+        const record = yield* Schema.decodeUnknownEffect(WorkflowStateDocumentSchema, {
+          onExcessProperty: 'error',
+        })(JSON.parse(readFileSync(statePath, 'utf8')));
+        expect(record).toEqual({
+          schemaVersion: WORKFLOW_STATE_SCHEMA_VERSION,
+          runId: 'RUN-STATE',
+          state: INITIAL_WORKFLOW_STATE,
+        });
+
+        const identityText = readFileSync(report.request.identityPath, 'utf8');
+        expect(identityText).not.toContain('"state"');
+        expect(identityText).toContain(`"schemaVersion": ${REQUEST_IDENTITY_SCHEMA_VERSION}`);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('rolls back the run directory when the state record cannot be written', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        writeFileSync(fixture.requestPath, 'rollback ask\n');
+        const liveStore = yield* RunIdentityStore.pipe(Effect.provide(RunIdentityLive));
+        const failingStore = RunIdentityStore.of({
+          ...liveStore,
+          writeFileBytes: (path: string, bytes: Uint8Array) =>
+            path.endsWith(WORKFLOW_STATE_FILENAME)
+              ? Effect.fail(
+                  new RunIdentityStorageError({
+                    message: 'state write refused',
+                    runId: 'RUN-ROLLBACK',
+                  }),
+                )
+              : liveStore.writeFileBytes(path, bytes),
+        });
+        const layer = Layer.mergeAll(
+          ReadinessFilesLive,
+          Layer.succeed(RunIdentityStore, failingStore),
+        );
+        const error = yield* recordRunIdentity({
+          configArg: fixture.configPath,
+          cwd: '/',
+          requestArg: fixture.requestPath,
+          taskId: 'TASK-1',
+          runId: 'RUN-ROLLBACK',
+        }).pipe(Effect.provide(layer), Effect.flip);
+
+        expect(error).toBeInstanceOf(RunIdentityStorageError);
+        expect(error.message).toContain('Cannot retain request');
+        expect(existsSync(fixture.runDirectory('RUN-ROLLBACK'))).toBe(false);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('reads every named state from the durable record for the matching run', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        writeFileSync(fixture.requestPath, 'state ask\n');
+        yield* recordWithLive({
+          configPath: fixture.configPath,
+          requestPath: fixture.requestPath,
+          taskId: 'TASK-1',
+          runId: 'RUN-READ',
+        });
+        for (const state of WORKFLOW_STATES) {
+          writeState(fixture, 'RUN-READ', state);
+          const report = yield* readWithLive({
+            configPath: fixture.configPath,
+            runId: 'RUN-READ',
+          });
+          expect(report).toEqual({ runId: 'RUN-READ', workflowState: state });
+        }
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('reports missing, malformed, unknown, and wrong-run state without guessing', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        writeFileSync(fixture.requestPath, 'state ask\n');
+        yield* recordWithLive({
+          configPath: fixture.configPath,
+          requestPath: fixture.requestPath,
+          taskId: 'TASK-1',
+          runId: 'RUN-BAD',
+        });
+        const statePath = statePathOf(fixture, 'RUN-BAD');
+        const readState = () =>
+          readWithLive({ configPath: fixture.configPath, runId: 'RUN-BAD' }).pipe(Effect.flip);
+
+        rmSync(statePath);
+        const missing = yield* readState();
+        expect(missing).toBeInstanceOf(RunStateUnavailable);
+        expect(missing.runId).toBe('RUN-BAD');
+        expect(missing.message).toContain('no recorded workflow state');
+
+        writeFileSync(statePath, '{ not json');
+        const malformed = yield* readState();
+        expect(malformed).toBeInstanceOf(RunStateUnavailable);
+        expect(malformed.message).toContain('not valid JSON');
+
+        writeState(fixture, 'RUN-BAD', 'queued');
+        const unknown = yield* readState();
+        expect(unknown).toBeInstanceOf(RunStateUnavailable);
+        expect(unknown.message).toContain('not a valid state record');
+
+        writeFileSync(
+          statePath,
+          `${JSON.stringify({ schemaVersion: WORKFLOW_STATE_SCHEMA_VERSION, runId: 'RUN-OTHER', state: 'completed' }, null, 2)}\n`,
+        );
+        const wrongRun = yield* readState();
+        expect(wrongRun).toBeInstanceOf(RunStateUnavailable);
+        expect(wrongRun.message).toContain('RUN-OTHER');
+
+        rmSync(statePath);
+        mkdirSync(statePath);
+        const directory = yield* readState();
+        expect(directory).toBeInstanceOf(RunStateUnavailable);
+        expect(directory.message).toContain('not a regular file');
+
+        const invalidId = yield* readRunWorkflowState({
+          configArg: fixture.configPath,
+          cwd: '/',
+          runId: '../escape',
+        }).pipe(Effect.provide(LiveFilesAndStore), Effect.flip);
+        expect(invalidId).toBeInstanceOf(RunStateUnavailable);
+        expect(invalidId.message).toContain('not a valid run identifier');
+        expect(existsSync(join(fixture.target, '.agent', 'escape'))).toBe(false);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+});
+
 describe('run command through the cli envelope', () => {
   it.effect('reports recorded IDs, hashes, and retained paths with exit code 0', () =>
     Effect.gen(function* () {
@@ -628,6 +915,131 @@ describe('run command through the cli envelope', () => {
         expect(failure.error.retryable).toBe(false);
         expect(failure.error.runId).toBe('RUN-CLI-EMPTY');
         expect(existsSync(fixture.runDirectory('RUN-CLI-EMPTY'))).toBe(false);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+});
+
+describe('status command through the cli envelope', () => {
+  it.effect('reports the recorded state in json and human output with exit code 0', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        writeFileSync(fixture.requestPath, 'status ask\n');
+        const run = (argv: ReadonlyArray<string>) => runCli(argv).pipe(Effect.provide(CliLayer));
+        const recorded = yield* run([
+          'run',
+          '--config',
+          fixture.configPath,
+          '--request',
+          fixture.requestPath,
+          '--task-id',
+          'TASK-CLI',
+          '--run-id',
+          'RUN-STATUS',
+          '--json',
+        ]);
+        expect(recorded.exitCode).toBe(EXIT_CODES.reported);
+
+        for (const state of [
+          'planning',
+          'human_decision_required',
+          'publishing',
+          'completed',
+          'completed_no_change',
+          'publish_failed',
+        ] as const) {
+          writeState(fixture, 'RUN-STATUS', state);
+
+          const jsonResult = yield* run([
+            'status',
+            '--config',
+            fixture.configPath,
+            '--run-id',
+            'RUN-STATUS',
+            '--json',
+          ]);
+          expect(jsonResult.exitCode, state).toBe(EXIT_CODES.reported);
+          const envelope = envelopeFrom(jsonResult.stdout);
+          expect(envelope.ok, state).toBe(true);
+          if (!envelope.ok) {
+            throw new Error(`Expected a success envelope but received: ${jsonResult.stdout}`);
+          }
+          expect(envelope.command).toBe('status');
+          expect(envelope.data).toEqual({ runId: 'RUN-STATUS', workflowState: state });
+
+          const humanResult = yield* run([
+            'status',
+            '--config',
+            fixture.configPath,
+            '--run-id',
+            'RUN-STATUS',
+          ]);
+          expect(humanResult.exitCode, state).toBe(EXIT_CODES.reported);
+          expect(humanResult.stdout).toContain('command: status');
+          expect(humanResult.stdout).toContain('data.runId: RUN-STATUS');
+          expect(humanResult.stdout).toContain(`data.workflowState: ${state}`);
+          expect(humanResult.stdout.endsWith('\n')).toBe(true);
+        }
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('fails status without synthesizing a state when the record is missing or invalid', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        writeFileSync(fixture.requestPath, 'status ask\n');
+        const run = (argv: ReadonlyArray<string>) => runCli(argv).pipe(Effect.provide(CliLayer));
+        yield* run([
+          'run',
+          '--config',
+          fixture.configPath,
+          '--request',
+          fixture.requestPath,
+          '--task-id',
+          'TASK-CLI',
+          '--run-id',
+          'RUN-NOSTATE',
+          '--json',
+        ]);
+
+        const statePath = statePathOf(fixture, 'RUN-NOSTATE');
+        rmSync(statePath);
+        const missing = yield* run([
+          'status',
+          '--config',
+          fixture.configPath,
+          '--run-id',
+          'RUN-NOSTATE',
+          '--json',
+        ]);
+        expect(missing.exitCode).toBe(EXIT_CODES.operationFailed);
+        const missingFailure = expectRecordedFailure(missing.stdout);
+        expect(missingFailure.command).toBe('status');
+        expect(missingFailure.error.kind).toBe('failed');
+        expect(missingFailure.error.retryable).toBe(false);
+        expect(missingFailure.error.runId).toBe('RUN-NOSTATE');
+        expect(missingFailure.error.message).toContain('no recorded workflow state');
+
+        writeState(fixture, 'RUN-NOSTATE', 'queued');
+        const invalid = yield* run([
+          'status',
+          '--config',
+          fixture.configPath,
+          '--run-id',
+          'RUN-NOSTATE',
+          '--json',
+        ]);
+        expect(invalid.exitCode).toBe(EXIT_CODES.operationFailed);
+        const invalidFailure = expectRecordedFailure(invalid.stdout);
+        expect(invalidFailure.error.kind).toBe('failed');
+        expect(invalidFailure.error.runId).toBe('RUN-NOSTATE');
+        expect(invalidFailure.error.message).toContain('not a valid state record');
       } finally {
         fixture.cleanup();
       }

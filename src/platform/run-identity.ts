@@ -8,15 +8,15 @@ import {
   RunIdentityStore,
 } from '../application/run-identity/index.js';
 
-import type { RequestFileStatus } from '../application/run-identity/index.js';
+import type { RunStorageFileStatus } from '../application/run-identity/index.js';
 
 function boundCause(cause: unknown): string {
   return String(cause).replaceAll(/\s+/gu, ' ').trim().slice(0, 500);
 }
 
-const statRequest = Effect.fn('runIdentity.statRequest')(function* (
+const statPath = Effect.fn('runIdentity.statPath')(function* (
   path: string,
-): Effect.fn.Return<RequestFileStatus, RunIdentityStorageError> {
+): Effect.fn.Return<RunStorageFileStatus, RunIdentityStorageError> {
   const probed = yield* Effect.try({
     try: () => statSync(path),
     catch: () => 'unavailable' as const,
@@ -27,14 +27,14 @@ const statRequest = Effect.fn('runIdentity.statRequest')(function* (
   return { exists: true, isRegularFile: probed.isFile() };
 });
 
-const readRequestBytes = Effect.fn('runIdentity.readRequestBytes')(function* (
+const readFileBytes = Effect.fn('runIdentity.readFileBytes')(function* (
   path: string,
 ): Effect.fn.Return<Uint8Array, RunIdentityStorageError> {
   return yield* Effect.try({
     try: () => new Uint8Array(readFileSync(path)),
     catch: (cause) =>
       new RunIdentityStorageError({
-        message: `Cannot read request at ${path}: ${boundCause(cause)}.`,
+        message: `Cannot read retained file at ${path}: ${boundCause(cause)}.`,
       }),
   });
 });
@@ -67,7 +67,7 @@ const createRunDirectoryExclusive = Effect.fn('runIdentity.createRunDirectoryExc
   if (created === 'created') {
     return;
   }
-  const probed = yield* statRequest(path);
+  const probed = yield* statPath(path);
   if (probed.exists) {
     return yield* new DuplicateRunId({
       message: `Run ID "${runId}" already exists at ${path}.`,
@@ -112,8 +112,8 @@ const removeDirectory = Effect.fn('runIdentity.removeDirectory')(function* (
 export const RunIdentityLive: Layer.Layer<RunIdentityStore> = Layer.succeed(
   RunIdentityStore,
   RunIdentityStore.of({
-    statRequest,
-    readRequestBytes,
+    statPath,
+    readFileBytes,
     ensureParentDirectory,
     createRunDirectoryExclusive,
     writeFileBytes,

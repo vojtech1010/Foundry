@@ -32,6 +32,17 @@ statistics.
 Status is not proof that an artifact is valid or a PR exists. Durable validation
 and publication journals remain authoritative.
 
+The current implementation writes exactly one authoritative workflow state per
+run to `.agent/runs/<run-id>/workflow-state.json` as a versioned record with the
+run ID and one named state. `run` retains the request files and the initial
+`planning` record as one initialization; if any write fails, initialization
+removes the run directory and reports failure, so request files or a directory
+alone never establish success. `status` validates and reports that single state.
+A missing, malformed, unknown, or wrong-run record fails the command with a
+`failed` report and never synthesizes a state or infers one from other files.
+Active role/attempt details, elapsed time, last event, branch/commit reporting,
+transition enforcement, and resume/recovery are not delivered yet.
+
 ## Inspect artifacts and findings
 
 `inspect` identifies accepted plan, implementation, verification, Tester, and
