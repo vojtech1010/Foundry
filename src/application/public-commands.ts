@@ -2,6 +2,7 @@ import { Effect } from 'effect';
 
 import { NOT_AVAILABLE } from '../domain/public-commands.js';
 import { PRODUCT_NAME } from '../domain/workflow.js';
+import { checkProjectProfile } from './profile-check/index.js';
 import { checkReadiness } from './readiness/index.js';
 import { previewRunLocations } from './preview-run-locations/index.js';
 
@@ -17,6 +18,11 @@ import type {
   PreviewLocationsError,
   PreviewLocationsReport,
 } from './preview-run-locations/index.js';
+import type {
+  ProfileCheckError,
+  ProfileCheckReport,
+  ProjectCommandProcess,
+} from './profile-check/index.js';
 
 export interface StubCommandReport {
   readonly availability: typeof NOT_AVAILABLE;
@@ -25,7 +31,11 @@ export interface StubCommandReport {
   readonly taskId?: string | undefined;
 }
 
-export type PublicCommandReport = StubCommandReport | DoctorReport | PreviewLocationsReport;
+export type PublicCommandReport =
+  | StubCommandReport
+  | DoctorReport
+  | PreviewLocationsReport
+  | ProfileCheckReport;
 
 function stubReport(invocation: PublicCommandInvocation): StubCommandReport {
   const report: StubCommandReport = {
@@ -44,8 +54,8 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
   invocation: PublicCommandInvocation,
 ): Effect.fn.Return<
   PublicCommandReport,
-  ReadinessError | PreviewLocationsError,
-  ReadinessHost | ReadinessFiles | ReadinessGit
+  ReadinessError | PreviewLocationsError | ProfileCheckError,
+  ReadinessHost | ReadinessFiles | ReadinessGit | ProjectCommandProcess
 > {
   if (invocation.command === 'doctor') {
     const configArg = invocation.config;
@@ -63,6 +73,14 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       return stubReport(invocation);
     }
     return yield* previewRunLocations({ configArg, cwd, taskId });
+  }
+  if (invocation.command === 'profile-check') {
+    const configArg = invocation.config;
+    const cwd = invocation.cwd;
+    if (configArg === undefined || cwd === undefined) {
+      return stubReport(invocation);
+    }
+    return yield* checkProjectProfile({ configArg, cwd });
   }
   return stubReport(invocation);
 });

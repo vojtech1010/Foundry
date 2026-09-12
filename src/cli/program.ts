@@ -14,6 +14,7 @@ import {
 
 import type { PublicCommand, PublicCommandInvocation } from '../domain/public-commands.js';
 import type { PublicCommandReport } from '../application/public-commands.js';
+import type { ProjectCommandProcess } from '../application/profile-check/index.js';
 import type {
   ReadinessFiles,
   ReadinessGit,
@@ -234,7 +235,26 @@ const InitPreviewReportData = Schema.Struct({
   }),
 });
 
-const ReportData = Schema.Union([StubReportData, DoctorReportData, InitPreviewReportData]);
+const ProfileCheckReportData = Schema.Struct({
+  profileCheck: Schema.Literal('passed'),
+  repository: Schema.Struct({
+    path: Schema.String,
+  }),
+  commands: Schema.Array(
+    Schema.Struct({
+      name: Schema.String,
+      command: Schema.Array(Schema.String),
+      exitCode: Schema.Number,
+    }),
+  ),
+});
+
+const ReportData = Schema.Union([
+  StubReportData,
+  DoctorReportData,
+  InitPreviewReportData,
+  ProfileCheckReportData,
+]);
 
 const SuccessEnvelope = Schema.Struct({
   schemaVersion: Schema.Literal(REPORT_SCHEMA_VERSION),
@@ -429,6 +449,16 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         `data.repository.branch: ${data.repository.branch}`,
         `data.repository.commit: ${data.repository.commit}`,
       );
+    } else if ('profileCheck' in data) {
+      lines.push(
+        `data.profileCheck: ${data.profileCheck}`,
+        `data.repository.path: ${data.repository.path}`,
+      );
+      for (const command of data.commands) {
+        lines.push(
+          `data.commands: ${command.name} ${command.command.join(' ')} ${command.exitCode}`,
+        );
+      }
     } else {
       lines.push(
         `data.taskId: ${data.taskId}`,
@@ -575,6 +605,19 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       },
     };
   }
+  if ('profileCheck' in report) {
+    return {
+      profileCheck: report.profileCheck,
+      repository: {
+        path: report.repository.path,
+      },
+      commands: report.commands.map((command) => ({
+        name: command.name,
+        command: [...command.command],
+        exitCode: command.exitCode,
+      })),
+    };
+  }
   return {
     taskId: report.taskId,
     source: {
@@ -596,7 +639,11 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
 
 export const runCli = Effect.fn('runCli')(function* (
   argv: ReadonlyArray<string>,
-): Effect.fn.Return<CliResult, never, ReadinessHost | ReadinessFiles | ReadinessGit> {
+): Effect.fn.Return<
+  CliResult,
+  never,
+  ReadinessHost | ReadinessFiles | ReadinessGit | ProjectCommandProcess
+> {
   const decoded = yield* decodeInvocation(argv).pipe(Effect.result);
 
   if (Result.isFailure(decoded)) {

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
+import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
 import {
   ReadinessError,
   ReadinessFiles,
@@ -186,6 +187,13 @@ function withMarkers(world: FakeWorld, markers: ReadonlySet<string>): FakeWorld 
   return { ...world, files: { ...world.files, markers } };
 }
 
+const UnusedProcess = Layer.succeed(
+  ProjectCommandProcess,
+  ProjectCommandProcess.of({
+    run: () => Effect.die(new Error('doctor must not run project commands')),
+  }),
+);
+
 function buildWorld(world: FakeWorld): BuiltWorld {
   const gitCalls: BuiltWorld['gitCalls'] = [];
   const layer = Layer.mergeAll(
@@ -281,6 +289,7 @@ function buildWorld(world: FakeWorld): BuiltWorld {
           }),
       }),
     ),
+    UnusedProcess,
   );
   return { layer, gitCalls };
 }
