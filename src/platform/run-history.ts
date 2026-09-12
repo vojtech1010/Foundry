@@ -4,12 +4,11 @@ import {
   fsyncSync,
   openSync,
   readFileSync,
-  renameSync,
   statSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { Duration, Effect, Layer } from 'effect';
 
 import {
@@ -22,9 +21,11 @@ import {
   RUN_HISTORY_LOCK_FILENAME,
   RUN_HISTORY_WITNESS_FILENAME,
 } from '../domain/run-history.js';
+import { writeFileAtomically } from './atomic-file.js';
 
 import type {
   CommitRunHistoryOptions,
+  ReplaceDerivedReportsOptions,
   RunHistoryFileState,
   RunHistoryStorageSnapshot,
 } from '../application/run-history/index.js';
@@ -35,47 +36,6 @@ const LOCK_RETRY_DELAY = Duration.millis(4);
 
 function boundCause(cause: unknown): string {
   return String(cause).replaceAll(/\s+/gu, ' ').trim().slice(0, 500);
-}
-
-function removeTemporaryFile(path: string): void {
-  try {
-    unlinkSync(path);
-  } catch {
-    // The temporary file may never have been created.
-  }
-}
-
-function syncDirectory(directory: string): void {
-  let handle: number | undefined;
-  try {
-    handle = openSync(directory, 'r');
-    fsyncSync(handle);
-  } catch {
-    // A directory flush is not supported on every platform; the rename stays atomic.
-  } finally {
-    if (handle !== undefined) {
-      closeSync(handle);
-    }
-  }
-}
-
-function writeFileAtomically(path: string, bytes: Uint8Array): void {
-  const directory = dirname(path);
-  const temporaryPath = join(directory, `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
-  try {
-    const handle = openSync(temporaryPath, 'wx');
-    try {
-      writeSync(handle, bytes);
-      fsyncSync(handle);
-    } finally {
-      closeSync(handle);
-    }
-    renameSync(temporaryPath, path);
-    syncDirectory(directory);
-  } catch (cause) {
-    removeTemporaryFile(temporaryPath);
-    throw cause;
-  }
 }
 
 function readHistoryFile(path: string): Effect.Effect<RunHistoryFileState, RunHistoryStorageError> {
@@ -212,10 +172,77 @@ const commitHistory = Effect.fn('runHistory.commitHistory')(function* (
   }).pipe(Effect.ensuring(lock.release()));
 });
 
+const publishDerivedReport = Effect.fn('runHistory.publishDerivedReport')(function* (
+  path: string,
+  bytes: Uint8Array,
+): Effect.fn.Return<void, RunHistoryStorageError> {
+  const current = yield* readHistoryFile(path);
+  if (current.kind === 'not-regular-file') {
+    return yield* new RunHistoryStorageError({
+      message: `Derived run report at ${path} is not a regular file; refusing to replace it.`,
+    });
+  }
+  if (
+    current.kind === 'file' &&
+    Buffer.compare(Buffer.from(current.bytes), Buffer.from(bytes)) === 0
+  ) {
+    return;
+  }
+  yield* publishHistoryFile(path, bytes);
+});
+
+const removeDerivedReport = Effect.fn('runHistory.removeDerivedReport')(function* (
+  path: string,
+): Effect.fn.Return<void, RunHistoryStorageError> {
+  const current = yield* readHistoryFile(path);
+  if (current.kind === 'missing') {
+    return;
+  }
+  if (current.kind === 'not-regular-file') {
+    return yield* new RunHistoryStorageError({
+      message: `Derived run report at ${path} is not a regular file; refusing to remove it.`,
+    });
+  }
+  yield* Effect.try({
+    try: () => {
+      unlinkSync(path);
+    },
+    catch: (cause) =>
+      new RunHistoryStorageError({
+        message: `Cannot remove derived run report at ${path}: ${boundCause(cause)}.`,
+      }),
+  });
+});
+
+const replaceDerivedReports = Effect.fn('runHistory.replaceDerivedReports')(function* (
+  options: ReplaceDerivedReportsOptions,
+): Effect.fn.Return<void, RunHistoryConflict | RunHistoryStorageError> {
+  const lock = yield* acquireHistoryLock(options.runDirectory, options.runId);
+  yield* Effect.gen(function* () {
+    const snapshot = yield* readHistoryFiles(options.runDirectory);
+    if (
+      !expectationMatches(snapshot.stream, options.expectedStreamBytes) ||
+      !expectationMatches(snapshot.witness, options.expectedWitnessBytes)
+    ) {
+      return yield* new RunHistoryConflict({
+        message: `Run "${options.runId}" history changed after it was replayed; derived reports must be rebuilt from the latest accepted history.`,
+        runId: options.runId,
+      });
+    }
+    for (const write of options.writes) {
+      yield* publishDerivedReport(write.path, write.bytes);
+    }
+    for (const path of options.removals) {
+      yield* removeDerivedReport(path);
+    }
+  }).pipe(Effect.ensuring(lock.release()));
+});
+
 export const RunHistoryLive: Layer.Layer<RunHistoryStorage> = Layer.succeed(
   RunHistoryStorage,
   RunHistoryStorage.of({
     readHistoryFiles,
     commitHistory,
+    replaceDerivedReports,
   }),
 );

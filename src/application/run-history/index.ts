@@ -1,7 +1,9 @@
 import { Context, DateTime, Effect, Result, Schema } from 'effect';
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 
 import {
+  RUN_HISTORY_FILENAME,
   RUN_HISTORY_SCHEMA_VERSION,
   RUN_HISTORY_WITNESS_SCHEMA_VERSION,
   RunEventSchema,
@@ -70,6 +72,20 @@ export interface CommitRunHistoryOptions {
   readonly nextWitnessBytes: Uint8Array;
 }
 
+export interface DerivedReportWrite {
+  readonly path: string;
+  readonly bytes: Uint8Array;
+}
+
+export interface ReplaceDerivedReportsOptions {
+  readonly runDirectory: string;
+  readonly runId: string;
+  readonly expectedStreamBytes: Uint8Array | null;
+  readonly expectedWitnessBytes: Uint8Array | null;
+  readonly writes: ReadonlyArray<DerivedReportWrite>;
+  readonly removals: ReadonlyArray<string>;
+}
+
 export class RunHistoryStorage extends Context.Service<
   RunHistoryStorage,
   {
@@ -78,6 +94,9 @@ export class RunHistoryStorage extends Context.Service<
     ) => Effect.Effect<RunHistoryStorageSnapshot, RunHistoryStorageError>;
     readonly commitHistory: (
       options: CommitRunHistoryOptions,
+    ) => Effect.Effect<void, RunHistoryConflict | RunHistoryStorageError>;
+    readonly replaceDerivedReports: (
+      options: ReplaceDerivedReportsOptions,
     ) => Effect.Effect<void, RunHistoryConflict | RunHistoryStorageError>;
   }
 >()('foundry/application/run-history/Storage') {}
@@ -111,9 +130,14 @@ export interface AppendedRunEvent<Draft extends RunEventDraft> {
 
 const MAX_APPEND_ATTEMPTS = 8;
 
-function integrityProblem(runId: string, problem: string): RunHistoryIntegrityError {
+function integrityProblem(
+  runId: string,
+  runDirectory: string,
+  problem: string,
+): RunHistoryIntegrityError {
+  const historyPath = join(runDirectory, RUN_HISTORY_FILENAME);
   return new RunHistoryIntegrityError({
-    message: `Run "${runId}" history cannot be trusted: ${problem}. A person must investigate run integrity before this run continues.`,
+    message: `Run "${runId}" canonical history at ${historyPath} cannot be trusted: ${problem}. A person must investigate run integrity before this run continues.`,
     runId,
     problem,
   });
@@ -154,62 +178,79 @@ export const readVerifiedRunHistory = Effect.fn('readVerifiedRunHistory')(functi
     if (witnessFile.kind !== 'missing') {
       return yield* integrityProblem(
         runId,
+        runDirectory,
         'the history stream is missing while its witness remains, so committed history was truncated',
       );
     }
     if (!options.createIfMissing) {
-      return yield* integrityProblem(runId, 'no canonical history stream exists for this run');
+      return yield* integrityProblem(
+        runId,
+        runDirectory,
+        'no canonical history stream exists for this run',
+      );
     }
     return {
       runId,
       events: [],
       head: { revision: 0, eventHash: null },
-      derived: { state: null, checkpoint: null, attempts: [] },
+      derived: { state: null, checkpoint: null, attempts: [], cleanupProgress: null },
       streamBytes: null,
       witnessBytes: null,
     };
   }
   if (stream.kind === 'not-regular-file') {
-    return yield* integrityProblem(runId, 'the history stream is not a regular file');
+    return yield* integrityProblem(runId, runDirectory, 'the history stream is not a regular file');
   }
   if (witnessFile.kind === 'missing') {
     return yield* integrityProblem(
       runId,
+      runDirectory,
       'the history witness is missing, so truncation cannot be ruled out',
     );
   }
   if (witnessFile.kind === 'not-regular-file') {
-    return yield* integrityProblem(runId, 'the history witness is not a regular file');
+    return yield* integrityProblem(
+      runId,
+      runDirectory,
+      'the history witness is not a regular file',
+    );
   }
 
   const witnessText = yield* Effect.try({
     try: () => decodeText(witnessFile.bytes),
-    catch: () => integrityProblem(runId, 'the history witness is not valid UTF-8'),
+    catch: () => integrityProblem(runId, runDirectory, 'the history witness is not valid UTF-8'),
   });
   const witness = yield* Schema.decodeUnknownEffect(
     Schema.fromJsonString(RunHistoryWitnessSchema),
     { onExcessProperty: 'error' },
   )(witnessText).pipe(
-    Effect.mapError(() => integrityProblem(runId, 'the history witness is not a valid record')),
+    Effect.mapError(() =>
+      integrityProblem(runId, runDirectory, 'the history witness is not a valid record'),
+    ),
   );
   if (witness.runId !== runId) {
-    return yield* integrityProblem(runId, `the history witness belongs to run "${witness.runId}"`);
+    return yield* integrityProblem(
+      runId,
+      runDirectory,
+      `the history witness belongs to run "${witness.runId}"`,
+    );
   }
 
   const streamText = yield* Effect.try({
     try: () => decodeText(stream.bytes),
-    catch: () => integrityProblem(runId, 'the history stream is not valid UTF-8'),
+    catch: () => integrityProblem(runId, runDirectory, 'the history stream is not valid UTF-8'),
   });
   if (!streamText.endsWith('\n')) {
     return yield* integrityProblem(
       runId,
+      runDirectory,
       'the history stream does not end with a terminal newline',
     );
   }
   const lines = streamText.split('\n');
   lines.pop();
   if (lines.length === 0) {
-    return yield* integrityProblem(runId, 'the history stream is empty');
+    return yield* integrityProblem(runId, runDirectory, 'the history stream is empty');
   }
 
   const events: Array<RunEvent> = [];
@@ -218,7 +259,7 @@ export const readVerifiedRunHistory = Effect.fn('readVerifiedRunHistory')(functi
       onExcessProperty: 'error',
     })(line).pipe(
       Effect.mapError(() =>
-        integrityProblem(runId, `history line ${index + 1} is not a valid event`),
+        integrityProblem(runId, runDirectory, `history line ${index + 1} is not a valid event`),
       ),
     );
     events.push(event);
@@ -226,11 +267,12 @@ export const readVerifiedRunHistory = Effect.fn('readVerifiedRunHistory')(functi
 
   const verification = verifyRunHistoryEvents(events, runId);
   if (!verification.ok) {
-    return yield* integrityProblem(runId, verification.problem);
+    return yield* integrityProblem(runId, runDirectory, verification.problem);
   }
   if (!witnessMatchesHead(witness, verification.head)) {
     return yield* integrityProblem(
       runId,
+      runDirectory,
       'the history witness does not match the last accepted revision and hash',
     );
   }

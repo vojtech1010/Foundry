@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 
 import { Effect, Layer } from 'effect';
 
@@ -7,6 +7,7 @@ import {
   RunIdentityStorageError,
   RunIdentityStore,
 } from '../application/run-identity/index.js';
+import { writeFileAtomically } from './atomic-file.js';
 
 import type { RunStorageFileStatus } from '../application/run-identity/index.js';
 
@@ -86,7 +87,7 @@ const writeFileBytes = Effect.fn('runIdentity.writeFileBytes')(function* (
 ): Effect.fn.Return<void, RunIdentityStorageError> {
   yield* Effect.try({
     try: () => {
-      writeFileSync(path, bytes);
+      writeFileAtomically(path, bytes);
     },
     catch: (cause) =>
       new RunIdentityStorageError({

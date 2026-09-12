@@ -1,7 +1,15 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer, Schema } from 'effect';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -13,11 +21,16 @@ import {
   appendRunEvent,
   readVerifiedRunHistory,
 } from '../src/application/run-history/index.js';
-import { RunIdentityStore } from '../src/application/run-identity/index.js';
+import { RunIdentityStore, reconcileRunReports } from '../src/application/run-identity/index.js';
 import {
   IllegalWorkflowTransition,
   transitionWorkflow,
 } from '../src/application/workflow-transitions/index.js';
+import {
+  CLEANUP_PROGRESS_FILENAME,
+  WORKFLOW_STATE_FILENAME,
+  WorkflowProgressDocumentSchema,
+} from '../src/domain/workflow.js';
 import {
   RUN_HISTORY_FILENAME,
   RUN_HISTORY_WITNESS_FILENAME,
@@ -575,6 +588,134 @@ describe('collision handling and interrupted publication', () => {
         const history = yield* verifyHistory(fixture.runDirectory);
         expect(history.head.revision).toBe(1);
         expect(history.derived.state).toBe('planning');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('replaces derived reports only against the expected head', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* createRun(fixture.runDirectory);
+        const live = yield* RunHistoryStorage.pipe(Effect.provide(RunHistoryLive));
+        const history = yield* verifyHistory(fixture.runDirectory);
+        const reportPath = join(fixture.runDirectory, WORKFLOW_STATE_FILENAME);
+        const originalBytes = readFileSync(reportPath);
+
+        yield* live.replaceDerivedReports({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          expectedStreamBytes: history.streamBytes,
+          expectedWitnessBytes: history.witnessBytes,
+          writes: [{ path: reportPath, bytes: new Uint8Array(originalBytes) }],
+          removals: [],
+        });
+        expect(readFileSync(reportPath)).toEqual(originalBytes);
+
+        const stale = yield* live
+          .replaceDerivedReports({
+            runDirectory: fixture.runDirectory,
+            runId: RUN_ID,
+            expectedStreamBytes: new Uint8Array(),
+            expectedWitnessBytes: history.witnessBytes,
+            writes: [{ path: reportPath, bytes: new TextEncoder().encode('{"stale":true}\n') }],
+            removals: [],
+          })
+          .pipe(Effect.flip);
+        expect(stale).toBeInstanceOf(RunHistoryConflict);
+        expect(readFileSync(reportPath)).toEqual(originalBytes);
+
+        rmSync(reportPath);
+        mkdirSync(reportPath);
+        const notRegular = yield* live
+          .replaceDerivedReports({
+            runDirectory: fixture.runDirectory,
+            runId: RUN_ID,
+            expectedStreamBytes: history.streamBytes,
+            expectedWitnessBytes: history.witnessBytes,
+            writes: [{ path: reportPath, bytes: new TextEncoder().encode('{"x":1}\n') }],
+            removals: [],
+          })
+          .pipe(Effect.flip);
+        expect(notRegular).toBeInstanceOf(RunHistoryStorageError);
+        if (!(notRegular instanceof RunHistoryStorageError)) {
+          throw new Error('Expected a run history storage error.');
+        }
+        expect(notRegular.message).toContain('not a regular file');
+        expect(statSync(reportPath).isDirectory()).toBe(true);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('never publishes an older replay over a newer accepted head', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* createRun(fixture.runDirectory);
+        const live = yield* RunHistoryStorage.pipe(Effect.provide(RunHistoryLive));
+
+        let injected = false;
+        const racing = RunHistoryStorage.of({
+          ...live,
+          replaceDerivedReports: (options: Parameters<typeof live.replaceDerivedReports>[0]) =>
+            Effect.gen(function* () {
+              if (!injected) {
+                injected = true;
+                yield* transitionWorkflow({
+                  runDirectory: fixture.runDirectory,
+                  runId: RUN_ID,
+                  request: PLAN_ACCEPTED,
+                }).pipe(Effect.provideService(RunHistoryStorage, live), Effect.orDie);
+              }
+              return yield* live.replaceDerivedReports(options);
+            }),
+        });
+
+        const progress = yield* reconcileRunReports({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+        }).pipe(Effect.provideService(RunHistoryStorage, racing));
+
+        expect(progress.workflowState).toBe('coding');
+        expect(progress.revision).toBe(2);
+        expect(progress.eventHash).not.toBeNull();
+        const document = Schema.decodeUnknownSync(WorkflowProgressDocumentSchema, {
+          onExcessProperty: 'error',
+        })(JSON.parse(readFileSync(join(fixture.runDirectory, WORKFLOW_STATE_FILENAME), 'utf8')));
+        expect(document).toEqual({
+          schemaVersion: 2,
+          runId: RUN_ID,
+          state: 'coding',
+          checkpoint: null,
+          attempts: [],
+        });
+        expect(readEvents(fixture.runDirectory)).toHaveLength(2);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('removes a cleanup report that has no backing cleanup event', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* createRun(fixture.runDirectory);
+        const cleanupPath = join(fixture.runDirectory, CLEANUP_PROGRESS_FILENAME);
+        writeFileSync(cleanupPath, '{"schemaVersion":1,"runId":"RUN-HISTORY"}\n');
+
+        const progress = yield* reconcileRunReports({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+        }).pipe(Effect.provide(RunHistoryLive));
+
+        expect(progress.cleanupProgress).toBeNull();
+        expect(progress.workflowState).toBe('planning');
+        expect(existsSync(cleanupPath)).toBe(false);
       } finally {
         fixture.cleanup();
       }

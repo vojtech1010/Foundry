@@ -38,8 +38,8 @@ import type {
   RecordedRunIdentityReport,
   RunIdentityError,
   RunIdentityStore,
+  RunProgressReport,
   RunStateUnavailable,
-  RunWorkflowStateReport,
 } from './run-identity/index.js';
 
 export interface StubCommandReport {
@@ -55,7 +55,7 @@ export type PublicCommandReport =
   | PreviewLocationsReport
   | ProfileCheckReport
   | RecordedRunIdentityReport
-  | RunWorkflowStateReport;
+  | RunProgressReport;
 
 export type PublicCommandError =
   | ReadinessError

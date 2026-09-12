@@ -12,13 +12,19 @@ import {
   DuplicateRunId,
   InvalidRunRequest,
   RunIdentityStorageError,
-  RunIdentityStore,
   RunStateUnavailable,
   readRunWorkflowState,
   recordRunIdentity,
 } from '../src/application/run-identity/index.js';
-import { transitionWorkflow } from '../src/application/workflow-transitions/index.js';
-import { RunHistoryIntegrityError } from '../src/application/run-history/index.js';
+import {
+  recordCleanupProgress,
+  transitionWorkflow,
+} from '../src/application/workflow-transitions/index.js';
+import {
+  RunHistoryIntegrityError,
+  RunHistoryStorage,
+  RunHistoryStorageError,
+} from '../src/application/run-history/index.js';
 import {
   RUN_HISTORY_FILENAME,
   RUN_HISTORY_WITNESS_FILENAME,
@@ -39,6 +45,9 @@ import {
 import { EXIT_CODES } from '../src/domain/public-commands.js';
 import {
   ACTIVE_WORKFLOW_STATES,
+  CLEANUP_PROGRESS_FILENAME,
+  CLEANUP_PROGRESS_SCHEMA_VERSION,
+  CleanupProgressDocumentSchema,
   DECISION_OR_PUBLICATION_WORKFLOW_STATES,
   INITIAL_WORKFLOW_STATE,
   RECOVERABLE_WORKFLOW_STATES,
@@ -48,6 +57,7 @@ import {
   WORKFLOW_STATE_FILENAME,
   WORKFLOW_STATE_PROGRESS_SCHEMA_VERSION,
   WORKFLOW_STATE_SCHEMA_VERSION,
+  WorkflowProgressDocumentSchema,
   WorkflowStateDocumentSchema,
   WorkflowStateSchema,
 } from '../src/domain/workflow.js';
@@ -56,6 +66,7 @@ import { RunHistoryLive } from '../src/platform/run-history.js';
 import { RunIdentityLive } from '../src/platform/run-identity.js';
 
 import type { WorkflowState, WorkflowTransitionRequest } from '../src/domain/workflow.js';
+import type { RunProgressReport } from '../src/application/run-identity/index.js';
 
 const ReportEnvelopeJson = Schema.fromJsonString(ReportEnvelope);
 
@@ -619,7 +630,7 @@ describe('recordRunIdentity with live storage', () => {
 });
 
 describe('workflow state through run storage', () => {
-  it.effect('records exactly one planning state with the run ID on initialization', () =>
+  it.effect('records exactly one canonical planning report with the run ID on initialization', () =>
     Effect.gen(function* () {
       const fixture = setupFixture();
       try {
@@ -634,13 +645,15 @@ describe('workflow state through run storage', () => {
         expect(statePath).toBe(join(report.runDirectory, WORKFLOW_STATE_FILENAME));
         expect(existsSync(statePath)).toBe(true);
 
-        const record = yield* Schema.decodeUnknownEffect(WorkflowStateDocumentSchema, {
+        const record = yield* Schema.decodeUnknownEffect(WorkflowProgressDocumentSchema, {
           onExcessProperty: 'error',
         })(JSON.parse(readFileSync(statePath, 'utf8')));
         expect(record).toEqual({
-          schemaVersion: WORKFLOW_STATE_SCHEMA_VERSION,
+          schemaVersion: WORKFLOW_STATE_PROGRESS_SCHEMA_VERSION,
           runId: 'RUN-STATE',
           state: INITIAL_WORKFLOW_STATE,
+          checkpoint: null,
+          attempts: [],
         });
 
         const identityText = readFileSync(report.request.identityPath, 'utf8');
@@ -655,28 +668,26 @@ describe('workflow state through run storage', () => {
     }),
   );
 
-  it.effect('rolls back the run directory when the state record cannot be written', () =>
+  it.effect('rolls back the run directory when the canonical report cannot be written', () =>
     Effect.gen(function* () {
       const fixture = setupFixture();
       try {
         writeFileSync(fixture.requestPath, 'rollback ask\n');
-        const liveStore = yield* RunIdentityStore.pipe(Effect.provide(RunIdentityLive));
-        const failingStore = RunIdentityStore.of({
-          ...liveStore,
-          writeFileBytes: (path: string, bytes: Uint8Array) =>
-            path.endsWith(WORKFLOW_STATE_FILENAME)
-              ? Effect.fail(
-                  new RunIdentityStorageError({
-                    message: 'state write refused',
-                    runId: 'RUN-ROLLBACK',
-                  }),
-                )
-              : liveStore.writeFileBytes(path, bytes),
+        const liveHistory = yield* RunHistoryStorage.pipe(Effect.provide(RunHistoryLive));
+        const failingHistory = RunHistoryStorage.of({
+          ...liveHistory,
+          replaceDerivedReports: () =>
+            Effect.fail(
+              new RunHistoryStorageError({
+                message: 'report write refused',
+                runId: 'RUN-ROLLBACK',
+              }),
+            ),
         });
         const layer = Layer.mergeAll(
           ReadinessFilesLive,
-          Layer.succeed(RunIdentityStore, failingStore),
-          RunHistoryLive,
+          RunIdentityLive,
+          Layer.succeed(RunHistoryStorage, failingHistory),
         );
         const error = yield* recordRunIdentity({
           configArg: fixture.configPath,
@@ -695,7 +706,7 @@ describe('workflow state through run storage', () => {
     }),
   );
 
-  it.effect('reads the verified history state and refuses a hand-edited snapshot', () =>
+  it.effect('rebuilds a hand-edited report from the verified history', () =>
     Effect.gen(function* () {
       const fixture = setupFixture();
       try {
@@ -710,7 +721,16 @@ describe('workflow state through run storage', () => {
           configPath: fixture.configPath,
           runId: 'RUN-READ',
         });
-        expect(planning).toEqual({ runId: 'RUN-READ', workflowState: 'planning' });
+        expect(planning).toMatchObject({
+          runId: 'RUN-READ',
+          runDirectory: recorded.runDirectory,
+          historyPath: join(recorded.runDirectory, RUN_HISTORY_FILENAME),
+          revision: 1,
+          workflowState: 'planning',
+          checkpoint: null,
+          attempts: [],
+          cleanupProgress: null,
+        });
 
         const events = readHistoryEvents(recorded.runDirectory);
         expect(events).toHaveLength(1);
@@ -724,6 +744,7 @@ describe('workflow state through run storage', () => {
           payload: { taskId: 'TASK-1' },
           previousEventHash: null,
         });
+        expect(planning.eventHash).toBe(genesis.eventHash);
         expect(readHistoryWitness(recorded.runDirectory)).toEqual({
           schemaVersion: 1,
           runId: 'RUN-READ',
@@ -741,19 +762,26 @@ describe('workflow state through run storage', () => {
           configPath: fixture.configPath,
           runId: 'RUN-READ',
         });
-        expect(coding).toEqual({ runId: 'RUN-READ', workflowState: 'coding' });
+        expect(coding).toMatchObject({ runId: 'RUN-READ', workflowState: 'coding', revision: 2 });
 
         writeState(fixture, 'RUN-READ', 'completed');
-        const tampered = yield* readWithLive({
+        const rebuilt = yield* readWithLive({
           configPath: fixture.configPath,
           runId: 'RUN-READ',
-        }).pipe(Effect.flip);
-        expect(tampered).toBeInstanceOf(RunHistoryIntegrityError);
-        if (!(tampered instanceof RunHistoryIntegrityError)) {
-          throw new Error('Expected a run history integrity error.');
-        }
-        expect(tampered.problem).toContain('verified history records "coding"');
-        expect(tampered.message).toContain('investigate run integrity');
+        });
+        expect(rebuilt.workflowState).toBe('coding');
+        const rebuiltText = readFileSync(statePathOf(fixture, 'RUN-READ'), 'utf8');
+        expect(
+          Schema.decodeUnknownSync(WorkflowProgressDocumentSchema, { onExcessProperty: 'error' })(
+            JSON.parse(rebuiltText),
+          ),
+        ).toEqual({
+          schemaVersion: WORKFLOW_STATE_PROGRESS_SCHEMA_VERSION,
+          runId: 'RUN-READ',
+          state: 'coding',
+          checkpoint: null,
+          attempts: [],
+        });
         expect(readHistoryEvents(recorded.runDirectory)).toHaveLength(2);
       } finally {
         fixture.cleanup();
@@ -783,7 +811,13 @@ describe('workflow state through run storage', () => {
           configPath: fixture.configPath,
           runId: 'RUN-PROGRESS',
         });
-        expect(report).toEqual({ runId: 'RUN-PROGRESS', workflowState: 'coding' });
+        expect(report).toMatchObject({
+          runId: 'RUN-PROGRESS',
+          workflowState: 'coding',
+          checkpoint: null,
+          attempts: [],
+          cleanupProgress: null,
+        });
 
         const stateText = readFileSync(statePathOf(fixture, 'RUN-PROGRESS'), 'utf8');
         expect(stateText).toContain(`"schemaVersion": ${WORKFLOW_STATE_PROGRESS_SCHEMA_VERSION}`);
@@ -793,7 +827,7 @@ describe('workflow state through run storage', () => {
     }),
   );
 
-  it.effect('reports missing, malformed, unknown, and wrong-run state without guessing', () =>
+  it.effect('rebuilds missing, malformed, unknown, and wrong-run reports from history', () =>
     Effect.gen(function* () {
       const fixture = setupFixture();
       try {
@@ -805,38 +839,48 @@ describe('workflow state through run storage', () => {
           runId: 'RUN-BAD',
         });
         const statePath = statePathOf(fixture, 'RUN-BAD');
-        const readState = () =>
-          readWithLive({ configPath: fixture.configPath, runId: 'RUN-BAD' }).pipe(Effect.flip);
+        const readState = () => readWithLive({ configPath: fixture.configPath, runId: 'RUN-BAD' });
+        const expectRebuiltPlanning = (report: RunProgressReport): void => {
+          expect(report.workflowState).toBe('planning');
+          expect(report.revision).toBe(1);
+          expect(existsSync(statePath)).toBe(true);
+          expect(
+            Schema.decodeUnknownSync(WorkflowProgressDocumentSchema, {
+              onExcessProperty: 'error',
+            })(JSON.parse(readFileSync(statePath, 'utf8'))),
+          ).toEqual({
+            schemaVersion: WORKFLOW_STATE_PROGRESS_SCHEMA_VERSION,
+            runId: 'RUN-BAD',
+            state: 'planning',
+            checkpoint: null,
+            attempts: [],
+          });
+        };
 
         rmSync(statePath);
-        const missing = yield* readState();
-        expect(missing).toBeInstanceOf(RunStateUnavailable);
-        expect(missing.runId).toBe('RUN-BAD');
-        expect(missing.message).toContain('no recorded workflow state');
+        expectRebuiltPlanning(yield* readState());
 
         writeFileSync(statePath, '{ not json');
-        const malformed = yield* readState();
-        expect(malformed).toBeInstanceOf(RunStateUnavailable);
-        expect(malformed.message).toContain('not valid JSON');
+        expectRebuiltPlanning(yield* readState());
+
+        writeFileSync(statePath, '');
+        expectRebuiltPlanning(yield* readState());
 
         writeState(fixture, 'RUN-BAD', 'queued');
-        const unknown = yield* readState();
-        expect(unknown).toBeInstanceOf(RunStateUnavailable);
-        expect(unknown.message).toContain('not a valid state record');
+        expectRebuiltPlanning(yield* readState());
 
         writeFileSync(
           statePath,
           `${JSON.stringify({ schemaVersion: WORKFLOW_STATE_SCHEMA_VERSION, runId: 'RUN-OTHER', state: 'completed' }, null, 2)}\n`,
         );
-        const wrongRun = yield* readState();
-        expect(wrongRun).toBeInstanceOf(RunStateUnavailable);
-        expect(wrongRun.message).toContain('RUN-OTHER');
+        expectRebuiltPlanning(yield* readState());
 
         rmSync(statePath);
         mkdirSync(statePath);
-        const directory = yield* readState();
-        expect(directory).toBeInstanceOf(RunStateUnavailable);
+        const directory = yield* readState().pipe(Effect.flip);
+        expect(directory).toBeInstanceOf(RunHistoryStorageError);
         expect(directory.message).toContain('not a regular file');
+        expect(existsSync(statePath)).toBe(true);
 
         const invalidId = yield* readRunWorkflowState({
           configArg: fixture.configPath,
@@ -846,6 +890,192 @@ describe('workflow state through run storage', () => {
         expect(invalidId).toBeInstanceOf(RunStateUnavailable);
         expect(invalidId.message).toContain('not a valid run identifier');
         expect(existsSync(join(fixture.target, '.agent', 'escape'))).toBe(false);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('stops on incomplete history without repairing, truncating, or synthesizing', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        writeFileSync(fixture.requestPath, 'integrity ask\n');
+        const recorded = yield* recordWithLive({
+          configPath: fixture.configPath,
+          requestPath: fixture.requestPath,
+          taskId: 'TASK-1',
+          runId: 'RUN-BROKEN',
+        });
+        yield* transitionWorkflow({
+          runDirectory: recorded.runDirectory,
+          runId: 'RUN-BROKEN',
+          request: { route: 'plan-accepted', planRequiresImplementation: true },
+        }).pipe(Effect.provide(LiveFilesAndStore));
+
+        const streamPath = join(recorded.runDirectory, RUN_HISTORY_FILENAME);
+        const witnessPath = join(recorded.runDirectory, RUN_HISTORY_WITNESS_FILENAME);
+        const statePath = statePathOf(fixture, 'RUN-BROKEN');
+        const lines = readFileSync(streamPath, 'utf8').split('\n');
+        lines.pop();
+        lines.pop();
+        writeFileSync(streamPath, `${lines.join('\n')}\n`);
+        const beforeStream = readFileSync(streamPath, 'utf8');
+        const beforeWitness = readFileSync(witnessPath, 'utf8');
+        const beforeState = readFileSync(statePath, 'utf8');
+
+        const failure = yield* readWithLive({
+          configPath: fixture.configPath,
+          runId: 'RUN-BROKEN',
+        }).pipe(Effect.flip);
+        expect(failure).toBeInstanceOf(RunHistoryIntegrityError);
+        if (!(failure instanceof RunHistoryIntegrityError)) {
+          throw new Error('Expected a run history integrity error.');
+        }
+        expect(failure.message).toContain(streamPath);
+        expect(failure.message).toContain('investigate run integrity');
+
+        expect(readFileSync(streamPath, 'utf8')).toBe(beforeStream);
+        expect(readFileSync(witnessPath, 'utf8')).toBe(beforeWitness);
+        expect(readFileSync(statePath, 'utf8')).toBe(beforeState);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+});
+
+describe('derived report reconciliation', () => {
+  it.effect('reconstructs the cleanup report from verified cleanup events', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        writeFileSync(fixture.requestPath, 'cleanup ask\n');
+        const recorded = yield* recordWithLive({
+          configPath: fixture.configPath,
+          requestPath: fixture.requestPath,
+          taskId: 'TASK-1',
+          runId: 'RUN-CLEANUP',
+        });
+        const transition = (request: WorkflowTransitionRequest) =>
+          transitionWorkflow({
+            runDirectory: recorded.runDirectory,
+            runId: 'RUN-CLEANUP',
+            request,
+          }).pipe(Effect.provide(LiveFilesAndStore));
+        yield* transition({ route: 'plan-accepted', planRequiresImplementation: true });
+        yield* transition({
+          route: 'implementation-ready',
+          branchClean: true,
+          candidateCommit: 'abc123',
+          noChangeCandidateValidated: false,
+        });
+        yield* transition({
+          route: 'checks-passed-reviewing',
+          checksPassed: true,
+          testerRequired: false,
+          correctionBudgetExhausted: false,
+          reviewableCommit: 'abc123',
+        });
+        yield* transition({
+          route: 'review-approved',
+          approvedCommit: 'abc123',
+          evidenceCommitMatches: true,
+          checksPassed: true,
+          testerRequired: false,
+          runtimeEvidencePresent: false,
+        });
+        yield* recordCleanupProgress({
+          runDirectory: recorded.runDirectory,
+          runId: 'RUN-CLEANUP',
+          outcome: 'warning',
+          detail: 'dispose warning',
+        }).pipe(Effect.provide(LiveFilesAndStore));
+
+        const cleanupPath = join(recorded.runDirectory, CLEANUP_PROGRESS_FILENAME);
+        rmSync(cleanupPath);
+        const rebuilt = yield* readWithLive({
+          configPath: fixture.configPath,
+          runId: 'RUN-CLEANUP',
+        });
+        expect(rebuilt.workflowState).toBe('completed');
+        expect(rebuilt.cleanupProgress).toEqual({
+          outcome: 'warning',
+          detail: 'dispose warning',
+        });
+        expect(
+          Schema.decodeUnknownSync(CleanupProgressDocumentSchema, { onExcessProperty: 'error' })(
+            JSON.parse(readFileSync(cleanupPath, 'utf8')),
+          ),
+        ).toEqual({
+          schemaVersion: CLEANUP_PROGRESS_SCHEMA_VERSION,
+          runId: 'RUN-CLEANUP',
+          outcome: 'warning',
+          detail: 'dispose warning',
+        });
+
+        writeFileSync(
+          cleanupPath,
+          `${JSON.stringify(
+            {
+              schemaVersion: CLEANUP_PROGRESS_SCHEMA_VERSION,
+              runId: 'RUN-CLEANUP',
+              outcome: 'failed',
+              detail: 'hand edited',
+            },
+            null,
+            2,
+          )}\n`,
+        );
+        const replaced = yield* readWithLive({
+          configPath: fixture.configPath,
+          runId: 'RUN-CLEANUP',
+        });
+        expect(replaced.cleanupProgress).toEqual({
+          outcome: 'warning',
+          detail: 'dispose warning',
+        });
+        expect(replaced.workflowState).toBe('completed');
+        expect(readFileSync(cleanupPath, 'utf8')).toContain('dispose warning');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('discards a leftover cleanup report with no backing history', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        writeFileSync(fixture.requestPath, 'cleanup ask\n');
+        const recorded = yield* recordWithLive({
+          configPath: fixture.configPath,
+          requestPath: fixture.requestPath,
+          taskId: 'TASK-1',
+          runId: 'RUN-NOCLEAN',
+        });
+        const cleanupPath = join(recorded.runDirectory, CLEANUP_PROGRESS_FILENAME);
+        writeFileSync(
+          cleanupPath,
+          `${JSON.stringify(
+            {
+              schemaVersion: CLEANUP_PROGRESS_SCHEMA_VERSION,
+              runId: 'RUN-NOCLEAN',
+              outcome: 'failed',
+              detail: 'not canonical',
+            },
+            null,
+            2,
+          )}\n`,
+        );
+
+        const report = yield* readWithLive({
+          configPath: fixture.configPath,
+          runId: 'RUN-NOCLEAN',
+        });
+        expect(report.workflowState).toBe('planning');
+        expect(report.cleanupProgress).toBeNull();
+        expect(existsSync(cleanupPath)).toBe(false);
       } finally {
         fixture.cleanup();
       }
@@ -1165,7 +1395,7 @@ describe('status command through the cli envelope', () => {
     }),
   );
 
-  it.effect('fails status without synthesizing a state when the record is missing or invalid', () =>
+  it.effect('rebuilds status from history when the record is missing or invalid', () =>
     Effect.gen(function* () {
       const fixture = setupFixture();
       try {
@@ -1194,13 +1424,18 @@ describe('status command through the cli envelope', () => {
           'RUN-NOSTATE',
           '--json',
         ]);
-        expect(missing.exitCode).toBe(EXIT_CODES.operationFailed);
-        const missingFailure = expectRecordedFailure(missing.stdout);
-        expect(missingFailure.command).toBe('status');
-        expect(missingFailure.error.kind).toBe('failed');
-        expect(missingFailure.error.retryable).toBe(false);
-        expect(missingFailure.error.runId).toBe('RUN-NOSTATE');
-        expect(missingFailure.error.message).toContain('no recorded workflow state');
+        expect(missing.exitCode).toBe(EXIT_CODES.reported);
+        const missingEnvelope = envelopeFrom(missing.stdout);
+        expect(missingEnvelope.ok).toBe(true);
+        if (!missingEnvelope.ok) {
+          throw new Error(`Expected a success envelope but received: ${missing.stdout}`);
+        }
+        expect(missingEnvelope.command).toBe('status');
+        expect(missingEnvelope.data).toEqual({
+          runId: 'RUN-NOSTATE',
+          workflowState: 'planning',
+        });
+        expect(existsSync(statePath)).toBe(true);
 
         writeState(fixture, 'RUN-NOSTATE', 'queued');
         const invalid = yield* run([
@@ -1211,11 +1446,37 @@ describe('status command through the cli envelope', () => {
           'RUN-NOSTATE',
           '--json',
         ]);
-        expect(invalid.exitCode).toBe(EXIT_CODES.operationFailed);
-        const invalidFailure = expectRecordedFailure(invalid.stdout);
-        expect(invalidFailure.error.kind).toBe('failed');
-        expect(invalidFailure.error.runId).toBe('RUN-NOSTATE');
-        expect(invalidFailure.error.message).toContain('not a valid state record');
+        expect(invalid.exitCode).toBe(EXIT_CODES.reported);
+        const invalidEnvelope = envelopeFrom(invalid.stdout);
+        expect(invalidEnvelope.ok).toBe(true);
+        if (!invalidEnvelope.ok) {
+          throw new Error(`Expected a success envelope but received: ${invalid.stdout}`);
+        }
+        expect(invalidEnvelope.data).toEqual({
+          runId: 'RUN-NOSTATE',
+          workflowState: 'planning',
+        });
+
+        writeState(fixture, 'RUN-NOSTATE', 'completed');
+        const stale = yield* run([
+          'status',
+          '--config',
+          fixture.configPath,
+          '--run-id',
+          'RUN-NOSTATE',
+          '--json',
+        ]);
+        expect(stale.exitCode).toBe(EXIT_CODES.reported);
+        const staleEnvelope = envelopeFrom(stale.stdout);
+        expect(staleEnvelope.ok).toBe(true);
+        if (!staleEnvelope.ok) {
+          throw new Error(`Expected a success envelope but received: ${stale.stdout}`);
+        }
+        expect(staleEnvelope.data).toEqual({
+          runId: 'RUN-NOSTATE',
+          workflowState: 'planning',
+        });
+        expect(readFileSync(statePath, 'utf8')).toContain('"state": "planning"');
       } finally {
         fixture.cleanup();
       }
