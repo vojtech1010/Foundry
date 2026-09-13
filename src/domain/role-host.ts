@@ -1,0 +1,204 @@
+import { Schema } from 'effect';
+
+import { Identifier } from './run-identity.js';
+
+export const ROLE_HOST_PROTOCOL_VERSION = 1 as const;
+
+export const ROLE_HOST_OPERATIONS = ['create', 'submit', 'observe', 'stop'] as const;
+
+export type RoleHostOperation = (typeof ROLE_HOST_OPERATIONS)[number];
+
+export const ROLE_HOST_ROLES = ['architect', 'coder', 'lead_coder', 'tester', 'reviewer'] as const;
+
+export type RoleHostRole = (typeof ROLE_HOST_ROLES)[number];
+
+export const ROLE_HOST_STATUSES = ['active', 'settled', 'lost'] as const;
+
+export type RoleHostStatus = (typeof ROLE_HOST_STATUSES)[number];
+
+export const ROLE_HOST_SUBMISSIONS = ['accepted', 'already_accepted'] as const;
+
+export type RoleHostSubmission = (typeof ROLE_HOST_SUBMISSIONS)[number];
+
+export const ROLE_HOST_DISPOSITIONS = ['disposed', 'already_disposed'] as const;
+
+export type RoleHostDisposition = (typeof ROLE_HOST_DISPOSITIONS)[number];
+
+const UTC_INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+
+export const RoleHostInstant = Schema.String.check(Schema.isPattern(UTC_INSTANT_PATTERN));
+
+const PositiveInteger = Schema.Int.check(Schema.isGreaterThan(0));
+
+const NonNegativeInteger = Schema.Natural;
+
+const StringList = Schema.Array(Schema.NonEmptyString);
+
+export const RoleHostRuntimeIdentitySchema = Schema.Struct({
+  adapterVersion: Schema.NonEmptyString,
+  provider: Schema.NonEmptyString,
+  model: Schema.NonEmptyString,
+  toolProfile: Schema.NonEmptyString,
+});
+
+export type RoleHostRuntimeIdentity = (typeof RoleHostRuntimeIdentitySchema)['Type'];
+
+export const RoleHostEventSchema = Schema.Struct({
+  sequence: NonNegativeInteger,
+  kind: Schema.NonEmptyString,
+  text: Schema.String,
+});
+
+export type RoleHostEvent = (typeof RoleHostEventSchema)['Type'];
+
+export const RoleHostControlSchema = Schema.JsonObject;
+
+export type RoleHostControl = (typeof RoleHostControlSchema)['Type'];
+
+export const RoleHostNarrativeSchema = Schema.NonEmptyString;
+
+export const RoleHostCreateRequestSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(ROLE_HOST_PROTOCOL_VERSION),
+  runId: Identifier,
+  role: Schema.Literals(ROLE_HOST_ROLES),
+  attempt: PositiveInteger,
+  generation: PositiveInteger,
+  workingDirectory: Schema.optional(Schema.NonEmptyString),
+  readRoots: Schema.optional(StringList),
+  writeRoots: Schema.optional(StringList),
+  networkAllowlist: Schema.optional(StringList),
+});
+
+export type RoleHostCreateRequest = (typeof RoleHostCreateRequestSchema)['Type'];
+
+export const RoleHostCreateResponseSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(ROLE_HOST_PROTOCOL_VERSION),
+  sessionId: Schema.NonEmptyString,
+  ownershipToken: Schema.NonEmptyString,
+  generation: PositiveInteger,
+  sequence: NonNegativeInteger,
+  runtimeIdentity: RoleHostRuntimeIdentitySchema,
+});
+
+export type RoleHostCreateResponse = (typeof RoleHostCreateResponseSchema)['Type'];
+
+export const RoleHostSubmitRequestSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(ROLE_HOST_PROTOCOL_VERSION),
+  sessionId: Schema.NonEmptyString,
+  ownershipToken: Schema.NonEmptyString,
+  generation: PositiveInteger,
+  idempotencyKey: Schema.NonEmptyString,
+  prompt: Schema.NonEmptyString,
+  deadline: RoleHostInstant,
+});
+
+export type RoleHostSubmitRequest = (typeof RoleHostSubmitRequestSchema)['Type'];
+
+export const RoleHostSubmitResponseSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(ROLE_HOST_PROTOCOL_VERSION),
+  submission: Schema.Literals(ROLE_HOST_SUBMISSIONS),
+});
+
+export type RoleHostSubmitResponse = (typeof RoleHostSubmitResponseSchema)['Type'];
+
+export const RoleHostObserveRequestSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(ROLE_HOST_PROTOCOL_VERSION),
+  sessionId: Schema.NonEmptyString,
+  ownershipToken: Schema.NonEmptyString,
+  generation: PositiveInteger,
+  afterSequence: NonNegativeInteger,
+});
+
+export type RoleHostObserveRequest = (typeof RoleHostObserveRequestSchema)['Type'];
+
+export const RoleHostObserveActiveResponseSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(ROLE_HOST_PROTOCOL_VERSION),
+  status: Schema.Literal('active'),
+  sequence: NonNegativeInteger,
+  events: Schema.Array(RoleHostEventSchema),
+});
+
+export const RoleHostObserveSettledResponseSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(ROLE_HOST_PROTOCOL_VERSION),
+  status: Schema.Literal('settled'),
+  sequence: NonNegativeInteger,
+  events: Schema.Array(RoleHostEventSchema),
+  narrative: RoleHostNarrativeSchema,
+  control: RoleHostControlSchema,
+});
+
+export const RoleHostObserveLostResponseSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(ROLE_HOST_PROTOCOL_VERSION),
+  status: Schema.Literal('lost'),
+  sequence: NonNegativeInteger,
+  events: Schema.Array(RoleHostEventSchema),
+});
+
+export const RoleHostObserveResponseSchema = Schema.Union([
+  RoleHostObserveActiveResponseSchema,
+  RoleHostObserveSettledResponseSchema,
+  RoleHostObserveLostResponseSchema,
+]);
+
+export type RoleHostObserveResponse = (typeof RoleHostObserveResponseSchema)['Type'];
+
+export type RoleHostObserveSettledResponse = (typeof RoleHostObserveSettledResponseSchema)['Type'];
+
+export const RoleHostStopRequestSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(ROLE_HOST_PROTOCOL_VERSION),
+  sessionId: Schema.NonEmptyString,
+  ownershipToken: Schema.NonEmptyString,
+  generation: PositiveInteger,
+});
+
+export type RoleHostStopRequest = (typeof RoleHostStopRequestSchema)['Type'];
+
+export const RoleHostStopResponseSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(ROLE_HOST_PROTOCOL_VERSION),
+  disposition: Schema.Literals(ROLE_HOST_DISPOSITIONS),
+});
+
+export type RoleHostStopResponse = (typeof RoleHostStopResponseSchema)['Type'];
+
+export interface RoleHostSubmissionIntent {
+  readonly idempotencyKey: string;
+  readonly promptHash: string;
+  readonly baselineSequence: number;
+}
+
+export interface RoleHostObservation {
+  readonly status: RoleHostStatus;
+  readonly sequence: number;
+  readonly eventCount: number;
+  readonly narrative: string | null;
+  readonly control: RoleHostControl | null;
+}
+
+export interface RoleHostSessionState {
+  readonly role: RoleHostRole;
+  readonly attempt: number;
+  readonly generation: number;
+  readonly sessionId: string;
+  readonly ownershipToken: string;
+  readonly initialSequence: number;
+  readonly runtimeIdentity: RoleHostRuntimeIdentity;
+  readonly workingDirectory: string | null;
+  readonly submission: RoleHostSubmissionIntent | null;
+  readonly submissionStarted: RoleHostSubmission | null;
+  readonly lastObservation: RoleHostObservation | null;
+  readonly stopDisposition: RoleHostDisposition | null;
+}
+
+export function roleHostEventsAreOrdered(
+  afterSequence: number,
+  events: ReadonlyArray<RoleHostEvent>,
+): string | null {
+  let previous = afterSequence;
+  for (const event of events) {
+    if (event.sequence <= previous) {
+      return `event sequence ${event.sequence} does not follow the recorded sequence ${previous}`;
+    }
+    previous = event.sequence;
+  }
+  return null;
+}

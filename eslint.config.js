@@ -11,6 +11,7 @@ export default tseslint.config(
       '.agent/**',
       '.agents/**',
       'tools/oxlint/anti-slop/**',
+      'tests/fixtures/**',
       'eslint.config.js',
       'eslint/**',
     ],
