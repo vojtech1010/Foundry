@@ -89,11 +89,14 @@ Architect or Coder may nominate a no-change candidate, but neither declaration
 is authoritative. Foundry first verifies that the task branch is clean and has
 no source-relative diff, runs the deterministic profile against the frozen
 source commit, and sends the request, rationale, source, and verification report
-to Reviewer. Reviewer approval produces `completed_no_change`; requested
-implementation enters Coder without consuming a correction round.
-`human_decision_required` is invalid for a no-change candidate because there is
-no reviewable implementation to publish; unresolved ambiguity routes to Coder
-or `blocked`.
+to Reviewer. An Architect-nominated candidate is persisted as a Git-derived
+result with no commit before that verification; a dirty branch, a mismatched
+task branch, or a HEAD that differs from the frozen source fails closed as a
+recoverable prerequisite instead of reaching Reviewer. Reviewer approval
+produces `completed_no_change`; requested implementation enters Coder without
+consuming a correction round. `human_decision_required` is invalid for a
+no-change candidate because there is no reviewable implementation to publish;
+unresolved ambiguity routes to Coder or `blocked`.
 
 ## Plan-controlled validation
 

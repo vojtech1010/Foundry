@@ -9,7 +9,7 @@ import {
   acceptArchitectPlan,
   admitArchitectPlan,
 } from '../src/application/architect-plan/index.js';
-import { RunGit } from '../src/application/git-provisioning/index.js';
+import { RunGit, RunWorkspaceBlocked } from '../src/application/git-provisioning/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../src/application/run-history/index.js';
 import {
   IllegalWorkflowTransition,
@@ -155,6 +155,15 @@ const CLEAN_IMPLEMENTATION: ImplementationObservation = {
   clean: true,
   baseIsAncestor: true,
   changedFiles: ['src/implementation.ts'],
+};
+
+const SOURCE_IDENTICAL: ImplementationObservation = {
+  workspaceExists: true,
+  currentBranch: TASK_BRANCH,
+  headCommit: FROZEN_COMMIT,
+  clean: true,
+  baseIsAncestor: true,
+  changedFiles: [],
 };
 
 function readPlan(runDirectory: string) {
@@ -492,6 +501,88 @@ describe('architect plan routing', () => {
     }),
   );
 
+  it.effect('sends a no-change plan to verifying as a Git-derived source-identical candidate', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* seedPlanning(fixture);
+        const admission = yield* admitArchitectPlan({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          control: {
+            schemaVersion: 1,
+            outcome: 'no_change_candidate',
+            acceptanceCriteria: ['the source already satisfies the request'],
+            runtimeValidation: 'not_required',
+          },
+          controlRepairsRemaining: 1,
+          retriesRemaining: 1,
+        }).pipe(Effect.provide(observingGit(SOURCE_IDENTICAL)), Effect.provide(LiveStore));
+        expect(admission.outcome).toBe('admitted');
+        if (admission.outcome === 'admitted') {
+          expect(admission.transition.workflowState).toBe('verifying');
+        }
+        const history = yield* readVerifiedRunHistory({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          createIfMissing: false,
+        }).pipe(Effect.provide(RunHistoryLive));
+        expect(history.derived.state).toBe('verifying');
+        expect(history.derived.implementation).toMatchObject({
+          baseCommit: FROZEN_COMMIT,
+          commit: null,
+          noChangeCandidate: true,
+          changedFiles: [],
+        });
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('refuses an Architect no-change candidate on a dirty or changed branch', () =>
+    Effect.gen(function* () {
+      for (const observation of [
+        { ...SOURCE_IDENTICAL, clean: false },
+        { ...CLEAN_IMPLEMENTATION },
+        { ...SOURCE_IDENTICAL, currentBranch: 'other-branch' },
+      ] satisfies ReadonlyArray<ImplementationObservation>) {
+        const fixture = setupFixture();
+        try {
+          yield* seedPlanning(fixture);
+          const error = yield* admitArchitectPlan({
+            runDirectory: fixture.runDirectory,
+            runId: RUN_ID,
+            control: {
+              schemaVersion: 1,
+              outcome: 'no_change_candidate',
+              acceptanceCriteria: ['the source already satisfies the request'],
+              runtimeValidation: 'not_required',
+            },
+            controlRepairsRemaining: 1,
+            retriesRemaining: 1,
+          }).pipe(
+            Effect.provide(observingGit(observation)),
+            Effect.provide(LiveStore),
+            Effect.flip,
+          );
+          expect(error).toBeInstanceOf(RunWorkspaceBlocked);
+          const history = yield* readVerifiedRunHistory({
+            runDirectory: fixture.runDirectory,
+            runId: RUN_ID,
+            createIfMissing: false,
+          }).pipe(Effect.provide(RunHistoryLive));
+          expect(history.derived.implementation).toBeNull();
+          expect(history.derived.state).toBe('planning');
+        } finally {
+          fixture.cleanup();
+        }
+      }
+    }),
+  );
+});
+
+describe('architect no-change candidate provenance', () => {
   it.effect('sends a plan that does not require runtime validation straight to Reviewer', () =>
     Effect.gen(function* () {
       const fixture = setupFixture();

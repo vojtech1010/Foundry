@@ -142,6 +142,36 @@ function runWithFixture(fixture: Fixture, runId: string) {
   ]).pipe(Effect.provide(withRoleHost(roleHost)));
 }
 
+function runArchitectNoChange(fixture: Fixture, runId: string) {
+  const roleHost = scriptedRoleHostLauncher({
+    architect: {
+      narrative: 'The frozen source already satisfies the request.',
+      control: {
+        schemaVersion: 1,
+        outcome: 'no_change_candidate',
+        acceptanceCriteria: ['the app is already observable'],
+        runtimeValidation: 'not_required',
+      },
+    },
+    reviewer: {
+      narrative: 'The verified source already satisfies the request.',
+      control: { schemaVersion: 1, outcome: 'approved' },
+    },
+  });
+  return runCli([
+    'run',
+    '--config',
+    fixture.configPath,
+    '--request',
+    fixture.requestPath,
+    '--task-id',
+    'TASK-LIFECYCLE',
+    '--run-id',
+    runId,
+    '--json',
+  ]).pipe(Effect.provide(withRoleHost(roleHost)));
+}
+
 function runBlockedReviewer(fixture: Fixture, runId: string) {
   const roleHost = scriptedRoleHostLauncher({
     architect: {
@@ -265,6 +295,40 @@ describe('run owns the first pass through review', () => {
         const final = lifecycles[lifecycles.length - 1];
         expect(final?.cleanup).toBe('disposed');
         expect(final?.stoppedAt).not.toBeNull();
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.live('completes an Architect-nominated no-change candidate on the frozen source', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        const result = yield* runArchitectNoChange(fixture, 'RUN-ARCH-NOCHANGE');
+        expect(result.exitCode).toBe(0);
+        const envelope = Schema.decodeUnknownSync(ReportEnvelopeJson)(result.stdout);
+        expect(envelope.ok).toBe(true);
+        if (!envelope.ok || !('workflowState' in envelope.data)) {
+          throw new Error(`Expected a run workflow envelope: ${result.stdout}`);
+        }
+        expect(envelope.data.workflowState).toBe('completed_no_change');
+
+        const history = yield* readHistory(fixture, 'RUN-ARCH-NOCHANGE');
+        expect(history.derived.state).toBe('completed_no_change');
+        expect(history.derived.implementation).toMatchObject({
+          commit: null,
+          noChangeCandidate: true,
+          changedFiles: [],
+        });
+        expect(history.derived.roleSessions.some((session) => session.role === 'coder')).toBe(
+          false,
+        );
+        const sourceCommit = history.derived.sourceFrozen?.sourceCommit ?? null;
+        const noChangeVerification = history.derived.verifications.find(
+          (report) => report.result === 'passed',
+        );
+        expect(noChangeVerification?.commit).toBe(sourceCommit);
       } finally {
         fixture.cleanup();
       }
