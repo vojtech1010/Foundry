@@ -103,6 +103,7 @@ export interface RunWorkflowReport {
   readonly stages: ReadonlyArray<WorkflowState>;
   readonly testerSkipped: boolean;
   readonly decision?: RunWorkflowDecision;
+  readonly resultPullRequest?: string | null;
 }
 
 export type PublicCommandReport =
@@ -161,6 +162,11 @@ function requestFilesOf(
     normalizedByteLength: identity.normalizedByteLength,
     normalizedPromptHash: identity.normalizedPromptHash,
   };
+}
+
+function resultPullRequestOf(outcome: RunWorkflowOutcome): string | null {
+  const publication = outcome.resultPublication;
+  return publication !== null && publication.outcome === 'published' ? publication.url : null;
 }
 
 function terminalFailureFor(outcome: RunWorkflowOutcome, runId: string): RunWorkflowError | null {
@@ -246,6 +252,7 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       outcome: outcome.workflowState,
       stages: outcome.stages,
       testerSkipped: outcome.testerSkipped,
+      resultPullRequest: resultPullRequestOf(outcome),
     } satisfies RunWorkflowReport;
   }
   if (invocation.command === 'resume') {
@@ -308,6 +315,7 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       outcome: outcome.workflowState,
       stages: outcome.stages,
       testerSkipped: outcome.testerSkipped,
+      resultPullRequest: resultPullRequestOf(outcome),
     };
     if (decision === null) {
       return report;

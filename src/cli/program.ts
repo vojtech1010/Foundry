@@ -343,6 +343,7 @@ const RunWorkflowReportData = Schema.Struct({
   stages: Schema.Array(WorkflowStateSchema),
   testerSkipped: Schema.Boolean,
   decision: Schema.optional(RunWorkflowDecisionData),
+  resultPullRequest: Schema.optional(Schema.NullOr(Schema.NonEmptyString)),
 });
 
 const StatusMeasureData = Schema.Struct({
@@ -915,6 +916,7 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
           `data.outcome: ${data.outcome}`,
           `data.stages: ${data.stages.join(' ')}`,
           `data.testerSkipped: ${data.testerSkipped}`,
+          `data.resultPullRequest: ${data.resultPullRequest ?? 'none'}`,
         );
         if (data.decision !== undefined) {
           lines.push(
@@ -1235,6 +1237,7 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
         outcome: report.outcome,
         stages: [...report.stages],
         testerSkipped: report.testerSkipped,
+        resultPullRequest: report.resultPullRequest ?? null,
       };
       if (report.decision === undefined) {
         return workflowReport;

@@ -356,9 +356,19 @@ describe('automatic routing after review', () => {
         expect(result.exitCode).toBe(0);
         expect(workflowStateOf(result.stdout)).toBe('completed');
 
+        const envelope = Schema.decodeUnknownSync(ReportEnvelopeJson)(result.stdout);
+        if (!envelope.ok || !('request' in envelope.data) || !('workflowState' in envelope.data)) {
+          throw new Error(`Expected a run workflow envelope: ${result.stdout}`);
+        }
+        // Publication is configured but no GitHub adapter is wired, so the
+        // ordinary result PR is reported as not opened without failing the run.
+        expect(envelope.data.resultPullRequest ?? null).toBeNull();
+
         const history = yield* readHistory(fixture, runId);
         expect(history.derived.state).toBe('completed');
         expect(history.derived.implementation?.commit ?? null).not.toBeNull();
+        expect(history.derived.resultPrRecorded ?? null).toBeNull();
+        expect(history.events.some((event) => event.type === 'result-pr-recorded')).toBe(false);
         expectRoute(history, 'review-approved', 'completed');
         expect(routesOf(history)).toContain('implementation-ready');
 
@@ -584,6 +594,8 @@ describe('automatic routing after review', () => {
         expect(handoff.kind).toBe('no_change');
         expect(handoff.resultCommit).toBeNull();
         expect(handoff.publication.created).toBe(false);
+        expect(handoff.publication.kind).toBe('none');
+        expect(handoff.publication.url).toBeNull();
         expect(history.derived.cleanupProgress?.outcome).toBe('succeeded');
       } finally {
         fixture.cleanup();
