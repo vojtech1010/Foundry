@@ -2,8 +2,10 @@ import { Clock, Context, Duration, Effect, Result, Schema } from 'effect';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
+import { admitOptionalEvidence, redactText } from '../evidence-limits/index.js';
 import { ReadinessGit } from '../readiness/index.js';
 
+import type { EvidenceLedger, OptionalEvidenceRefusalReason } from '../evidence-limits/index.js';
 import type { VerificationLogReference } from '../../domain/project-verification.js';
 import type { RuntimeCleanupDisposition } from '../../domain/project-runtime.js';
 
@@ -51,6 +53,7 @@ export interface TrackedMutation {
   readonly diffByteLength: number;
   readonly diffTruncated: boolean;
   readonly diffSha256: string;
+  readonly diffRedactionCount: number;
 }
 
 export interface WriteEvidenceOptions {
@@ -111,6 +114,12 @@ export interface GuardedProjectCommandOptions {
   readonly redactionPatterns: ReadonlyArray<string>;
   readonly evidenceDirectory: string;
   readonly reconstruct: boolean;
+  readonly evidenceLedger?: EvidenceLedger | undefined;
+}
+
+export interface OptionalEvidenceRefusal {
+  readonly kind: 'log' | 'mutation-diff';
+  readonly reason: OptionalEvidenceRefusalReason;
 }
 
 export interface GuardedProjectCommandOutcome {
@@ -128,6 +137,7 @@ export interface GuardedProjectCommandOutcome {
   readonly reconstructed: boolean;
   readonly reconstructionError: string | null;
   readonly log: VerificationLogReference;
+  readonly evidenceRefusals: ReadonlyArray<OptionalEvidenceRefusal>;
   readonly detail: string;
 }
 
@@ -154,29 +164,8 @@ function sha256Hex(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
-function redact(text: string, patterns: ReadonlyArray<string>) {
-  let redacted = text;
-  let redactionCount = 0;
-  for (const pattern of patterns) {
-    const expressions = (() => {
-      try {
-        return [new RegExp(pattern, 'gu')];
-      } catch {
-        return [];
-      }
-    })();
-    for (const expression of expressions) {
-      redacted = redacted.replace(expression, () => {
-        redactionCount += 1;
-        return '[REDACTED]';
-      });
-    }
-  }
-  return { text: redacted, redactionCount };
-}
-
 function boundLog(text: string, maxLogBytes: number, patterns: ReadonlyArray<string>) {
-  const { text: redactedText, redactionCount } = redact(text, patterns);
+  const { text: redactedText, redactionCount } = redactText(text, patterns);
   const fullBytes = new TextEncoder().encode(redactedText);
   const retainedText =
     fullBytes.byteLength <= maxLogBytes ? redactedText : redactedText.slice(0, maxLogBytes);
@@ -219,6 +208,7 @@ const captureMutation = Effect.fn('projectCommands.captureMutation')(function* (
   git: ReadinessGit['Service'],
   repositoryPath: string,
   maxDiffBytes: number,
+  patterns: ReadonlyArray<string>,
 ): Effect.fn.Return<TrackedMutation, ProjectCommandError> {
   const diff = yield* git
     .run(['diff', 'HEAD', '--no-color'], repositoryPath)
@@ -229,9 +219,10 @@ const captureMutation = Effect.fn('projectCommands.captureMutation')(function* (
       diffByteLength: 0,
       diffTruncated: false,
       diffSha256: sha256Hex(''),
+      diffRedactionCount: 0,
     };
   }
-  const full = diff.stdout;
+  const { text: full, redactionCount } = redactText(diff.stdout, patterns);
   const truncated = new TextEncoder().encode(full).byteLength > maxDiffBytes;
   const bounded = truncated ? full.slice(0, maxDiffBytes) : full;
   return {
@@ -239,6 +230,7 @@ const captureMutation = Effect.fn('projectCommands.captureMutation')(function* (
     diffByteLength: new TextEncoder().encode(full).byteLength,
     diffTruncated: truncated,
     diffSha256: sha256Hex(full),
+    diffRedactionCount: redactionCount,
   };
 });
 
@@ -311,6 +303,24 @@ export const runGuardedProjectCommand = Effect.fn('runGuardedProjectCommand')(fu
   const exitCode = Result.isSuccess(attempted) ? attempted.success.exitCode : null;
   const snapshotAfter = yield* readSnapshot(git, options.repositoryPath, options.name);
 
+  let usedEvidence = options.evidenceLedger?.usedBytes ?? 0;
+  const evidenceRefusals: Array<OptionalEvidenceRefusal> = [];
+  const admit = (kind: OptionalEvidenceRefusal['kind'], incomingBytes: number): boolean => {
+    if (options.evidenceLedger === undefined) {
+      return true;
+    }
+    const admission = admitOptionalEvidence({
+      history: { maxRunBytes: options.evidenceLedger.maxRunBytes, usedBytes: usedEvidence },
+      incomingBytes,
+    });
+    if (admission.ok) {
+      usedEvidence += incomingBytes;
+      return true;
+    }
+    evidenceRefusals.push({ kind, reason: admission.reason });
+    return false;
+  };
+
   const dirty =
     snapshotAfter.head !== snapshotBefore.head || snapshotAfter.status !== snapshotBefore.status;
   let mutation: TrackedMutation | null = null;
@@ -318,22 +328,30 @@ export const runGuardedProjectCommand = Effect.fn('runGuardedProjectCommand')(fu
   let reconstructed = false;
   let reconstructionError: string | null = null;
   if (dirty) {
-    mutation = yield* captureMutation(git, options.repositoryPath, options.maxDiffBytes);
+    mutation = yield* captureMutation(
+      git,
+      options.repositoryPath,
+      options.maxDiffBytes,
+      options.redactionPatterns,
+    );
     const diffPath = join(
       options.evidenceDirectory,
       `${options.name}-mutation-${mutation.diffSha256.slice(0, 16)}.diff`,
     );
     const retainedDiffBytes = new TextEncoder().encode(mutation.diff);
-    yield* evidence
-      .write({ path: diffPath, bytes: retainedDiffBytes })
-      .pipe(Effect.mapError((error) => new ProjectCommandError({ message: error.message })));
+    const diffAdmitted = admit('mutation-diff', retainedDiffBytes.byteLength);
+    if (diffAdmitted) {
+      yield* evidence
+        .write({ path: diffPath, bytes: retainedDiffBytes })
+        .pipe(Effect.mapError((error) => new ProjectCommandError({ message: error.message })));
+    }
     mutationDiff = {
       path: diffPath,
       sha256: mutation.diffSha256,
       byteLength: mutation.diffByteLength,
-      retainedByteLength: retainedDiffBytes.byteLength,
-      truncated: mutation.diffTruncated,
-      redactionCount: 0,
+      retainedByteLength: diffAdmitted ? retainedDiffBytes.byteLength : 0,
+      truncated: diffAdmitted ? mutation.diffTruncated : true,
+      redactionCount: mutation.diffRedactionCount,
     };
     if (options.reconstruct) {
       const rebuilt = yield* reconstructTrackedWorktree(
@@ -359,16 +377,20 @@ export const runGuardedProjectCommand = Effect.fn('runGuardedProjectCommand')(fu
     options.evidenceDirectory,
     `${options.name}-${bounded.sha256.slice(0, 16)}.log`,
   );
-  yield* evidence
-    .write({ path: logPath, bytes: new TextEncoder().encode(bounded.retained) })
-    .pipe(Effect.mapError((error) => new ProjectCommandError({ message: error.message })));
+  const retainedLogBytes = new TextEncoder().encode(bounded.retained);
+  const logAdmitted = admit('log', retainedLogBytes.byteLength);
+  if (logAdmitted) {
+    yield* evidence
+      .write({ path: logPath, bytes: retainedLogBytes })
+      .pipe(Effect.mapError((error) => new ProjectCommandError({ message: error.message })));
+  }
 
   const log: VerificationLogReference = {
     path: logPath,
     sha256: bounded.sha256,
     byteLength: bounded.byteLength,
-    retainedByteLength: bounded.retainedByteLength,
-    truncated: bounded.truncated,
+    retainedByteLength: logAdmitted ? retainedLogBytes.byteLength : 0,
+    truncated: logAdmitted ? bounded.truncated : true,
     redactionCount: bounded.redactionCount,
   };
 
@@ -392,6 +414,7 @@ export const runGuardedProjectCommand = Effect.fn('runGuardedProjectCommand')(fu
     reconstructed,
     reconstructionError,
     log,
+    evidenceRefusals,
     detail,
   };
 });
