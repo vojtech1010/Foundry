@@ -20,7 +20,10 @@ import type { PublicCommandError, PublicCommandReport } from '../application/pub
 import type { RunGit } from '../application/git-provisioning/index.js';
 import type { GuidanceGit, GuidanceSnapshotStore } from '../application/guidance/index.js';
 import type { ProjectCommandProcess } from '../application/profile-check/index.js';
-import type { ProjectEvidenceStore } from '../application/project-commands/index.js';
+import type {
+  OwnedProjectProcess,
+  ProjectEvidenceStore,
+} from '../application/project-commands/index.js';
 import type { RunHistoryStorage } from '../application/run-history/index.js';
 import type {
   RepositoryHostIdentity,
@@ -33,6 +36,7 @@ import type {
 } from '../application/readiness/index.js';
 import type { RunIdentityStore } from '../application/run-identity/index.js';
 import type { RoleHostLauncher } from '../application/role-conversations/index.js';
+import type { RoleTurnResourceObserver } from '../application/role-permissions/index.js';
 
 const UNKNOWN_COMMAND_LABEL = 'foundry';
 
@@ -294,21 +298,35 @@ const RunProvenanceData = Schema.Struct({
   headCommit: Schema.String,
 });
 
+const RecordedRequestData = Schema.Struct({
+  sourcePath: Schema.String,
+  originalPath: Schema.String,
+  normalizedPath: Schema.String,
+  identityPath: Schema.String,
+  originalByteLength: Schema.Number,
+  originalContentHash: Schema.String,
+  normalizedByteLength: Schema.Number,
+  normalizedPromptHash: Schema.String,
+});
+
 const RecordedRunReportData = Schema.Struct({
   runId: Schema.String,
   taskId: Schema.String,
   runDirectory: Schema.String,
   provenance: RunProvenanceData,
-  request: Schema.Struct({
-    sourcePath: Schema.String,
-    originalPath: Schema.String,
-    normalizedPath: Schema.String,
-    identityPath: Schema.String,
-    originalByteLength: Schema.Number,
-    originalContentHash: Schema.String,
-    normalizedByteLength: Schema.Number,
-    normalizedPromptHash: Schema.String,
-  }),
+  request: RecordedRequestData,
+});
+
+const RunWorkflowReportData = Schema.Struct({
+  runId: Schema.String,
+  taskId: Schema.String,
+  runDirectory: Schema.String,
+  request: RecordedRequestData,
+  provenance: RunProvenanceData,
+  workflowState: WorkflowStateSchema,
+  outcome: WorkflowStateSchema,
+  stages: Schema.Array(WorkflowStateSchema),
+  testerSkipped: Schema.Boolean,
 });
 
 const ReportData = Schema.Union([
@@ -316,6 +334,7 @@ const ReportData = Schema.Union([
   DoctorReportData,
   InitPreviewReportData,
   ProfileCheckReportData,
+  RunWorkflowReportData,
   RecordedRunReportData,
   RunWorkflowStateReportData,
 ]);
@@ -573,6 +592,14 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         `data.request.normalizedByteLength: ${data.request.normalizedByteLength}`,
         `data.request.normalizedPromptHash: ${data.request.normalizedPromptHash}`,
       );
+      if ('workflowState' in data) {
+        lines.push(
+          `data.workflowState: ${data.workflowState}`,
+          `data.outcome: ${data.outcome}`,
+          `data.stages: ${data.stages.join(' ')}`,
+          `data.testerSkipped: ${data.testerSkipped}`,
+        );
+      }
     } else if ('workflowState' in data) {
       lines.push(
         `data.runId: ${data.runId}`,
@@ -607,6 +634,8 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
 
 function failureKindFor(error: PublicCommandError): ReportFailureKind {
   switch (error._tag) {
+    case 'RunWorkflowError':
+      return error.kind;
     case 'RunStateUnavailable':
     case 'RunHistoryIntegrityError':
     case 'RunHistoryStorageError':
@@ -650,7 +679,16 @@ function toDomainInvocation(
         cwd,
       };
     }
-    case 'resume':
+    case 'resume': {
+      return {
+        command: 'resume',
+        runId: invocation.runId,
+        config: invocation.config,
+        cwd,
+        abandon: 'abandon' in invocation ? invocation.abandon === true : false,
+        reason: 'reason' in invocation ? invocation.reason : undefined,
+      };
+    }
     case 'status':
     case 'inspect': {
       return {
@@ -771,21 +809,35 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
     };
   }
   if ('request' in report) {
+    const request = {
+      sourcePath: report.request.sourcePath,
+      originalPath: report.request.originalPath,
+      normalizedPath: report.request.normalizedPath,
+      identityPath: report.request.identityPath,
+      originalByteLength: report.request.originalByteLength,
+      originalContentHash: report.request.originalContentHash,
+      normalizedByteLength: report.request.normalizedByteLength,
+      normalizedPromptHash: report.request.normalizedPromptHash,
+    };
+    if ('workflowState' in report) {
+      return {
+        runId: report.runId,
+        taskId: report.taskId,
+        runDirectory: report.runDirectory,
+        request,
+        provenance: { ...report.provenance },
+        workflowState: report.workflowState,
+        outcome: report.outcome,
+        stages: [...report.stages],
+        testerSkipped: report.testerSkipped,
+      };
+    }
     return {
       runId: report.runId,
       taskId: report.taskId,
       runDirectory: report.runDirectory,
       provenance: { ...report.provenance },
-      request: {
-        sourcePath: report.request.sourcePath,
-        originalPath: report.request.originalPath,
-        normalizedPath: report.request.normalizedPath,
-        identityPath: report.request.identityPath,
-        originalByteLength: report.request.originalByteLength,
-        originalContentHash: report.request.originalContentHash,
-        normalizedByteLength: report.request.normalizedByteLength,
-        normalizedPromptHash: report.request.normalizedPromptHash,
-      },
+      request,
     };
   }
   if ('workflowState' in report) {
@@ -824,11 +876,13 @@ export const runCli = Effect.fn('runCli')(function* (
   | ReadinessGit
   | ProjectCommandProcess
   | ProjectEvidenceStore
+  | OwnedProjectProcess
   | RunIdentityStore
   | RunHistoryStorage
   | RepositoryLeaseStore
   | RepositoryHostIdentity
   | RoleHostLauncher
+  | RoleTurnResourceObserver
   | RunGit
   | GuidanceGit
   | GuidanceSnapshotStore

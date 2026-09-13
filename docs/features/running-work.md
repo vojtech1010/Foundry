@@ -75,6 +75,12 @@ parallel implementation may help, but the accepted plan controls execution.
 8. **Clean up.** Foundry releases owned runtime and worktree resources while
    preserving the result and bounded evidence.
 
+A single `run` invocation completes steps 1 through 6 and reaches the first
+Reviewer outcome; the operator never approves or invokes an individual stage.
+Post-review routing and decision publication are separate slices: an ordinary
+Reviewer approval completes the run locally, while a genuine human decision is
+recorded for later publication rather than guessed from free-form activity.
+
 A request already satisfied by the source may complete as
 `completed_no_change`. It has no implementation commit and cannot require a
 review-decision PR.
