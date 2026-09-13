@@ -13,7 +13,11 @@ import {
 } from '../../domain/workflow.js';
 import { RunGit } from '../git-provisioning/index.js';
 import { RunStateUnavailable, reconcileRunReports } from '../run-identity/index.js';
-import { RunHistoryIntegrityError, appendRunEvent } from '../run-history/index.js';
+import {
+  RunHistoryIntegrityError,
+  appendRunEvent,
+  readVerifiedRunHistory,
+} from '../run-history/index.js';
 
 import type { RunWorkspaceBlocked } from '../git-provisioning/index.js';
 
@@ -28,6 +32,7 @@ import type {
   WorkflowTransitionRouteKind,
 } from '../../domain/workflow.js';
 import type { RunEventDraft } from '../../domain/run-history.js';
+import type { ImplementationAcceptedPayload } from '../../domain/run-history.js';
 import type {
   RunHistoryError,
   RunHistoryStorage,
@@ -155,12 +160,17 @@ function implementationRefusal(
   });
 }
 
+export interface DerivedImplementation {
+  readonly request: Extract<WorkflowTransitionRequest, { readonly route: 'implementation-ready' }>;
+  readonly evidence: ImplementationAcceptedPayload;
+}
+
 const deriveImplementationRequest = Effect.fn('deriveImplementationRequest')(function* (
   runId: string,
   request: Extract<WorkflowTransitionRequest, { readonly route: 'implementation-ready' }>,
   history: VerifiedRunHistory,
 ): Effect.fn.Return<
-  Extract<WorkflowTransitionRequest, { readonly route: 'implementation-ready' }>,
+  DerivedImplementation,
   IllegalWorkflowTransition | RunWorkspaceBlocked,
   RunGit
 > {
@@ -240,11 +250,48 @@ const deriveImplementationRequest = Effect.fn('deriveImplementationRequest')(fun
     );
   }
   return {
-    route: 'implementation-ready',
-    branchClean: true,
-    candidateCommit,
-    noChangeCandidateValidated: request.noChangeCandidateValidated,
+    request: {
+      route: 'implementation-ready',
+      branchClean: true,
+      candidateCommit,
+      noChangeCandidateValidated: request.noChangeCandidateValidated,
+    },
+    evidence: {
+      taskBranch: ready.taskBranch,
+      baseCommit: ready.baseCommit,
+      commit: candidateCommit,
+      changedFiles: [...observed.changedFiles],
+      noChangeCandidate: candidateCommit === null,
+    },
   };
+});
+
+const recordImplementationAcceptance = Effect.fn('recordImplementationAcceptance')(function* (
+  runDirectory: string,
+  runId: string,
+  evidence: ImplementationAcceptedPayload,
+): Effect.fn.Return<void, RunHistoryError, RunHistoryStorage> {
+  const history = yield* readVerifiedRunHistory({
+    runDirectory,
+    runId,
+    createIfMissing: false,
+  });
+  const existing = history.derived.implementation;
+  if (
+    existing !== null &&
+    existing.taskBranch === evidence.taskBranch &&
+    existing.baseCommit === evidence.baseCommit &&
+    existing.commit === evidence.commit &&
+    existing.noChangeCandidate === evidence.noChangeCandidate
+  ) {
+    return;
+  }
+  yield* appendRunEvent({
+    runDirectory,
+    runId,
+    createIfMissing: false,
+    build: () => Effect.succeed({ type: 'implementation-accepted', payload: evidence } as const),
+  });
 });
 
 export const transitionWorkflow = Effect.fn('transitionWorkflow')(function* (
@@ -257,6 +304,30 @@ export const transitionWorkflow = Effect.fn('transitionWorkflow')(function* (
   const runId = options.runId;
   if (!Schema.is(Identifier)(runId)) {
     return yield* invalidRunId(runId);
+  }
+
+  let request: WorkflowTransitionRequest = options.request;
+  if (options.request.route === 'implementation-ready') {
+    const history = yield* readVerifiedRunHistory({
+      runDirectory: options.runDirectory,
+      runId,
+      createIfMissing: false,
+    });
+    const derived = yield* deriveImplementationRequest(runId, options.request, history);
+    const evaluation = evaluateWorkflowTransition(
+      { state: history.derived.state, checkpoint: history.derived.checkpoint },
+      derived.request,
+    );
+    if (!evaluation.ok) {
+      return yield* transitionRefusal(
+        runId,
+        'implementation-ready',
+        history.derived.state,
+        evaluation,
+      );
+    }
+    yield* recordImplementationAcceptance(options.runDirectory, runId, derived.evidence);
+    request = derived.request;
   }
 
   const appended = yield* appendRunEvent({
@@ -283,10 +354,6 @@ export const transitionWorkflow = Effect.fn('transitionWorkflow')(function* (
             missingFact: 'durable frozen guidance checkpoint',
           });
         }
-        const request =
-          options.request.route === 'implementation-ready'
-            ? yield* deriveImplementationRequest(runId, options.request, history)
-            : options.request;
         const evaluation = evaluateWorkflowTransition(
           { state: history.derived.state, checkpoint: history.derived.checkpoint },
           request,

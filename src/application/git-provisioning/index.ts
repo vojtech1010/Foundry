@@ -37,6 +37,7 @@ export interface ImplementationObservation {
   readonly headCommit: string | null;
   readonly clean: boolean;
   readonly baseIsAncestor: boolean;
+  readonly changedFiles: ReadonlyArray<string>;
 }
 
 export interface InspectRepositoryOptions {

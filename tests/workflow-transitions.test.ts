@@ -272,6 +272,7 @@ const CLEAN_IMPLEMENTATION: ImplementationObservation = {
   headCommit: IMPLEMENTED_COMMIT,
   clean: true,
   baseIsAncestor: true,
+  changedFiles: ['src/implementation.ts'],
 };
 
 function seedRun(fixture: Fixture, state: WorkflowState) {

@@ -240,6 +240,7 @@ const SyntheticRunGit = Layer.succeed(
         headCommit: 'abc123',
         clean: true,
         baseIsAncestor: true,
+        changedFiles: [],
       }),
   }),
 );

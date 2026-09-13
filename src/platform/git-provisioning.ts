@@ -318,6 +318,7 @@ const observeImplementation = Effect.fn('runGit.observeImplementation')(function
       headCommit: null,
       clean: false,
       baseIsAncestor: false,
+      changedFiles: [],
     };
   }
   const branchOutcome = yield* Effect.sync(() =>
@@ -339,6 +340,7 @@ const observeImplementation = Effect.fn('runGit.observeImplementation')(function
       headCommit: null,
       clean: false,
       baseIsAncestor: false,
+      changedFiles: [],
     };
   }
   const currentBranch = branchOutcome.stdout.trim() === 'HEAD' ? null : branchOutcome.stdout.trim();
@@ -346,12 +348,26 @@ const observeImplementation = Effect.fn('runGit.observeImplementation')(function
   const ancestorOutcome = yield* Effect.sync(() =>
     runGit(['merge-base', '--is-ancestor', options.baseCommit, headCommit], workspace),
   );
+  const changedOutcome = yield* Effect.sync(() =>
+    runGit(
+      ['diff', '--name-only', '--no-renames', `${options.baseCommit}..${headCommit}`],
+      workspace,
+    ),
+  );
+  const changedFiles =
+    changedOutcome.exitCode === 0
+      ? changedOutcome.stdout
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0)
+      : [];
   return {
     workspaceExists: true,
     currentBranch,
     headCommit: isCommitId(headCommit) ? headCommit : null,
     clean: statusOutcome.exitCode === 0 && statusOutcome.stdout.trim().length === 0,
     baseIsAncestor: ancestorOutcome.exitCode === 0,
+    changedFiles,
   };
 });
 
