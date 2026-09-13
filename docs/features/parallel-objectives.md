@@ -57,9 +57,10 @@ branch, worktree, and session from the same frozen source. Active workers never
 exceed `maxParallelCoders`; each objective consumes `retryBudgets.coder`
 independently, so exhausting one objective's budget cannot consume another's;
 and a successful objective must produce a verifiable Git-derived commit bound to
-its durable worker record. In this wave the coding stage ends blocked with a
-recoverable "awaiting integration" reason once every worker settles; Lead Coder
-integration and the aggregate result are added by task 041.
+its durable worker record. Once every worker settles, the coding stage records
+the accepted objective/commit set and declared integration order, runs the Lead
+Coder turn, verifies the aggregate, and accepts only the combined commit for
+checks.
 
 ## Worker lifecycle and integration provenance
 
@@ -86,10 +87,31 @@ commit and contributors in the run's accepted-commit provenance; bind checks,
 Reviewer, and the handoff to that aggregate. A sparse top-level Coder summary
 must not replace the durable integration record.
 
+**Implemented:** Foundry records `integration-declared` with the complete
+accepted objective set, the Git-derived commit per objective, and the plan's
+declared order before the Lead Coder turn starts. After the turn, it verifies the
+aggregate against those records with Git: every accepted commit must be reachable
+from the aggregate head, and the actual contribution application order is derived
+from the aggregate's first-parent history. It records `integration-completed`
+with the aggregate commit, the actual order, and an explicit deviation reason
+when that order differs from the declared one. The aggregate commit, not any
+worker commit or top-level summary, is the run's only candidate result and the
+result head that checks, Tester, Reviewer, and the handoff bind to.
+
 ## Failure behavior
 
 Lead Coder does not begin until every objective has a valid commit. Foundry never
 tests or reviews a partial aggregate.
+
+**Implemented:** A failed or commit-less objective stops queued work, drains the
+active workers, disposes the worker resources this run owns, and stays within the
+objective's retry budget; the run blocks without recording an aggregate. A
+worker commit that drifts out of the aggregate is rejected with the accepted
+records preserved. A Lead Coder failure retries within the Coder budget and then
+blocks. Terminal cleanup disposes the run-owned worker worktrees alongside the
+run worktree; if cleanup fails after a successful combination, the accepted
+aggregate and its terminal result are preserved and the cleanup problem is
+reported with a `warning` or `failed` cleanup outcome.
 
 | Situation                              | Behavior                                                                               |
 | -------------------------------------- | -------------------------------------------------------------------------------------- |

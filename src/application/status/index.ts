@@ -197,6 +197,18 @@ function eventDetail(event: RunEvent): string {
       );
     case 'evidence-bound':
       return boundedDetail(`tester observation bound to ${event.payload.commit}`);
+    case 'integration-declared':
+      return boundedDetail(
+        `integration declared for ${event.payload.objectiveIds.length} objective(s) in order ${event.payload.declaredOrder.join(', ')}`,
+      );
+    case 'integration-completed':
+      return boundedDetail(
+        `integration completed at ${event.payload.aggregateCommit}${
+          event.payload.deviationReason === null
+            ? ''
+            : ` (order deviation: ${event.payload.deviationReason})`
+        }`,
+      );
   }
 }
 
