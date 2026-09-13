@@ -65,6 +65,18 @@ function executionOf(
     timedOut: outcome.timedOut,
     durationMs: outcome.durationMs,
     log: outcome.log,
+    trackedMutation:
+      outcome.mutation === null || outcome.mutationDiff === null
+        ? null
+        : {
+            sha256: outcome.mutation.diffSha256,
+            byteLength: outcome.mutation.diffByteLength,
+            retainedByteLength: outcome.mutationDiff.retainedByteLength,
+            truncated: outcome.mutation.diffTruncated,
+            diff: outcome.mutationDiff,
+          },
+    reconstructed: outcome.reconstructed,
+    reconstructionError: outcome.reconstructionError,
   };
 }
 
@@ -218,5 +230,10 @@ export const runProjectVerification = Effect.fn('runProjectVerification')(functi
 });
 
 function isExecutionPassing(execution: VerificationExecution): boolean {
-  return !execution.timedOut && execution.actualExitCode === execution.expectedExitCode;
+  return (
+    !execution.timedOut &&
+    execution.actualExitCode === execution.expectedExitCode &&
+    execution.trackedMutation === null &&
+    execution.reconstructionError === null
+  );
 }

@@ -31,6 +31,16 @@ export const VerificationLogReferenceSchema = Schema.Struct({
 
 export type VerificationLogReference = (typeof VerificationLogReferenceSchema)['Type'];
 
+export const VerificationTrackedMutationSchema = Schema.Struct({
+  sha256: Sha256Hex,
+  byteLength: NonNegativeInt,
+  retainedByteLength: NonNegativeInt,
+  truncated: Schema.Boolean,
+  diff: VerificationLogReferenceSchema,
+});
+
+export type VerificationTrackedMutation = (typeof VerificationTrackedMutationSchema)['Type'];
+
 export const VerificationExecutionSchema = Schema.Struct({
   kind: Schema.Literals(VERIFICATION_GATE_KINDS),
   name: Schema.NonEmptyString,
@@ -41,6 +51,9 @@ export const VerificationExecutionSchema = Schema.Struct({
   timedOut: Schema.Boolean,
   durationMs: NonNegativeInt,
   log: VerificationLogReferenceSchema,
+  trackedMutation: Schema.NullOr(VerificationTrackedMutationSchema),
+  reconstructed: Schema.Boolean,
+  reconstructionError: Schema.NullOr(Schema.String),
 });
 
 export type VerificationExecution = (typeof VerificationExecutionSchema)['Type'];

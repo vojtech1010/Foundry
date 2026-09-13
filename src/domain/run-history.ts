@@ -545,6 +545,25 @@ function canonicalVerificationExecution(execution: VerificationExecution) {
       truncated: execution.log.truncated,
       redactionCount: execution.log.redactionCount,
     },
+    trackedMutation:
+      execution.trackedMutation === null
+        ? null
+        : {
+            sha256: execution.trackedMutation.sha256,
+            byteLength: execution.trackedMutation.byteLength,
+            retainedByteLength: execution.trackedMutation.retainedByteLength,
+            truncated: execution.trackedMutation.truncated,
+            diff: {
+              path: execution.trackedMutation.diff.path,
+              sha256: execution.trackedMutation.diff.sha256,
+              byteLength: execution.trackedMutation.diff.byteLength,
+              retainedByteLength: execution.trackedMutation.diff.retainedByteLength,
+              truncated: execution.trackedMutation.diff.truncated,
+              redactionCount: execution.trackedMutation.diff.redactionCount,
+            },
+          },
+    reconstructed: execution.reconstructed,
+    reconstructionError: execution.reconstructionError,
   };
 }
 

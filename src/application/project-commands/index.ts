@@ -124,6 +124,7 @@ export interface GuardedProjectCommandOutcome {
   readonly snapshotBefore: TrackedSnapshot;
   readonly snapshotAfter: TrackedSnapshot;
   readonly mutation: TrackedMutation | null;
+  readonly mutationDiff: VerificationLogReference | null;
   readonly reconstructed: boolean;
   readonly reconstructionError: string | null;
   readonly log: VerificationLogReference;
@@ -313,10 +314,27 @@ export const runGuardedProjectCommand = Effect.fn('runGuardedProjectCommand')(fu
   const dirty =
     snapshotAfter.head !== snapshotBefore.head || snapshotAfter.status !== snapshotBefore.status;
   let mutation: TrackedMutation | null = null;
+  let mutationDiff: VerificationLogReference | null = null;
   let reconstructed = false;
   let reconstructionError: string | null = null;
   if (dirty) {
     mutation = yield* captureMutation(git, options.repositoryPath, options.maxDiffBytes);
+    const diffPath = join(
+      options.evidenceDirectory,
+      `${options.name}-mutation-${mutation.diffSha256.slice(0, 16)}.diff`,
+    );
+    const retainedDiffBytes = new TextEncoder().encode(mutation.diff);
+    yield* evidence
+      .write({ path: diffPath, bytes: retainedDiffBytes })
+      .pipe(Effect.mapError((error) => new ProjectCommandError({ message: error.message })));
+    mutationDiff = {
+      path: diffPath,
+      sha256: mutation.diffSha256,
+      byteLength: mutation.diffByteLength,
+      retainedByteLength: retainedDiffBytes.byteLength,
+      truncated: mutation.diffTruncated,
+      redactionCount: 0,
+    };
     if (options.reconstruct) {
       const rebuilt = yield* reconstructTrackedWorktree(
         git,
@@ -370,6 +388,7 @@ export const runGuardedProjectCommand = Effect.fn('runGuardedProjectCommand')(fu
     snapshotBefore,
     snapshotAfter,
     mutation,
+    mutationDiff,
     reconstructed,
     reconstructionError,
     log,

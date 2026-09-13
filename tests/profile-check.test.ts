@@ -136,6 +136,7 @@ function goldenDocument(
 interface MutableGitState {
   head: string;
   status: string;
+  diff: string;
 }
 
 type ProcessScript = (
@@ -196,6 +197,7 @@ function buildProfileWorld(options: {
   const gitState: MutableGitState = {
     head: options.head ?? HEAD,
     status: options.status ?? '',
+    diff: '',
   };
   const processCalls: Array<ProcessCall> = [];
   const gitCalls: Array<GitCall> = [];
@@ -243,6 +245,15 @@ function buildProfileWorld(options: {
             }
             if (args[0] === 'status') {
               return { stdout: gitState.status, exitCode: 0 };
+            }
+            if (args[0] === 'diff') {
+              return { stdout: gitState.diff, exitCode: 0 };
+            }
+            if (args[0] === 'reset') {
+              gitState.head = args[2] ?? gitState.head;
+              gitState.status = '';
+              gitState.diff = '';
+              return { stdout: '', exitCode: 0 };
             }
             return { stdout: '', exitCode: 99 };
           }),
@@ -409,6 +420,7 @@ describe('profile-check with fake services', () => {
           succeedScript(),
           succeedScript((state) => {
             state.status = ' M tracked.txt\n';
+            state.diff = 'diff --git a/tracked.txt b/tracked.txt\n+changed\n';
           }),
           succeedScript(),
           succeedScript(),
@@ -422,6 +434,8 @@ describe('profile-check with fake services', () => {
       expect(error.message).toContain('"formatCheck"');
       expect(error.message).toContain('tracked');
       expect(world.processCalls).toHaveLength(2);
+      expect(world.gitState.status).toBe('');
+      expect(world.gitCalls.some((call) => call.args[0] === 'reset')).toBe(true);
       expectNoHistoryMutation(world.gitCalls);
     }),
   );
@@ -783,6 +797,7 @@ describe('profile-check against real temporary git repositories', () => {
           expect(error.message).toContain('tracked Git state');
           expect(realGit(dir, ['rev-parse', 'HEAD']).trim()).toBe(beforeHead);
           expect(realGit(dir, ['branch', '--show-current']).trim()).toBe(beforeBranch);
+          expect(realGit(dir, ['status', '--porcelain'])).toBe('');
           expect(existsSync(join(dir, '.agent', 'runs'))).toBe(false);
         }),
         cleanupRealRepository([dir, remote, scratch]),

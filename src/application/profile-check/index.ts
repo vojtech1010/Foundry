@@ -124,12 +124,17 @@ export const checkProjectProfile = Effect.fn('checkProjectProfile')(function* (
       maxDiffBytes: 65536,
       redactionPatterns: [],
       evidenceDirectory,
-      reconstruct: false,
+      reconstruct: true,
     }).pipe(Effect.mapError((error) => new ProfileCheckError({ message: error.message })));
 
     if (outcome.timedOut) {
       return yield* new ProfileCheckError({
         message: `Project command "${step.name}" timed out after ${commandMs}ms.`,
+      });
+    }
+    if (outcome.reconstructionError !== null) {
+      return yield* new ProfileCheckError({
+        message: `Project command "${step.name}" could not restore tracked Git state: ${outcome.reconstructionError}`,
       });
     }
     if (outcome.mutation !== null) {
