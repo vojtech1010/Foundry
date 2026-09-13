@@ -36,6 +36,7 @@ import type {
   ProfileCheckReport,
   ProjectCommandProcess,
 } from './profile-check/index.js';
+import type { ProjectEvidenceStore } from './project-commands/index.js';
 import type {
   RecordedRunIdentityReport,
   RunIdentityError,
@@ -95,6 +96,7 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
   | ReadinessFiles
   | ReadinessGit
   | ProjectCommandProcess
+  | ProjectEvidenceStore
   | RunIdentityStore
   | RunHistoryStorage
   | RepositoryLeaseStore

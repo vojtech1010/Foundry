@@ -13,6 +13,10 @@ import {
   checkProjectProfile,
 } from '../src/application/profile-check/index.js';
 import {
+  ProjectCommandError,
+  ProjectEvidenceStore,
+} from '../src/application/project-commands/index.js';
+import {
   ReadinessError,
   ReadinessFiles,
   ReadinessGit,
@@ -22,6 +26,7 @@ import { RunHistoryStorage } from '../src/application/run-history/index.js';
 import { RunIdentityStore } from '../src/application/run-identity/index.js';
 import { EXIT_CODES } from '../src/domain/public-commands.js';
 import { ProjectCommandProcessLive } from '../src/platform/commands.js';
+import { ProjectEvidenceStoreLive } from '../src/platform/project-commands.js';
 import { ReadinessFilesLive, ReadinessGitLive } from '../src/platform/readiness.js';
 import { capableRoleHostLauncher } from './fixtures/role-host/role-host-launcher.js';
 
@@ -131,11 +136,12 @@ function goldenDocument(
 interface MutableGitState {
   head: string;
   status: string;
+  diff: string;
 }
 
 type ProcessScript = (
   state: MutableGitState,
-) => Effect.Effect<ProjectCommandResult, ProfileCheckError>;
+) => Effect.Effect<ProjectCommandResult, ProjectCommandError>;
 
 const succeedScript = (mutate?: (state: MutableGitState) => void): ProcessScript => {
   return (state) =>
@@ -166,6 +172,7 @@ interface BuiltProfileWorld {
     | ReadinessFiles
     | ReadinessGit
     | ProjectCommandProcess
+    | ProjectEvidenceStore
     | RunIdentityStore
     | RunHistoryStorage
     | RoleHostLauncher
@@ -190,6 +197,7 @@ function buildProfileWorld(options: {
   const gitState: MutableGitState = {
     head: options.head ?? HEAD,
     status: options.status ?? '',
+    diff: '',
   };
   const processCalls: Array<ProcessCall> = [];
   const gitCalls: Array<GitCall> = [];
@@ -238,6 +246,15 @@ function buildProfileWorld(options: {
             if (args[0] === 'status') {
               return { stdout: gitState.status, exitCode: 0 };
             }
+            if (args[0] === 'diff') {
+              return { stdout: gitState.diff, exitCode: 0 };
+            }
+            if (args[0] === 'reset') {
+              gitState.head = args[2] ?? gitState.head;
+              gitState.status = '';
+              gitState.diff = '';
+              return { stdout: '', exitCode: 0 };
+            }
             return { stdout: '', exitCode: 99 };
           }),
       }),
@@ -251,11 +268,17 @@ function buildProfileWorld(options: {
           scriptIndex += 1;
           if (script === undefined) {
             return Effect.fail(
-              new ProfileCheckError({ message: 'Unexpected project command started.' }),
+              new ProjectCommandError({ message: 'Unexpected project command started.' }),
             );
           }
           return script(gitState);
         },
+      }),
+    ),
+    Layer.succeed(
+      ProjectEvidenceStore,
+      ProjectEvidenceStore.of({
+        write: (_options) => Effect.void,
       }),
     ),
     Layer.succeed(
@@ -397,6 +420,7 @@ describe('profile-check with fake services', () => {
           succeedScript(),
           succeedScript((state) => {
             state.status = ' M tracked.txt\n';
+            state.diff = 'diff --git a/tracked.txt b/tracked.txt\n+changed\n';
           }),
           succeedScript(),
           succeedScript(),
@@ -410,6 +434,8 @@ describe('profile-check with fake services', () => {
       expect(error.message).toContain('"formatCheck"');
       expect(error.message).toContain('tracked');
       expect(world.processCalls).toHaveLength(2);
+      expect(world.gitState.status).toBe('');
+      expect(world.gitCalls.some((call) => call.args[0] === 'reset')).toBe(true);
       expectNoHistoryMutation(world.gitCalls);
     }),
   );
@@ -453,7 +479,7 @@ describe('profile-check with fake services', () => {
         scripts: [
           (_state) =>
             Effect.fail(
-              new ProfileCheckError({
+              new ProjectCommandError({
                 message: 'Cannot start project command "bootstrap-tool": spawn ENOENT.',
               }),
             ),
@@ -685,6 +711,7 @@ const integrationLayer = Layer.mergeAll(
   ReadinessFilesLive,
   ReadinessGitLive,
   ProjectCommandProcessLive,
+  ProjectEvidenceStoreLive,
 );
 
 const literalArgvCommand = (marker: string): ReadonlyArray<string> => [
@@ -770,6 +797,7 @@ describe('profile-check against real temporary git repositories', () => {
           expect(error.message).toContain('tracked Git state');
           expect(realGit(dir, ['rev-parse', 'HEAD']).trim()).toBe(beforeHead);
           expect(realGit(dir, ['branch', '--show-current']).trim()).toBe(beforeBranch);
+          expect(realGit(dir, ['status', '--porcelain'])).toBe('');
           expect(existsSync(join(dir, '.agent', 'runs'))).toBe(false);
         }),
         cleanupRealRepository([dir, remote, scratch]),

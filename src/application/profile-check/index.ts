@@ -1,11 +1,17 @@
-import { Context, Duration, Effect, Schema } from 'effect';
+import { Effect, Schema } from 'effect';
 import { dirname, relative, resolve, sep } from 'node:path';
 
 import { VERIFICATION_COMMANDS } from '../../domain/project-configuration.js';
 import { decodeProjectConfiguration } from '../project-configuration.js';
+import { runGuardedProjectCommand } from '../project-commands/index.js';
 import { ReadinessFiles, ReadinessGit } from '../readiness/index.js';
 
 import type { CommandVector } from '../../domain/project-configuration.js';
+import type { ProjectCommandProcess } from '../project-commands/index.js';
+import type { ProjectEvidenceStore } from '../project-commands/index.js';
+
+export { ProjectCommandProcess } from '../project-commands/index.js';
+export type { ProjectCommandResult, RunProjectCommandOptions } from '../project-commands/index.js';
 
 export class ProfileCheckError extends Schema.TaggedError<ProfileCheckError>()(
   'ProfileCheckError',
@@ -13,26 +19,6 @@ export class ProfileCheckError extends Schema.TaggedError<ProfileCheckError>()(
     message: Schema.String,
   },
 ) {}
-
-export interface ProjectCommandResult {
-  readonly exitCode: number;
-  readonly stdout: string;
-  readonly stderr: string;
-}
-
-export interface RunProjectCommandOptions {
-  readonly command: ReadonlyArray<string>;
-  readonly cwd: string;
-}
-
-export class ProjectCommandProcess extends Context.Service<
-  ProjectCommandProcess,
-  {
-    readonly run: (
-      options: RunProjectCommandOptions,
-    ) => Effect.Effect<ProjectCommandResult, ProfileCheckError>;
-  }
->()('foundry/application/profile-check/Process') {}
 
 export interface ProfileCheckExecutedCommand {
   readonly name: string;
@@ -59,65 +45,20 @@ function excerpt(output: string): string {
   return output.trim().replaceAll(/\s+/gu, ' ').trim().slice(0, 500);
 }
 
-function containsPathSeparator(executable: string): boolean {
-  return executable.includes('/') || executable.includes('\\');
-}
-
-function resolveCommandVector(
-  configDirectory: string,
-  command: CommandVector,
-): ReadonlyArray<string> {
-  const [executable, ...rest] = command;
-  if (!containsPathSeparator(executable)) {
-    return [...command];
-  }
-  return [resolve(configDirectory, executable), ...rest];
-}
-
 function escapesRepository(repositoryPath: string, workingDirectory: string): boolean {
   const relativePath = relative(repositoryPath, workingDirectory);
   return relativePath === '..' || relativePath.startsWith(`..${sep}`);
 }
-
-interface TrackedSnapshot {
-  readonly head: string;
-  readonly status: string;
-}
-
-const readSnapshot = Effect.fn('profileCheck.readSnapshot')(function* (
-  git: ReadinessGit['Service'],
-  repositoryPath: string,
-  commandName: string,
-): Effect.fn.Return<TrackedSnapshot, ProfileCheckError> {
-  const head = yield* git
-    .run(['rev-parse', 'HEAD'], repositoryPath)
-    .pipe(Effect.mapError((error) => new ProfileCheckError({ message: error.message })));
-  if (head.exitCode !== 0) {
-    return yield* new ProfileCheckError({
-      message: `Cannot snapshot tracked Git state before project command "${commandName}": ${excerpt(head.stdout)}.`,
-    });
-  }
-  const status = yield* git
-    .run(['status', '--porcelain=v1', '--untracked-files=no'], repositoryPath)
-    .pipe(Effect.mapError((error) => new ProfileCheckError({ message: error.message })));
-  if (status.exitCode !== 0) {
-    return yield* new ProfileCheckError({
-      message: `Cannot snapshot tracked Git state before project command "${commandName}": ${excerpt(status.stdout)}.`,
-    });
-  }
-  return { head: head.stdout.trim(), status: status.stdout };
-});
 
 export const checkProjectProfile = Effect.fn('checkProjectProfile')(function* (
   options: CheckProjectProfileOptions,
 ): Effect.fn.Return<
   ProfileCheckReport,
   ProfileCheckError,
-  ReadinessFiles | ReadinessGit | ProjectCommandProcess
+  ReadinessFiles | ReadinessGit | ProjectCommandProcess | ProjectEvidenceStore
 > {
   const files = yield* ReadinessFiles;
   const git = yield* ReadinessGit;
-  const process = yield* ProjectCommandProcess;
 
   const configPath = resolve(options.cwd, options.configArg);
   const configDirectory = dirname(configPath);
@@ -163,34 +104,49 @@ export const checkProjectProfile = Effect.fn('checkProjectProfile')(function* (
   }
 
   const commandMs = configuration.timeouts.commandMs;
+  const evidenceDirectory = resolve(repositoryPath, '.agent', 'evidence');
   const executed: Array<ProfileCheckExecutedCommand> = [];
 
   for (const step of steps) {
-    const argv = resolveCommandVector(configDirectory, step.vector);
-    const before = yield* readSnapshot(git, repositoryPath, step.name);
-    const result = yield* process.run({ command: argv, cwd: repositoryPath }).pipe(
-      Effect.timeout(Duration.millis(commandMs)),
-      Effect.catchTag(
-        'TimeoutError',
-        () =>
-          new ProfileCheckError({
-            message: `Project command "${step.name}" timed out after ${commandMs}ms.`,
-          }),
-      ),
-    );
-    if (result.exitCode !== 0) {
-      const detail = excerpt(`${result.stdout}\n${result.stderr}`);
-      const suffix = detail.length > 0 ? `: ${detail}` : '.';
+    const argv = [
+      ...(step.vector[0] === undefined
+        ? step.vector
+        : resolveCommandWithSeparator(configDirectory, step.vector)),
+    ];
+    const outcome = yield* runGuardedProjectCommand({
+      kind: step.name === 'bootstrap' ? 'bootstrap' : 'gate',
+      name: step.name,
+      command: argv,
+      cwd: repositoryPath,
+      repositoryPath,
+      timeoutMs: commandMs,
+      maxLogBytes: 65536,
+      maxDiffBytes: 65536,
+      redactionPatterns: [],
+      evidenceDirectory,
+      reconstruct: true,
+    }).pipe(Effect.mapError((error) => new ProfileCheckError({ message: error.message })));
+
+    if (outcome.timedOut) {
       return yield* new ProfileCheckError({
-        message: `Project command "${step.name}" exited with code ${result.exitCode}${suffix}`,
+        message: `Project command "${step.name}" timed out after ${commandMs}ms.`,
       });
     }
-    const after = yield* readSnapshot(git, repositoryPath, step.name);
-    if (after.head !== before.head || after.status !== before.status) {
-      const detail = excerpt(after.status.length > 0 ? after.status : after.head);
-      const suffix = detail.length > 0 ? `: ${detail}` : '.';
+    if (outcome.reconstructionError !== null) {
+      return yield* new ProfileCheckError({
+        message: `Project command "${step.name}" could not restore tracked Git state: ${outcome.reconstructionError}`,
+      });
+    }
+    if (outcome.mutation !== null) {
+      const suffix = outcome.detail.length > 0 ? `: ${outcome.detail}` : '.';
       return yield* new ProfileCheckError({
         message: `Project command "${step.name}" changed tracked Git state${suffix}`,
+      });
+    }
+    if (outcome.exitCode !== 0) {
+      const suffix = outcome.detail.length > 0 ? `: ${outcome.detail}` : '.';
+      return yield* new ProfileCheckError({
+        message: `Project command "${step.name}" exited with code ${outcome.exitCode ?? 1}${suffix}`,
       });
     }
     executed.push({ name: step.name, command: argv, exitCode: 0 });
@@ -202,3 +158,14 @@ export const checkProjectProfile = Effect.fn('checkProjectProfile')(function* (
     commands: executed,
   };
 });
+
+function resolveCommandWithSeparator(
+  configDirectory: string,
+  command: CommandVector,
+): ReadonlyArray<string> {
+  const [executable, ...rest] = command;
+  if (!executable.includes('/') && !executable.includes('\\')) {
+    return [...command];
+  }
+  return [resolve(configDirectory, executable), ...rest];
+}
