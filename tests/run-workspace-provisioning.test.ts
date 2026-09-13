@@ -228,6 +228,34 @@ function transition(
   return transitionWorkflow({ runDirectory, runId, request }).pipe(Effect.provide(AppLive));
 }
 
+function appendAcceptedPlan(runDirectory: string, runId: string) {
+  return appendRunEvent({
+    runDirectory,
+    runId,
+    createIfMissing: false,
+    build: () =>
+      Effect.succeed({
+        type: 'plan-accepted',
+        payload: {
+          outcome: 'plan_ready' as const,
+          criteria: [{ id: 'AC-001', text: 'the seeded criterion' }],
+          runtimeValidationRequired: false,
+          execution: {
+            mode: 'sequential' as const,
+            objectives: [
+              {
+                id: 'OBJ-001',
+                title: 'Implement the accepted plan',
+                affectedPaths: ['.'],
+                criterionIds: ['AC-001'],
+              },
+            ],
+          },
+        },
+      } as const),
+  }).pipe(Effect.provide(AppLive));
+}
+
 function failingRunGit(name: 'createWorktree' | 'createBranch'): Layer.Layer<RunGit> {
   return Layer.effect(
     RunGit,
@@ -464,9 +492,9 @@ describe('run-owned workspace provisioning', () => {
           const report = yield* record(fixture, { runId: 'RUN-OWN-COMMIT' });
           const workspace = report.provenance.workspace;
           const runDirectory = report.runDirectory;
+          yield* appendAcceptedPlan(runDirectory, 'RUN-OWN-COMMIT');
           yield* transition(runDirectory, 'RUN-OWN-COMMIT', {
             route: 'plan-accepted',
-            planRequiresImplementation: true,
           });
 
           writeFileSync(join(workspace, 'scratch.txt'), 'uncommitted\n');

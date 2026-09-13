@@ -184,8 +184,8 @@ export interface ProvisioningFacts {
 
 export type WorkflowTransitionRequest =
   | { readonly route: 'run-created'; readonly provisioning: ProvisioningFacts }
-  | { readonly route: 'plan-accepted'; readonly planRequiresImplementation: boolean }
-  | { readonly route: 'plan-no-change'; readonly noChangeCandidateAccepted: boolean }
+  | { readonly route: 'plan-accepted' }
+  | { readonly route: 'plan-no-change' }
   | {
       readonly route: 'implementation-ready';
       readonly branchClean: boolean;
@@ -195,12 +195,10 @@ export type WorkflowTransitionRequest =
   | {
       readonly route: 'checks-passed-testing';
       readonly checksPassed: boolean;
-      readonly runtimeValidationRequired: boolean;
     }
   | {
       readonly route: 'checks-passed-reviewing';
       readonly checksPassed: boolean;
-      readonly testerRequired: boolean;
       readonly correctionBudgetExhausted: boolean;
       readonly reviewableCommit: string | null;
     }
@@ -393,9 +391,22 @@ export const WORKFLOW_TRANSITION_ROUTES: Readonly<
   },
 };
 
+/**
+ * Durable plan facts derived from the accepted Architect envelope. Workflow
+ * routing reads these instead of caller-supplied booleans so a later role's
+ * prose or a caller's preference cannot change validation routing.
+ */
+export interface WorkflowPlanFacts {
+  readonly accepted: boolean;
+  readonly requiresImplementation: boolean;
+  readonly runtimeValidationRequired: boolean;
+  readonly noChangeCandidate: boolean;
+}
+
 export interface WorkflowTransitionContext {
   readonly state: WorkflowState | null;
   readonly checkpoint: WorkflowState | null;
+  readonly plan: WorkflowPlanFacts | null;
 }
 
 export type WorkflowTransitionEvaluation =
@@ -478,21 +489,23 @@ function checkTransitionFacts(
       return allowed('planning', null);
     }
     case 'plan-accepted': {
-      if (!request.planRequiresImplementation) {
+      const plan = context.plan;
+      if (plan === null || !plan.accepted || !plan.requiresImplementation) {
         return refused(
           'coding',
-          'accepted plan requires implementation',
-          'The "plan-accepted" route to coding requires an accepted plan that requires implementation.',
+          'durable accepted plan that requires implementation',
+          'The "plan-accepted" route to coding requires a durable accepted plan that requires implementation.',
         );
       }
       return allowed('coding', null);
     }
     case 'plan-no-change': {
-      if (!request.noChangeCandidateAccepted) {
+      const plan = context.plan;
+      if (plan === null || !plan.accepted || !plan.noChangeCandidate) {
         return refused(
           'verifying',
-          'accepted no-change candidate',
-          'The "plan-no-change" route to verifying requires an accepted no-change candidate.',
+          'durable accepted no-change candidate',
+          'The "plan-no-change" route to verifying requires a durable accepted no-change candidate.',
         );
       }
       return allowed('verifying', null);
@@ -522,17 +535,18 @@ function checkTransitionFacts(
           'The "checks-passed-testing" route requires passed commit-bound checks.',
         );
       }
-      if (!request.runtimeValidationRequired) {
+      if (context.plan === null || !context.plan.runtimeValidationRequired) {
         return refused(
           'testing',
           'accepted plan requires runtime validation',
-          'The "checks-passed-testing" route requires the accepted plan to require runtime validation.',
+          'The "checks-passed-testing" route requires the durable accepted plan to require runtime validation.',
         );
       }
       return allowed('testing', null);
     }
     case 'checks-passed-reviewing': {
-      if (request.checksPassed && !request.testerRequired) {
+      const testerRequired = context.plan?.runtimeValidationRequired ?? false;
+      if (request.checksPassed && !testerRequired) {
         return allowed('reviewing', null);
       }
       if (request.correctionBudgetExhausted && hasText(request.reviewableCommit)) {

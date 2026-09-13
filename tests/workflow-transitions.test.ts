@@ -75,7 +75,6 @@ const RUN_CREATED: WorkflowTransitionRequest = {
 
 const PLAN_ACCEPTED: WorkflowTransitionRequest = {
   route: 'plan-accepted',
-  planRequiresImplementation: true,
 };
 
 const IMPLEMENTATION_READY: WorkflowTransitionRequest = {
@@ -88,13 +87,11 @@ const IMPLEMENTATION_READY: WorkflowTransitionRequest = {
 const CHECKS_PASSED_TESTING: WorkflowTransitionRequest = {
   route: 'checks-passed-testing',
   checksPassed: true,
-  runtimeValidationRequired: true,
 };
 
 const CHECKS_PASSED_REVIEWING: WorkflowTransitionRequest = {
   route: 'checks-passed-reviewing',
   checksPassed: true,
-  testerRequired: false,
   correctionBudgetExhausted: false,
   reviewableCommit: 'seed-commit',
 };
@@ -272,12 +269,58 @@ const CLEAN_IMPLEMENTATION: ImplementationObservation = {
   headCommit: IMPLEMENTED_COMMIT,
   clean: true,
   baseIsAncestor: true,
+  changedFiles: ['src/implementation.ts'],
 };
 
-function seedRun(fixture: Fixture, state: WorkflowState) {
+type AcceptedPlanOutcome = 'plan_ready' | 'no_change_candidate';
+
+function appendAcceptedPlan(
+  fixture: Fixture,
+  outcome: AcceptedPlanOutcome,
+  runtimeValidationRequired: boolean,
+) {
+  return appendRunEvent({
+    runDirectory: fixture.runDirectory,
+    runId: RUN_ID,
+    createIfMissing: false,
+    build: () =>
+      Effect.succeed({
+        type: 'plan-accepted',
+        payload: {
+          outcome,
+          criteria: [{ id: 'AC-001', text: 'the seeded criterion' }],
+          runtimeValidationRequired,
+          execution: {
+            mode: 'sequential' as const,
+            objectives: [
+              {
+                id: 'OBJ-001',
+                title: 'Implement the accepted plan',
+                affectedPaths: ['.'],
+                criterionIds: ['AC-001'],
+              },
+            ],
+          },
+        },
+      } as const),
+  }).pipe(Effect.provide(RunHistoryLive));
+}
+
+function defaultRuntimeValidationRequired(state: WorkflowState): boolean {
+  return SEED_ROUTES[state].some((request) => request.route === 'checks-passed-testing');
+}
+
+function seedRun(
+  fixture: Fixture,
+  state: WorkflowState,
+  runtimeValidationRequired: boolean = defaultRuntimeValidationRequired(state),
+) {
   return Effect.gen(function* () {
     yield* seedProvisioning(fixture);
     yield* transition(fixture, RUN_CREATED);
+    if (state !== 'planning') {
+      yield* appendAcceptedPlan(fixture, 'plan_ready', runtimeValidationRequired);
+    }
     for (const request of SEED_ROUTES[state]) {
       yield* transition(fixture, request);
     }
@@ -493,8 +536,8 @@ describe('workflow transitions with live storage', () => {
       const acceptedRoutes: ReadonlyArray<
         readonly [WorkflowState, WorkflowTransitionRequest, WorkflowState]
       > = [
-        ['planning', { route: 'plan-accepted', planRequiresImplementation: true }, 'coding'],
-        ['planning', { route: 'plan-no-change', noChangeCandidateAccepted: true }, 'verifying'],
+        ['planning', { route: 'plan-accepted' }, 'coding'],
+        ['planning', { route: 'plan-no-change' }, 'verifying'],
         [
           'coding',
           {
@@ -515,17 +558,12 @@ describe('workflow transitions with live storage', () => {
           },
           'verifying',
         ],
-        [
-          'verifying',
-          { route: 'checks-passed-testing', checksPassed: true, runtimeValidationRequired: true },
-          'testing',
-        ],
+        ['verifying', { route: 'checks-passed-testing', checksPassed: true }, 'testing'],
         [
           'verifying',
           {
             route: 'checks-passed-reviewing',
             checksPassed: true,
-            testerRequired: false,
             correctionBudgetExhausted: false,
             reviewableCommit: 'abc123',
           },
@@ -536,7 +574,6 @@ describe('workflow transitions with live storage', () => {
           {
             route: 'checks-passed-reviewing',
             checksPassed: false,
-            testerRequired: true,
             correctionBudgetExhausted: true,
             reviewableCommit: 'abc123',
           },
@@ -634,7 +671,15 @@ describe('workflow transitions with live storage', () => {
       for (const [state, request, target] of acceptedRoutes) {
         const fixture = setupFixture();
         try {
-          yield* seedRun(fixture, state);
+          const runtimeValidationRequired =
+            request.route === 'checks-passed-testing' || defaultRuntimeValidationRequired(state);
+          yield* seedRun(fixture, state, runtimeValidationRequired);
+          if (state === 'planning' && request.route === 'plan-accepted') {
+            yield* appendAcceptedPlan(fixture, 'plan_ready', runtimeValidationRequired);
+          }
+          if (state === 'planning' && request.route === 'plan-no-change') {
+            yield* appendAcceptedPlan(fixture, 'no_change_candidate', runtimeValidationRequired);
+          }
           const report = yield* transition(fixture, request);
           expect(report.previousState, `${state}:${request.route}`).toBe(state);
           expect(report.workflowState, `${state}:${request.route}`).toBe(target);
@@ -654,20 +699,11 @@ describe('workflow transitions with live storage', () => {
           WorkflowTransitionRequest,
           string,
           ImplementationObservation?,
+          boolean?,
         ]
       > = [
-        [
-          'unproven implementation plan',
-          'planning',
-          { route: 'plan-accepted', planRequiresImplementation: false },
-          'implementation',
-        ],
-        [
-          'unproven no-change plan',
-          'planning',
-          { route: 'plan-no-change', noChangeCandidateAccepted: false },
-          'no-change candidate',
-        ],
+        ['unproven implementation plan', 'planning', { route: 'plan-accepted' }, 'implementation'],
+        ['unproven no-change plan', 'planning', { route: 'plan-no-change' }, 'no-change candidate'],
         [
           'dirty branch',
           'coding',
@@ -695,13 +731,13 @@ describe('workflow transitions with live storage', () => {
         [
           'failed checks before testing',
           'verifying',
-          { route: 'checks-passed-testing', checksPassed: false, runtimeValidationRequired: true },
+          { route: 'checks-passed-testing', checksPassed: false },
           'checks',
         ],
         [
           'runtime validation not required',
           'verifying',
-          { route: 'checks-passed-testing', checksPassed: true, runtimeValidationRequired: false },
+          { route: 'checks-passed-testing', checksPassed: true },
           'runtime validation',
         ],
         [
@@ -710,7 +746,6 @@ describe('workflow transitions with live storage', () => {
           {
             route: 'checks-passed-reviewing',
             checksPassed: false,
-            testerRequired: true,
             correctionBudgetExhausted: false,
             reviewableCommit: 'abc123',
           },
@@ -722,11 +757,12 @@ describe('workflow transitions with live storage', () => {
           {
             route: 'checks-passed-reviewing',
             checksPassed: true,
-            testerRequired: true,
             correctionBudgetExhausted: true,
             reviewableCommit: null,
           },
           'reviewable commit',
+          undefined,
+          true,
         ],
         [
           'exhausted correction budget',
@@ -954,10 +990,21 @@ describe('workflow transitions with live storage', () => {
         ],
       ];
 
-      for (const [label, state, request, expected, observation] of refusedRoutes) {
+      for (const [
+        label,
+        state,
+        request,
+        expected,
+        observation,
+        runtimeValidationRequired,
+      ] of refusedRoutes) {
         const fixture = setupFixture();
         try {
-          yield* seedRun(fixture, state);
+          yield* seedRun(
+            fixture,
+            state,
+            runtimeValidationRequired ?? defaultRuntimeValidationRequired(state),
+          );
           const before = stateTextOf(fixture);
           const beforeHistory = historyTextOf(fixture);
           const error = yield* transition(
@@ -1197,6 +1244,7 @@ describe('workflow transitions with live storage', () => {
         });
         expect(attempt.attempt.sequence).toBe(1);
 
+        yield* appendAcceptedPlan(fixture, 'plan_ready', false);
         const report = yield* transition(fixture, PLAN_ACCEPTED);
         expect(report.previousState).toBe('planning');
         expect(progressDocument(fixture)).toEqual({

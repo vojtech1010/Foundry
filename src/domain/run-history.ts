@@ -50,6 +50,9 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'role-session-submission-started',
   'role-session-observed',
   'role-session-stopped',
+  'plan-accepted',
+  'role-permission-violation',
+  'implementation-accepted',
 ] as const;
 
 export type RunHistoryEventType = (typeof RUN_HISTORY_EVENT_TYPES)[number];
@@ -188,6 +191,65 @@ export const RoleSessionStoppedPayloadSchema = Schema.Struct({
 
 export type RoleSessionStoppedPayload = (typeof RoleSessionStoppedPayloadSchema)['Type'];
 
+export const PlanAcceptedCriterionSchema = Schema.Struct({
+  id: Schema.NonEmptyString,
+  text: Schema.NonEmptyString,
+});
+
+export type PlanAcceptedCriterion = (typeof PlanAcceptedCriterionSchema)['Type'];
+
+export const PlanAcceptedObjectiveSchema = Schema.Struct({
+  id: Schema.NonEmptyString,
+  title: Schema.NonEmptyString,
+  affectedPaths: Schema.Array(Schema.NonEmptyString),
+  criterionIds: Schema.Array(Schema.NonEmptyString),
+});
+
+export type PlanAcceptedObjective = (typeof PlanAcceptedObjectiveSchema)['Type'];
+
+export const PlanAcceptedExecutionSchema = Schema.Struct({
+  mode: Schema.Literals(['sequential', 'parallel']),
+  objectives: Schema.Array(PlanAcceptedObjectiveSchema),
+});
+
+export type PlanAcceptedExecution = (typeof PlanAcceptedExecutionSchema)['Type'];
+
+export const PlanAcceptedPayloadSchema = Schema.Struct({
+  outcome: Schema.Literals(['plan_ready', 'no_change_candidate']),
+  criteria: Schema.Array(PlanAcceptedCriterionSchema),
+  runtimeValidationRequired: Schema.Boolean,
+  execution: PlanAcceptedExecutionSchema,
+});
+
+export type PlanAcceptedPayload = (typeof PlanAcceptedPayloadSchema)['Type'];
+
+export const ROLE_PERMISSION_VIOLATION_KINDS = [
+  'project-mutation',
+  'run-resource-mutation',
+  'missing-enforcement',
+] as const;
+
+export type RolePermissionViolationKind = (typeof ROLE_PERMISSION_VIOLATION_KINDS)[number];
+
+export const RolePermissionViolationPayloadSchema = Schema.Struct({
+  role: Schema.Literals(ROLE_HOST_ROLES),
+  attempt: PositiveCount,
+  kind: Schema.Literals(ROLE_PERMISSION_VIOLATION_KINDS),
+  detail: Schema.NonEmptyString,
+});
+
+export type RolePermissionViolationPayload = (typeof RolePermissionViolationPayloadSchema)['Type'];
+
+export const ImplementationAcceptedPayloadSchema = Schema.Struct({
+  taskBranch: Schema.NonEmptyString,
+  baseCommit: Schema.NonEmptyString,
+  commit: Schema.NullOr(Schema.NonEmptyString),
+  changedFiles: Schema.Array(Schema.NonEmptyString),
+  noChangeCandidate: Schema.Boolean,
+});
+
+export type ImplementationAcceptedPayload = (typeof ImplementationAcceptedPayloadSchema)['Type'];
+
 const RunEventEnvelopeFields = {
   schemaVersion: Schema.Literal(RUN_HISTORY_SCHEMA_VERSION),
   runId: Identifier,
@@ -270,6 +332,24 @@ export const RoleSessionStoppedEventSchema = Schema.Struct({
   payload: RoleSessionStoppedPayloadSchema,
 });
 
+export const PlanAcceptedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('plan-accepted'),
+  payload: PlanAcceptedPayloadSchema,
+});
+
+export const RolePermissionViolationEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('role-permission-violation'),
+  payload: RolePermissionViolationPayloadSchema,
+});
+
+export const ImplementationAcceptedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('implementation-accepted'),
+  payload: ImplementationAcceptedPayloadSchema,
+});
+
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
@@ -283,6 +363,9 @@ export const RunEventSchema = Schema.Union([
   RoleSessionSubmissionStartedEventSchema,
   RoleSessionObservedEventSchema,
   RoleSessionStoppedEventSchema,
+  PlanAcceptedEventSchema,
+  RolePermissionViolationEventSchema,
+  ImplementationAcceptedEventSchema,
 ]);
 
 export type RunEvent = (typeof RunEventSchema)['Type'];
@@ -314,7 +397,16 @@ export type RunEventDraft =
       readonly payload: RoleSessionSubmissionStartedPayload;
     }
   | { readonly type: 'role-session-observed'; readonly payload: RoleSessionObservedPayload }
-  | { readonly type: 'role-session-stopped'; readonly payload: RoleSessionStoppedPayload };
+  | { readonly type: 'role-session-stopped'; readonly payload: RoleSessionStoppedPayload }
+  | { readonly type: 'plan-accepted'; readonly payload: PlanAcceptedPayload }
+  | {
+      readonly type: 'role-permission-violation';
+      readonly payload: RolePermissionViolationPayload;
+    }
+  | {
+      readonly type: 'implementation-accepted';
+      readonly payload: ImplementationAcceptedPayload;
+    };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
 
@@ -335,6 +427,9 @@ export interface RunHistoryDerivedState {
   readonly guidanceFrozen: GuidanceFrozenPayload | null;
   readonly worktreeReady: WorktreeReadyPayload | null;
   readonly roleSessions: ReadonlyArray<RoleHostSessionState>;
+  readonly acceptedPlan: PlanAcceptedPayload | null;
+  readonly implementation: ImplementationAcceptedPayload | null;
+  readonly permissionViolations: ReadonlyArray<RolePermissionViolationPayload>;
 }
 
 export type RunHistoryVerification =
@@ -575,6 +670,66 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'plan-accepted':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          criteria: event.payload.criteria.map((criterion) => ({
+            id: criterion.id,
+            text: criterion.text,
+          })),
+          execution: {
+            mode: event.payload.execution.mode,
+            objectives: event.payload.execution.objectives.map((objective) => ({
+              affectedPaths: objective.affectedPaths,
+              criterionIds: objective.criterionIds,
+              id: objective.id,
+              title: objective.title,
+            })),
+          },
+          outcome: event.payload.outcome,
+          runtimeValidationRequired: event.payload.runtimeValidationRequired,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'role-permission-violation':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          attempt: event.payload.attempt,
+          detail: event.payload.detail,
+          kind: event.payload.kind,
+          role: event.payload.role,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'implementation-accepted':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          baseCommit: event.payload.baseCommit,
+          changedFiles: event.payload.changedFiles,
+          commit: event.payload.commit,
+          noChangeCandidate: event.payload.noChangeCandidate,
+          taskBranch: event.payload.taskBranch,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
   }
 }
 
@@ -628,6 +783,12 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'role-session-observed', payload: event.payload };
     case 'role-session-stopped':
       return { ...envelope, type: 'role-session-stopped', payload: event.payload };
+    case 'plan-accepted':
+      return { ...envelope, type: 'plan-accepted', payload: event.payload };
+    case 'role-permission-violation':
+      return { ...envelope, type: 'role-permission-violation', payload: event.payload };
+    case 'implementation-accepted':
+      return { ...envelope, type: 'implementation-accepted', payload: event.payload };
   }
 }
 
@@ -691,6 +852,9 @@ export function verifyRunHistoryEvents(
   let worktreeReady: WorktreeReadyPayload | null = null;
   const attempts: Array<WorkflowAttempt> = [];
   const roleSessions = new Map<string, RoleHostSessionState>();
+  const permissionViolations: Array<RolePermissionViolationPayload> = [];
+  let acceptedPlan: PlanAcceptedPayload | null = null;
+  let implementation: ImplementationAcceptedPayload | null = null;
   let previousHash: string | null = null;
 
   for (const [index, event] of events.entries()) {
@@ -1034,6 +1198,81 @@ export function verifyRunHistoryEvents(
         });
         break;
       }
+      case 'plan-accepted': {
+        if (state !== 'planning') {
+          return {
+            ok: false,
+            problem: `${label} records an accepted plan outside the planning stage`,
+          };
+        }
+        if (acceptedPlan !== null) {
+          return { ok: false, problem: `${label} records a second accepted plan` };
+        }
+        if (event.payload.criteria.length < 1) {
+          return { ok: false, problem: `${label} records an accepted plan without criteria` };
+        }
+        const objectiveCount = event.payload.execution.objectives.length;
+        if (objectiveCount < 1) {
+          return { ok: false, problem: `${label} records an accepted plan without objectives` };
+        }
+        if (event.payload.execution.mode === 'sequential' && objectiveCount !== 1) {
+          return {
+            ok: false,
+            problem: `${label} records a sequential plan with ${objectiveCount} objectives`,
+          };
+        }
+        acceptedPlan = event.payload;
+        break;
+      }
+      case 'role-permission-violation': {
+        permissionViolations.push(event.payload);
+        break;
+      }
+      case 'implementation-accepted': {
+        if (worktreeReady === null) {
+          return {
+            ok: false,
+            problem: `${label} records an accepted implementation before durable worktree readiness`,
+          };
+        }
+        if (
+          event.payload.taskBranch !== worktreeReady.taskBranch ||
+          event.payload.baseCommit !== worktreeReady.baseCommit
+        ) {
+          return {
+            ok: false,
+            problem: `${label} records an implementation that differs from the frozen worktree identity`,
+          };
+        }
+        if (event.payload.noChangeCandidate) {
+          if (event.payload.commit !== null) {
+            return {
+              ok: false,
+              problem: `${label} records a no-change candidate with an implementation commit`,
+            };
+          }
+        } else if (
+          event.payload.commit === null ||
+          event.payload.commit === event.payload.baseCommit
+        ) {
+          return {
+            ok: false,
+            problem: `${label} records an implementation without a new Git-derived commit`,
+          };
+        }
+        if (
+          implementation !== null &&
+          implementation.commit !== null &&
+          implementation.commit === event.payload.commit
+        ) {
+          return {
+            ok: false,
+            problem: `${label} re-accepts the same implementation commit`,
+          };
+        }
+        implementation = event.payload;
+        break;
+      }
     }
     previousHash = event.eventHash;
   }
@@ -1050,6 +1289,9 @@ export function verifyRunHistoryEvents(
       guidanceFrozen,
       worktreeReady,
       roleSessions: [...roleSessions.values()],
+      acceptedPlan,
+      implementation,
+      permissionViolations,
     },
   };
 }
