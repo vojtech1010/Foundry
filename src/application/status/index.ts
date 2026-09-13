@@ -197,6 +197,12 @@ function eventDetail(event: RunEvent): string {
       );
     case 'evidence-bound':
       return boundedDetail(`tester observation bound to ${event.payload.commit}`);
+    case 'evidence-manifest':
+      return boundedDetail(
+        `tester capture manifest recorded with ${event.payload.entries.length} entr${
+          event.payload.entries.length === 1 ? 'y' : 'ies'
+        }`,
+      );
   }
 }
 

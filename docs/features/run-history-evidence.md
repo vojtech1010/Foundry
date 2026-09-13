@@ -116,6 +116,14 @@ The product runs retain pre-existing copy/UX observations in Tester and Reviewer
 notes while their findings arrays remain empty. Informational limitations are
 not automatically acceptance failures, but required criteria still need proof.
 
+**Implemented:** A settled Tester turn records an `evidence-manifest` of the
+captures it offers for the current result head, with content hashes, labels, and
+criterion links. Reviewer packets include the manifest and an instruction to
+discount mislabeled or duplicated captures. The handoff distinguishes hashed
+from name-only captures and cannot treat duplicated content as independent
+support, so an informational copy/UX note never hides an unmet required
+criterion.
+
 Applied to [runtime setup](project-setup.md#project-commands-and-runtime),
 [findings](quality-and-decisions.md#findings-and-automatic-correction), and
 [evidence integrity](inspection-and-reporting.md#evidence-integrity-and-completeness).

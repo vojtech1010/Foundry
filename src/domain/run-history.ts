@@ -87,6 +87,7 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'objective-worker',
   'evidence-invalidated',
   'evidence-bound',
+  'evidence-manifest',
 ] as const;
 
 export type RunHistoryEventType = (typeof RUN_HISTORY_EVENT_TYPES)[number];
@@ -439,6 +440,38 @@ export const EvidenceBoundPayloadSchema = Schema.Struct({
 
 export type EvidenceBoundPayload = (typeof EvidenceBoundPayloadSchema)['Type'];
 
+export const EVIDENCE_MANIFEST_KINDS = ['capture', 'log', 'note'] as const;
+
+export type EvidenceManifestKind = (typeof EVIDENCE_MANIFEST_KINDS)[number];
+
+/**
+ * One bounded capture a settled Tester turn offers as observation evidence for
+ * the current result head. A non-null `sha256` proves content; a null hash is a
+ * name-only claim. `criterionIds` links the capture to the accepted-plan
+ * criteria it is offered to support, and `note` marks pre-existing
+ * informational copy/UX observations that can never prove a criterion alone.
+ */
+export const EvidenceManifestEntrySchema = Schema.Struct({
+  sha256: Schema.NullOr(Sha256Hex),
+  byteLength: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  label: Schema.NonEmptyString,
+  kind: Schema.Literals(EVIDENCE_MANIFEST_KINDS),
+  criterionIds: Schema.Array(Schema.NonEmptyString),
+});
+
+export type EvidenceManifestEntry = (typeof EvidenceManifestEntrySchema)['Type'];
+
+/**
+ * The capture inventory for one result head. Two entries with the same sha256
+ * are one observation regardless of their labels; the manifest records what was
+ * captured, never whether a criterion passed.
+ */
+export const EvidenceManifestPayloadSchema = Schema.Struct({
+  entries: Schema.Array(EvidenceManifestEntrySchema),
+});
+
+export type EvidenceManifestPayload = (typeof EvidenceManifestPayloadSchema)['Type'];
+
 const RunEventEnvelopeFields = {
   schemaVersion: Schema.Literal(RUN_HISTORY_SCHEMA_VERSION),
   runId: Identifier,
@@ -617,6 +650,12 @@ export const EvidenceBoundEventSchema = Schema.Struct({
   payload: EvidenceBoundPayloadSchema,
 });
 
+export const EvidenceManifestEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('evidence-manifest'),
+  payload: EvidenceManifestPayloadSchema,
+});
+
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
@@ -646,6 +685,7 @@ export const RunEventSchema = Schema.Union([
   ObjectiveWorkerEventSchema,
   EvidenceInvalidatedEventSchema,
   EvidenceBoundEventSchema,
+  EvidenceManifestEventSchema,
 ]);
 
 export type RunEvent = (typeof RunEventSchema)['Type'];
@@ -711,7 +751,8 @@ export type RunEventDraft =
       readonly type: 'evidence-invalidated';
       readonly payload: EvidenceInvalidatedPayload;
     }
-  | { readonly type: 'evidence-bound'; readonly payload: EvidenceBoundPayload };
+  | { readonly type: 'evidence-bound'; readonly payload: EvidenceBoundPayload }
+  | { readonly type: 'evidence-manifest'; readonly payload: EvidenceManifestPayload };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
 
@@ -744,6 +785,7 @@ export interface RunHistoryDerivedState {
   readonly objectiveWorkers?: ReadonlyArray<ObjectiveWorkerPayload>;
   readonly evidenceInvalidations: ReadonlyArray<EvidenceInvalidatedPayload>;
   readonly evidenceBindings: ReadonlyArray<EvidenceBoundPayload>;
+  readonly evidenceManifests: ReadonlyArray<EvidenceManifestPayload>;
 }
 
 export type RunHistoryVerification =
@@ -1343,6 +1385,25 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'evidence-manifest':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          entries: event.payload.entries.map((entry) => ({
+            byteLength: entry.byteLength,
+            criterionIds: entry.criterionIds,
+            kind: entry.kind,
+            label: entry.label,
+            sha256: entry.sha256,
+          })),
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
   }
 }
 
@@ -1428,6 +1489,8 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'evidence-invalidated', payload: event.payload };
     case 'evidence-bound':
       return { ...envelope, type: 'evidence-bound', payload: event.payload };
+    case 'evidence-manifest':
+      return { ...envelope, type: 'evidence-manifest', payload: event.payload };
   }
 }
 
@@ -1536,6 +1599,7 @@ export function verifyRunHistoryEvents(
   const objectiveWorkers: Array<ObjectiveWorkerPayload> = [];
   const evidenceInvalidations: Array<EvidenceInvalidatedPayload> = [];
   const evidenceBindings: Array<EvidenceBoundPayload> = [];
+  const evidenceManifests: Array<EvidenceManifestPayload> = [];
   const retiredRevisions = new Set<number>();
   const findings: Array<FindingRecord> = [];
   let acceptedPlan: PlanAcceptedPayload | null = null;
@@ -2527,6 +2591,29 @@ export function verifyRunHistoryEvents(
         evidenceBindings.push(event.payload);
         break;
       }
+      case 'evidence-manifest': {
+        if (state !== 'testing') {
+          return {
+            ok: false,
+            problem: `${label} records a Tester evidence manifest outside the testing stage`,
+          };
+        }
+        if (acceptedPlan !== null) {
+          const knownCriterionIds = new Set(acceptedPlan.criteria.map((criterion) => criterion.id));
+          for (const entry of event.payload.entries) {
+            for (const criterionId of entry.criterionIds) {
+              if (!knownCriterionIds.has(criterionId)) {
+                return {
+                  ok: false,
+                  problem: `${label} links a Tester evidence manifest entry to the unknown criterion "${criterionId}"`,
+                };
+              }
+            }
+          }
+        }
+        evidenceManifests.push(event.payload);
+        break;
+      }
     }
     previousHash = event.eventHash;
   }
@@ -2570,6 +2657,7 @@ export function verifyRunHistoryEvents(
       objectiveWorkers,
       evidenceInvalidations,
       evidenceBindings,
+      evidenceManifests,
     },
   };
 }
