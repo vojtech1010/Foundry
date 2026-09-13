@@ -72,6 +72,8 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'tester-skipped',
   'validation-limitation',
   'runtime-lifecycle',
+  'evidence-invalidated',
+  'evidence-bound',
 ] as const;
 
 export type RunHistoryEventType = (typeof RUN_HISTORY_EVENT_TYPES)[number];
@@ -370,6 +372,38 @@ export const RuntimeLifecyclePayloadSchema = RuntimeLifecycleRecordSchema;
 
 export type RuntimeLifecyclePayload = RuntimeLifecycleRecord;
 
+/**
+ * Retirement of evidence that was valid for an earlier accepted result head.
+ * A new accepted head makes prior commit-bound checks and Tester observations
+ * unable to approve it; the event names the retired kind, its commit, and the
+ * exact history revision being retired so the retirement stays auditable.
+ */
+export const EVIDENCE_RETIRED_KINDS = ['verification', 'tester-observation'] as const;
+
+export type EvidenceRetiredKind = (typeof EVIDENCE_RETIRED_KINDS)[number];
+
+export const EvidenceInvalidatedPayloadSchema = Schema.Struct({
+  retiredKinds: Schema.Literals(EVIDENCE_RETIRED_KINDS),
+  reason: Schema.NonEmptyString,
+  retiredCommit: Schema.NonEmptyString,
+  retiredRevision: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+});
+
+export type EvidenceInvalidatedPayload = (typeof EvidenceInvalidatedPayloadSchema)['Type'];
+
+/**
+ * Commit binding for a settled Tester observation. Reviewer runtime evidence is
+ * counted only when an observation is bound to the current result head, so an
+ * observation of a previous commit can never approve a corrected result.
+ */
+export const EvidenceBoundPayloadSchema = Schema.Struct({
+  kind: Schema.Literal('tester-observation'),
+  sessionId: Schema.NonEmptyString,
+  commit: Schema.NonEmptyString,
+});
+
+export type EvidenceBoundPayload = (typeof EvidenceBoundPayloadSchema)['Type'];
+
 const RunEventEnvelopeFields = {
   schemaVersion: Schema.Literal(RUN_HISTORY_SCHEMA_VERSION),
   runId: Identifier,
@@ -518,6 +552,18 @@ export const RuntimeLifecycleEventSchema = Schema.Struct({
   payload: RuntimeLifecyclePayloadSchema,
 });
 
+export const EvidenceInvalidatedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('evidence-invalidated'),
+  payload: EvidenceInvalidatedPayloadSchema,
+});
+
+export const EvidenceBoundEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('evidence-bound'),
+  payload: EvidenceBoundPayloadSchema,
+});
+
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
@@ -542,6 +588,8 @@ export const RunEventSchema = Schema.Union([
   TesterSkippedEventSchema,
   ValidationLimitationEventSchema,
   RuntimeLifecycleEventSchema,
+  EvidenceInvalidatedEventSchema,
+  EvidenceBoundEventSchema,
 ]);
 
 export type RunEvent = (typeof RunEventSchema)['Type'];
@@ -599,7 +647,12 @@ export type RunEventDraft =
     }
   | { readonly type: 'tester-skipped'; readonly payload: TesterSkippedPayload }
   | { readonly type: 'validation-limitation'; readonly payload: ValidationLimitationPayload }
-  | { readonly type: 'runtime-lifecycle'; readonly payload: RuntimeLifecyclePayload };
+  | { readonly type: 'runtime-lifecycle'; readonly payload: RuntimeLifecyclePayload }
+  | {
+      readonly type: 'evidence-invalidated';
+      readonly payload: EvidenceInvalidatedPayload;
+    }
+  | { readonly type: 'evidence-bound'; readonly payload: EvidenceBoundPayload };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
 
@@ -629,6 +682,8 @@ export interface RunHistoryDerivedState {
   readonly testerSkips: ReadonlyArray<TesterSkippedPayload>;
   readonly validationLimitations: ReadonlyArray<ValidationLimitationPayload>;
   readonly runtimeLifecycles: ReadonlyArray<RuntimeLifecyclePayload>;
+  readonly evidenceInvalidations: ReadonlyArray<EvidenceInvalidatedPayload>;
+  readonly evidenceBindings: ReadonlyArray<EvidenceBoundPayload>;
 }
 
 export type RunHistoryVerification =
@@ -1141,6 +1196,37 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'evidence-invalidated':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          reason: event.payload.reason,
+          retiredCommit: event.payload.retiredCommit,
+          retiredKinds: event.payload.retiredKinds,
+          retiredRevision: event.payload.retiredRevision,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'evidence-bound':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          commit: event.payload.commit,
+          kind: event.payload.kind,
+          sessionId: event.payload.sessionId,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
   }
 }
 
@@ -1216,6 +1302,10 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'validation-limitation', payload: event.payload };
     case 'runtime-lifecycle':
       return { ...envelope, type: 'runtime-lifecycle', payload: event.payload };
+    case 'evidence-invalidated':
+      return { ...envelope, type: 'evidence-invalidated', payload: event.payload };
+    case 'evidence-bound':
+      return { ...envelope, type: 'evidence-bound', payload: event.payload };
   }
 }
 
@@ -1321,6 +1411,9 @@ export function verifyRunHistoryEvents(
   const testerSkips: Array<TesterSkippedPayload> = [];
   const validationLimitations: Array<ValidationLimitationPayload> = [];
   const runtimeLifecycles: Array<RuntimeLifecyclePayload> = [];
+  const evidenceInvalidations: Array<EvidenceInvalidatedPayload> = [];
+  const evidenceBindings: Array<EvidenceBoundPayload> = [];
+  const retiredRevisions = new Set<number>();
   const findings: Array<FindingRecord> = [];
   let acceptedPlan: PlanAcceptedPayload | null = null;
   let implementation: ImplementationAcceptedPayload | null = null;
@@ -2118,6 +2211,72 @@ export function verifyRunHistoryEvents(
         runtimeLifecycles.push(event.payload);
         break;
       }
+      case 'evidence-invalidated': {
+        const { retiredKinds, retiredCommit, retiredRevision } = event.payload;
+        if (retiredRevision > events.length) {
+          return {
+            ok: false,
+            problem: `${label} retires the future revision ${retiredRevision}`,
+          };
+        }
+        const retired = events[retiredRevision - 1];
+        if (retired === undefined) {
+          return {
+            ok: false,
+            problem: `${label} retires a revision that is not in the history`,
+          };
+        }
+        if (retiredKinds === 'verification') {
+          if (
+            retired.type !== 'verification-completed' ||
+            retired.payload.commit !== retiredCommit
+          ) {
+            return {
+              ok: false,
+              problem: `${label} retires a revision that is not the named verification`,
+            };
+          }
+        } else if (retired.type !== 'evidence-bound' || retired.payload.commit !== retiredCommit) {
+          return {
+            ok: false,
+            problem: `${label} retires a revision that is not the named Tester observation`,
+          };
+        }
+        const resultCommit = currentResultCommit();
+        if (resultCommit !== null && retiredCommit === resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} retires evidence bound to the current result head`,
+          };
+        }
+        if (retiredRevisions.has(retiredRevision)) {
+          return {
+            ok: false,
+            problem: `${label} retires a revision that was already retired`,
+          };
+        }
+        retiredRevisions.add(retiredRevision);
+        evidenceInvalidations.push(event.payload);
+        break;
+      }
+      case 'evidence-bound': {
+        const session = roleSessions.get(event.payload.sessionId);
+        if (session === undefined || session.state.role !== 'tester') {
+          return {
+            ok: false,
+            problem: `${label} binds a Tester observation to an unknown Tester session "${event.payload.sessionId}"`,
+          };
+        }
+        const resultCommit = currentResultCommit();
+        if (resultCommit === null || event.payload.commit !== resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} binds a Tester observation to a commit other than the current result head`,
+          };
+        }
+        evidenceBindings.push(event.payload);
+        break;
+      }
     }
     previousHash = event.eventHash;
   }
@@ -2158,6 +2317,8 @@ export function verifyRunHistoryEvents(
       testerSkips,
       validationLimitations,
       runtimeLifecycles,
+      evidenceInvalidations,
+      evidenceBindings,
     },
   };
 }

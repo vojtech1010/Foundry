@@ -1,6 +1,7 @@
 import { Effect } from 'effect';
 
 import { decodeTesterTurnControl } from '../../domain/tester-outcomes.js';
+import { bindTesterObservation } from '../evidence-invalidation/index.js';
 import { appendRunEvent } from '../run-history/index.js';
 import { transitionWorkflow, recordWorkflowAttempt } from '../workflow-transitions/index.js';
 
@@ -61,6 +62,11 @@ export const handleTesterTurn = Effect.fn('handleTesterTurn')(function* (
 
   switch (decoded.control.outcome) {
     case 'observed': {
+      yield* bindTesterObservation({
+        runDirectory: options.runDirectory,
+        runId: options.runId,
+        commit: options.commit,
+      });
       yield* transitionWorkflow({
         runDirectory: options.runDirectory,
         runId: options.runId,

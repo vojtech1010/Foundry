@@ -179,6 +179,12 @@ function eventDetail(event: RunEvent): string {
       return boundedDetail(`validation limitation retained for ${event.payload.commit}`);
     case 'runtime-lifecycle':
       return boundedDetail(`runtime ${event.payload.outcome}`);
+    case 'evidence-invalidated':
+      return boundedDetail(
+        `${event.payload.retiredKinds} evidence retired for ${event.payload.retiredCommit}`,
+      );
+    case 'evidence-bound':
+      return boundedDetail(`tester observation bound to ${event.payload.commit}`);
   }
 }
 

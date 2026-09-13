@@ -11,6 +11,7 @@ import {
   isActiveWorkflowState,
   isTerminalWorkflowState,
 } from '../../domain/workflow.js';
+import { retireEvidenceForHead } from '../evidence-invalidation/index.js';
 import { RunGit } from '../git-provisioning/index.js';
 import { RunStateUnavailable, reconcileRunReports } from '../run-identity/index.js';
 import {
@@ -281,20 +282,25 @@ const recordImplementationAcceptance = Effect.fn('recordImplementationAcceptance
     createIfMissing: false,
   });
   const existing = history.derived.implementation;
-  if (
+  const unchanged =
     existing !== null &&
     existing.taskBranch === evidence.taskBranch &&
     existing.baseCommit === evidence.baseCommit &&
     existing.commit === evidence.commit &&
-    existing.noChangeCandidate === evidence.noChangeCandidate
-  ) {
-    return;
+    existing.noChangeCandidate === evidence.noChangeCandidate;
+  if (!unchanged) {
+    yield* appendRunEvent({
+      runDirectory,
+      runId,
+      createIfMissing: false,
+      build: () => Effect.succeed({ type: 'implementation-accepted', payload: evidence } as const),
+    });
   }
-  yield* appendRunEvent({
+  yield* retireEvidenceForHead({
     runDirectory,
     runId,
-    createIfMissing: false,
-    build: () => Effect.succeed({ type: 'implementation-accepted', payload: evidence } as const),
+    newHeadCommit: evidence.commit ?? evidence.baseCommit,
+    reason: 'accepted-head-advanced',
   });
 });
 

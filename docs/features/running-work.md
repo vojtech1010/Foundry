@@ -138,9 +138,13 @@ and invalidates downstream evidence from earlier commits. Foundry reruns the
 required checks, Tester stage when applicable, and Reviewer.
 
 Any accepted result-head change invalidates earlier commit-bound checks and
-downstream observations, not just a change labeled as a correction. Record the
-invalidation reason and the new verification attempt; never mix evidence from
-two result commits into one approval.
+downstream observations, not just a change labeled as a correction. Foundry
+records the retirement (`evidence-invalidated`) with the reason and the exact
+revision being retired, then the new verification attempt runs against the new
+commit. Retired attempts remain visible in history and inspection; they are not
+deleted. A settled Tester observation is bound to its commit (`evidence-bound`),
+and Reviewer counts a required observation only for the current result head, so
+evidence from two result commits is never mixed into one approval.
 
 Correction and role retry budgets are distinct. Exhaustion does not silently
 approve the result. Reviewer may escalate the remaining decision to a draft PR
