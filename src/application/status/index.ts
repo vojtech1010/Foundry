@@ -185,6 +185,12 @@ function eventDetail(event: RunEvent): string {
       );
     case 'publication-checkpoint':
       return boundedDetail(`publication ${event.payload.stage}: ${event.payload.detail}`);
+    case 'objective-worker':
+      return boundedDetail(
+        `objective ${event.payload.objectiveId} worker ${event.payload.phase}${
+          event.payload.commit === null ? '' : ` at ${event.payload.commit}`
+        }`,
+      );
   }
 }
 

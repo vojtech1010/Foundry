@@ -23,6 +23,11 @@ execution path automatically. Parallelism is opt-in: missing, overlapping, or
 incomplete objective metadata falls back to one sequential objective without a
 human question.
 
+**Implemented:** Foundry compiles the accepted plan into either one sequential
+objective or a proven-independent parallel set using only the durable
+`plan-accepted` execution data. No operator flag or configuration mode selects
+parallelism.
+
 ## Worker contract
 
 1. Every objective starts at the run's confirmed source commit.
@@ -46,6 +51,15 @@ slots leave capacity unused; concurrency never changes the plan's dependencies.
 Each objective and Lead Coder receives the configured Coder role-retry budget;
 the run-wide correction-round budget begins only after an aggregate commit
 enters verification.
+
+**Implemented:** Each objective runs as its own Coder worker with a derived
+branch, worktree, and session from the same frozen source. Active workers never
+exceed `maxParallelCoders`; each objective consumes `retryBudgets.coder`
+independently, so exhausting one objective's budget cannot consume another's;
+and a successful objective must produce a verifiable Git-derived commit bound to
+its durable worker record. In this wave the coding stage ends blocked with a
+recoverable "awaiting integration" reason once every worker settles; Lead Coder
+integration and the aggregate result are added by task 041.
 
 ## Worker lifecycle and integration provenance
 
