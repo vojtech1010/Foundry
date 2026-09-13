@@ -8,6 +8,7 @@ import {
 
 import type { RolePacketFacts } from '../src/application/role-packets/index.js';
 import type { ProjectConfiguration } from '../src/domain/project-configuration.js';
+import type { FindingRecord } from '../src/domain/findings.js';
 import type { RunHistoryDerivedState, PlanAcceptedPayload } from '../src/domain/run-history.js';
 import type { RoleHostSessionState } from '../src/domain/role-host.js';
 
@@ -53,7 +54,10 @@ function session(
   };
 }
 
-function derived(roleSessions: ReadonlyArray<RoleHostSessionState>): RunHistoryDerivedState {
+function derived(
+  roleSessions: ReadonlyArray<RoleHostSessionState>,
+  findings: ReadonlyArray<FindingRecord> = [],
+): RunHistoryDerivedState {
   const acceptedPlan: PlanAcceptedPayload = {
     outcome: 'plan_ready',
     criteria: [{ id: 'AC-001', text: 'works' }],
@@ -75,6 +79,7 @@ function derived(roleSessions: ReadonlyArray<RoleHostSessionState>): RunHistoryD
     worktreeReady: null,
     roleSessions,
     acceptedPlan,
+    findings,
     implementation: {
       taskBranch: 'foundry/TASK',
       baseCommit: 'a'.repeat(40),
@@ -189,5 +194,62 @@ describe('role packets', () => {
   it('renders Foundry facts deterministically', () => {
     expect(renderRolePacketFacts(FACTS)).toContain('Result commit: ' + FACTS.resultCommit);
     expect(renderRolePacketFacts(FACTS)).toContain('changed files: src/a.ts');
+  });
+
+  const currentFinding: FindingRecord = {
+    id: 'FND-001',
+    category: 'review',
+    source: 'reviewer-changes-requested',
+    owner: 'coder',
+    severity: 'high',
+    blocking: true,
+    commit: 'b'.repeat(40),
+    description: 'Reviewer requested changes to the empty state.',
+    detail: 'the full narrative',
+    evidence: ['review.md'],
+  };
+
+  const olderFinding: FindingRecord = {
+    ...currentFinding,
+    id: 'FND-001',
+    commit: 'c'.repeat(40),
+    description: 'An older finding for a retired head.',
+  };
+
+  it('surfaces current-head findings to Coder and Reviewer and retains older findings', () => {
+    for (const role of ['coder', 'reviewer'] as const) {
+      const packet = buildRolePacket({
+        role,
+        request: 'the request',
+        guidance: 'the guidance',
+        history: derived([], [olderFinding, currentFinding]),
+        configuration: configuration(100_000),
+      });
+      expect(packet.ok).toBe(true);
+      if (!packet.ok) {
+        return;
+      }
+      expect(packet.prompt).toContain(
+        'FND-001 [high, blocking] Reviewer requested changes to the empty state.',
+      );
+      expect(packet.prompt).toContain('1 earlier finding(s) retained as history');
+      expect(packet.prompt).not.toContain('An older finding for a retired head.');
+    }
+  });
+
+  it('does not surface findings to roles that do not consume them', () => {
+    const packet = buildRolePacket({
+      role: 'architect',
+      request: 'the request',
+      guidance: 'the guidance',
+      history: derived([], [currentFinding]),
+      configuration: configuration(100_000),
+    });
+    expect(packet.ok).toBe(true);
+    if (!packet.ok) {
+      return;
+    }
+    expect(packet.prompt).toContain('findings are surfaced to Coder and Reviewer only');
+    expect(packet.prompt).not.toContain('Reviewer requested changes to the empty state.');
   });
 });

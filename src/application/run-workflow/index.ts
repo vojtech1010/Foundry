@@ -1,11 +1,20 @@
 import { DateTime, Duration, Effect, Ref, Result, Schema } from 'effect';
 import { dirname, join } from 'node:path';
 
+import { decodeReviewerTurnControl } from '../../domain/reviewer-outcomes.js';
 import { REQUEST_NORMALIZED_FILENAME } from '../../domain/run-identity.js';
 import { decodeTesterTurnControl } from '../../domain/tester-outcomes.js';
 import { isActiveWorkflowState } from '../../domain/workflow.js';
-import { admitArchitectPlan } from '../architect-plan/index.js';
-import { CoderTurnRejected, handleCoderTurn } from '../coder-result/index.js';
+import {
+  admitArchitectPlan,
+  resumeArchitectPlan,
+  validateArchitectPlanControl,
+} from '../architect-plan/index.js';
+import {
+  CoderTurnRejected,
+  handleCoderTurn,
+  validateCoderTurnControl,
+} from '../coder-result/index.js';
 import { bootstrapRoleGuidance } from '../guidance/index.js';
 import { prepareAndHoldApplicationRuntime } from '../project-runtime/index.js';
 import { runProjectVerification } from '../project-verification/index.js';
@@ -15,7 +24,7 @@ import { handleReviewerTurn } from '../reviewer-outcomes/index.js';
 import { RoleHostLauncher } from '../role-conversations/index.js';
 import { RunIdentityStore, RunIdentityStorageError } from '../run-identity/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../run-history/index.js';
-import { handleTesterTurn } from '../tester-validation/index.js';
+import { handleTesterTurn, validateTesterTurnControl } from '../tester-validation/index.js';
 import { routeAfterProjectChecks } from '../validation-routing/index.js';
 import { recordWorkflowAttempt, transitionWorkflow } from '../workflow-transitions/index.js';
 
@@ -51,6 +60,24 @@ export interface RunWorkflowOutcome {
 
 function errorMessage(error: { readonly message: string }): string {
   return error.message;
+}
+
+function roleControlValidator(
+  role: WorkflowRole,
+): (control: Schema.Json) => { readonly ok: boolean; readonly problem: string } {
+  switch (role) {
+    case 'architect':
+      return validateArchitectPlanControl;
+    case 'coder':
+      return validateCoderTurnControl;
+    case 'tester':
+      return validateTesterTurnControl;
+    case 'reviewer':
+      return (control) => {
+        const decoded = decodeReviewerTurnControl(control);
+        return decoded.ok ? { ok: true, problem: '' } : { ok: false, problem: decoded.problem };
+      };
+  }
 }
 
 function stagesOf(history: VerifiedRunHistory): ReadonlyArray<WorkflowState> {
@@ -229,7 +256,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       timeoutMs: configuration.timeouts.commandMs,
       maxOutputBytes: configuration.artifacts.maxRoleHandoffBytes,
     });
-    return yield* startGovernedRoleTurn({
+    const governedTurn = {
       runDirectory,
       runId,
       role,
@@ -241,12 +268,23 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       deadline,
       pollMs: configuration.timeouts.pollMs,
       turnTimeoutMs: configuration.timeouts.roleMs,
-    }).pipe(Effect.provide(hostLayer));
+      controlRepair: {
+        maxRepairs: configuration.limits.maxControlRepairsPerAttempt,
+        validate: roleControlValidator(role),
+      },
+    };
+    return yield* startGovernedRoleTurn(governedTurn).pipe(Effect.provide(hostLayer));
   });
 
-  const recordControlRepair = Effect.fn('advanceRun.recordControlRepair')(function* (
+  /**
+   * A settled turn whose control envelope is still invalid has already spent
+   * its bounded same-session control repair inside the conversation layer.
+   * Foundry maps the remaining failure onto the ordinary role retry budget so a
+   * repair is never repeated in a fresh session; when no retry remains the run
+   * blocks instead of looping.
+   */
+  const recordControlRetry = Effect.fn('advanceRun.recordControlRetry')(function* (
     role: WorkflowRole,
-    state: WorkflowState,
     problem: string,
   ) {
     const history = yield* readVerifiedRunHistory({
@@ -254,10 +292,10 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       runId,
       createIfMissing: false,
     });
-    const repairs = repairsUsed(history.derived, role, state);
-    if (repairs >= configuration.limits.maxControlRepairsPerAttempt) {
+    const retries = retriesUsed(history.derived, role);
+    if (retries >= configuration.retryBudgets[role]) {
       return yield* new RunWorkflowError({
-        message: `The ${role} control envelope for run "${runId}" remained invalid and no control repair remains: ${problem}`,
+        message: `The ${role} control envelope for run "${runId}" remained invalid after same-session repair and no ${role} retry remains: ${problem}`,
         runId,
         kind: 'blocked',
       });
@@ -266,10 +304,10 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       runDirectory,
       runId,
       attempt: {
-        kind: 'repair',
+        kind: 'retry',
         role,
-        reason: `${role} control envelope was invalid: ${problem}`,
-        repairsRemaining: configuration.limits.maxControlRepairsPerAttempt - repairs,
+        reason: `${role} control envelope remained invalid after same-session repair: ${problem}`,
+        retriesRemaining: configuration.retryBudgets[role] - retries,
       },
     });
   });
@@ -277,9 +315,17 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
   const runArchitect = Effect.fn('advanceRun.runArchitect')(function* (
     history: VerifiedRunHistory,
   ) {
+    const resumeRouting = yield* resumeArchitectPlan({ runDirectory, runId });
+    if (resumeRouting.outcome === 'admitted') {
+      return;
+    }
     const prompt = yield* promptFor('architect', history);
     const attempt = countSessions(history.derived, 'architect') + 1;
     const settled = yield* performRoleTurn('architect', attempt, prompt, null);
+    if (!settled.controlValid) {
+      yield* recordControlRetry('architect', settled.controlProblem ?? 'invalid control envelope');
+      return;
+    }
     const admission = yield* admitArchitectPlan({
       runDirectory,
       runId,
@@ -308,10 +354,13 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
   });
 
   const runCoder = Effect.fn('advanceRun.runCoder')(function* (history: VerifiedRunHistory) {
-    const state = history.derived.state ?? 'coding';
     const prompt = yield* promptFor('coder', history);
     const attempt = countSessions(history.derived, 'coder') + 1;
     const settled = yield* performRoleTurn('coder', attempt, prompt, null);
+    if (!settled.controlValid) {
+      yield* recordControlRetry('coder', settled.controlProblem ?? 'invalid control envelope');
+      return;
+    }
     const handled = yield* handleCoderTurn({
       runDirectory,
       runId,
@@ -332,7 +381,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       return;
     }
     if (handled.failure instanceof CoderTurnRejected) {
-      yield* recordControlRepair('coder', state, handled.failure.problem);
+      yield* recordControlRetry('coder', handled.failure.problem);
       return;
     }
     return yield* handled.failure;
@@ -451,6 +500,10 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     const attempt = countSessions(history.derived, 'tester') + 1;
     const baseUrl = held.baseUrl;
     const settled = yield* performRoleTurn('tester', attempt, prompt, baseUrl);
+    if (!settled.controlValid) {
+      yield* recordControlRetry('tester', settled.controlProblem ?? 'invalid control envelope');
+      return;
+    }
     const outcome = testerObservationOutcome(settled.control);
     const retriesRemaining = Math.max(
       0,
@@ -468,7 +521,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       retryReason: 'Tester requested another independent observation of the same commit.',
     });
     if (disposition.kind === 'control-invalid') {
-      yield* recordControlRepair('tester', 'testing', disposition.problem);
+      yield* recordControlRetry('tester', disposition.problem);
     }
   });
 
@@ -514,16 +567,21 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     const prompt = yield* promptFor('reviewer', history);
     const attempt = countSessions(history.derived, 'reviewer') + 1;
     const settled = yield* performRoleTurn('reviewer', attempt, prompt, null);
+    if (!settled.controlValid) {
+      yield* recordControlRetry('reviewer', settled.controlProblem ?? 'invalid control envelope');
+      return;
+    }
     const disposition = yield* handleReviewerTurn({
       runDirectory,
       runId,
       control: settled.control,
       assessment,
+      narrative: settled.narrative,
       correctionReason: 'Reviewer requested a bounded correction.',
       blockedReason: 'Reviewer reported an operational or integrity problem.',
     });
     if (disposition.kind === 'control-invalid') {
-      yield* recordControlRepair('reviewer', 'reviewing', disposition.problem);
+      yield* recordControlRetry('reviewer', disposition.problem);
     }
   });
 

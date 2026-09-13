@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Schema } from 'effect';
 
+import { FindingRecordSchema } from './findings.js';
 import { GuidanceSnapshotFileSchema } from './guidance.js';
 import {
   ROLE_HOST_DISPOSITIONS,
@@ -26,9 +27,15 @@ import {
   isActiveWorkflowState,
 } from './workflow.js';
 
+import type { FindingRecord } from './findings.js';
 import type { ProjectVerificationReport, VerificationExecution } from './project-verification.js';
 import type { RuntimeLifecycleRecord } from './project-runtime.js';
-import type { RoleHostSessionState } from './role-host.js';
+import type {
+  RoleHostControl,
+  RoleHostObservation,
+  RoleHostSessionState,
+  RoleHostSubmission,
+} from './role-host.js';
 import type { WorkflowAttempt, WorkflowState } from './workflow.js';
 
 export const RUN_HISTORY_SCHEMA_VERSION = 1 as const;
@@ -54,7 +61,11 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'role-session-submission-started',
   'role-session-observed',
   'role-session-stopped',
+  'role-control-rejected',
+  'role-control-repair-requested',
+  'role-control-repair-started',
   'plan-accepted',
+  'finding-recorded',
   'role-permission-violation',
   'implementation-accepted',
   'verification-completed',
@@ -158,12 +169,34 @@ export const RoleSessionCreatedPayloadSchema = Schema.Struct({
 
 export type RoleSessionCreatedPayload = (typeof RoleSessionCreatedPayloadSchema)['Type'];
 
+export const ROLE_SESSION_SUBMISSION_KINDS = ['initial', 'repair'] as const;
+
+export type RoleSessionSubmissionKind = (typeof ROLE_SESSION_SUBMISSION_KINDS)[number];
+
+/**
+ * Durable context for a same-session control repair. The rejected narrative
+ * and control hashes prove the repair prompt could not have changed the
+ * original Markdown, and the validation error explains why a repair was
+ * required. The repair prompt hash travels in the submission's `promptHash`.
+ */
+export const RoleSessionRepairContextSchema = Schema.Struct({
+  rejectedSequence: Schema.Natural,
+  rejectedControl: Schema.NullOr(RoleHostControlSchema),
+  rejectedNarrativeHash: Sha256Hex,
+  rejectedControlHash: Schema.NullOr(Sha256Hex),
+  validationError: Schema.NonEmptyString,
+});
+
+export type RoleSessionRepairContext = (typeof RoleSessionRepairContextSchema)['Type'];
+
 export const RoleSessionSubmissionRequestedPayloadSchema = Schema.Struct({
   sessionId: Schema.NonEmptyString,
   generation: PositiveCount,
+  kind: Schema.optional(Schema.Literals(ROLE_SESSION_SUBMISSION_KINDS)),
   idempotencyKey: Schema.NonEmptyString,
   promptHash: Sha256Hex,
   baselineSequence: Schema.Natural,
+  repair: Schema.optional(Schema.NullOr(RoleSessionRepairContextSchema)),
 });
 
 export type RoleSessionSubmissionRequestedPayload =
@@ -199,6 +232,59 @@ export const RoleSessionStoppedPayloadSchema = Schema.Struct({
 
 export type RoleSessionStoppedPayload = (typeof RoleSessionStoppedPayloadSchema)['Type'];
 
+export const RoleControlRejectedPayloadSchema = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+  generation: PositiveCount,
+  sequence: Schema.Natural,
+  narrativeHash: Sha256Hex,
+  controlHash: Sha256Hex,
+  problem: Schema.NonEmptyString,
+});
+
+export type RoleControlRejectedPayload = (typeof RoleControlRejectedPayloadSchema)['Type'];
+
+export const RoleControlRepairRequestedPayloadSchema = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+  generation: PositiveCount,
+  idempotencyKey: Schema.NonEmptyString,
+  promptHash: Sha256Hex,
+  baselineSequence: Schema.Natural,
+  problem: Schema.NonEmptyString,
+});
+
+export type RoleControlRepairRequestedPayload =
+  (typeof RoleControlRepairRequestedPayloadSchema)['Type'];
+
+export const RoleControlRepairStartedPayloadSchema = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+  generation: PositiveCount,
+  idempotencyKey: Schema.NonEmptyString,
+  submission: Schema.Literals(ROLE_HOST_SUBMISSIONS),
+});
+
+export type RoleControlRepairStartedPayload =
+  (typeof RoleControlRepairStartedPayloadSchema)['Type'];
+
+/**
+ * Durable, resumable evidence of one same-session control repair attempt. A
+ * record begins at rejection, gains its repair intent, then its submission, and
+ * is completed by the repair observation. Retry, repair, and correction budgets
+ * stay separate because this record never creates a new role attempt or commit.
+ */
+export interface RoleControlRepairRecord {
+  readonly sessionId: string;
+  readonly generation: number;
+  readonly sequence: number;
+  readonly narrativeHash: string;
+  readonly controlHash: string;
+  readonly problem: string;
+  readonly idempotencyKey: string;
+  readonly promptHash: string;
+  readonly baselineSequence: number;
+  readonly submission: RoleHostSubmission | null;
+  readonly observation: RoleHostObservation | null;
+}
+
 export const PlanAcceptedCriterionSchema = Schema.Struct({
   id: Schema.NonEmptyString,
   text: Schema.NonEmptyString,
@@ -230,6 +316,10 @@ export const PlanAcceptedPayloadSchema = Schema.Struct({
 });
 
 export type PlanAcceptedPayload = (typeof PlanAcceptedPayloadSchema)['Type'];
+
+export const FindingRecordedPayloadSchema = FindingRecordSchema;
+
+export type FindingRecordedPayload = FindingRecord;
 
 export const ROLE_PERMISSION_VIOLATION_KINDS = [
   'project-mutation',
@@ -362,10 +452,34 @@ export const RoleSessionStoppedEventSchema = Schema.Struct({
   payload: RoleSessionStoppedPayloadSchema,
 });
 
+export const RoleControlRejectedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('role-control-rejected'),
+  payload: RoleControlRejectedPayloadSchema,
+});
+
+export const RoleControlRepairRequestedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('role-control-repair-requested'),
+  payload: RoleControlRepairRequestedPayloadSchema,
+});
+
+export const RoleControlRepairStartedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('role-control-repair-started'),
+  payload: RoleControlRepairStartedPayloadSchema,
+});
+
 export const PlanAcceptedEventSchema = Schema.Struct({
   ...RunEventEnvelopeFields,
   type: Schema.Literal('plan-accepted'),
   payload: PlanAcceptedPayloadSchema,
+});
+
+export const FindingRecordedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('finding-recorded'),
+  payload: FindingRecordedPayloadSchema,
 });
 
 export const RolePermissionViolationEventSchema = Schema.Struct({
@@ -417,7 +531,11 @@ export const RunEventSchema = Schema.Union([
   RoleSessionSubmissionStartedEventSchema,
   RoleSessionObservedEventSchema,
   RoleSessionStoppedEventSchema,
+  RoleControlRejectedEventSchema,
+  RoleControlRepairRequestedEventSchema,
+  RoleControlRepairStartedEventSchema,
   PlanAcceptedEventSchema,
+  FindingRecordedEventSchema,
   RolePermissionViolationEventSchema,
   ImplementationAcceptedEventSchema,
   VerificationCompletedEventSchema,
@@ -456,7 +574,17 @@ export type RunEventDraft =
     }
   | { readonly type: 'role-session-observed'; readonly payload: RoleSessionObservedPayload }
   | { readonly type: 'role-session-stopped'; readonly payload: RoleSessionStoppedPayload }
+  | { readonly type: 'role-control-rejected'; readonly payload: RoleControlRejectedPayload }
+  | {
+      readonly type: 'role-control-repair-requested';
+      readonly payload: RoleControlRepairRequestedPayload;
+    }
+  | {
+      readonly type: 'role-control-repair-started';
+      readonly payload: RoleControlRepairStartedPayload;
+    }
   | { readonly type: 'plan-accepted'; readonly payload: PlanAcceptedPayload }
+  | { readonly type: 'finding-recorded'; readonly payload: FindingRecordedPayload }
   | {
       readonly type: 'role-permission-violation';
       readonly payload: RolePermissionViolationPayload;
@@ -492,7 +620,9 @@ export interface RunHistoryDerivedState {
   readonly guidanceFrozen: GuidanceFrozenPayload | null;
   readonly worktreeReady: WorktreeReadyPayload | null;
   readonly roleSessions: ReadonlyArray<RoleHostSessionState>;
+  readonly roleControlRepairs: ReadonlyArray<RoleControlRepairRecord>;
   readonly acceptedPlan: PlanAcceptedPayload | null;
+  readonly findings: ReadonlyArray<FindingRecord>;
   readonly implementation: ImplementationAcceptedPayload | null;
   readonly permissionViolations: ReadonlyArray<RolePermissionViolationPayload>;
   readonly verifications: ReadonlyArray<VerificationCompletedPayload>;
@@ -526,6 +656,10 @@ const CHECKPOINTED_TRANSITION_ROUTES: ReadonlySet<string> = new Set([
   'publication-unavailable',
   'publication-unresolved',
 ]);
+
+function sha256Hex(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
 
 function canonicalVerificationExecution(execution: VerificationExecution) {
   return {
@@ -753,7 +887,18 @@ function canonicalEventText(event: UnsignedRunEvent): string {
           baselineSequence: event.payload.baselineSequence,
           generation: event.payload.generation,
           idempotencyKey: event.payload.idempotencyKey,
+          kind: event.payload.kind ?? null,
           promptHash: event.payload.promptHash,
+          repair:
+            event.payload.repair === undefined || event.payload.repair === null
+              ? null
+              : {
+                  rejectedControl: event.payload.repair.rejectedControl,
+                  rejectedControlHash: event.payload.repair.rejectedControlHash,
+                  rejectedNarrativeHash: event.payload.repair.rejectedNarrativeHash,
+                  rejectedSequence: event.payload.repair.rejectedSequence,
+                  validationError: event.payload.repair.validationError,
+                },
           sessionId: event.payload.sessionId,
         },
         previousEventHash: event.previousEventHash,
@@ -812,6 +957,58 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'role-control-rejected':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          controlHash: event.payload.controlHash,
+          generation: event.payload.generation,
+          narrativeHash: event.payload.narrativeHash,
+          problem: event.payload.problem,
+          sequence: event.payload.sequence,
+          sessionId: event.payload.sessionId,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'role-control-repair-requested':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          baselineSequence: event.payload.baselineSequence,
+          generation: event.payload.generation,
+          idempotencyKey: event.payload.idempotencyKey,
+          problem: event.payload.problem,
+          promptHash: event.payload.promptHash,
+          sessionId: event.payload.sessionId,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'role-control-repair-started':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          generation: event.payload.generation,
+          idempotencyKey: event.payload.idempotencyKey,
+          sessionId: event.payload.sessionId,
+          submission: event.payload.submission,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
     case 'plan-accepted':
       return JSON.stringify({
         eventId: event.eventId,
@@ -832,6 +1029,28 @@ function canonicalEventText(event: UnsignedRunEvent): string {
           },
           outcome: event.payload.outcome,
           runtimeValidationRequired: event.payload.runtimeValidationRequired,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'finding-recorded':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          blocking: event.payload.blocking,
+          category: event.payload.category,
+          commit: event.payload.commit,
+          description: event.payload.description,
+          detail: event.payload.detail,
+          evidence: event.payload.evidence,
+          id: event.payload.id,
+          owner: event.payload.owner,
+          severity: event.payload.severity,
+          source: event.payload.source,
         },
         previousEventHash: event.previousEventHash,
         revision: event.revision,
@@ -975,8 +1194,16 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'role-session-observed', payload: event.payload };
     case 'role-session-stopped':
       return { ...envelope, type: 'role-session-stopped', payload: event.payload };
+    case 'role-control-rejected':
+      return { ...envelope, type: 'role-control-rejected', payload: event.payload };
+    case 'role-control-repair-requested':
+      return { ...envelope, type: 'role-control-repair-requested', payload: event.payload };
+    case 'role-control-repair-started':
+      return { ...envelope, type: 'role-control-repair-started', payload: event.payload };
     case 'plan-accepted':
       return { ...envelope, type: 'plan-accepted', payload: event.payload };
+    case 'finding-recorded':
+      return { ...envelope, type: 'finding-recorded', payload: event.payload };
     case 'role-permission-violation':
       return { ...envelope, type: 'role-permission-violation', payload: event.payload };
     case 'implementation-accepted':
@@ -1040,6 +1267,41 @@ function verifyTransitionPayload(
   return null;
 }
 
+interface RoleSessionVerification {
+  state: RoleHostSessionState;
+  readonly submissions: Array<{
+    readonly kind: RoleSessionSubmissionKind;
+    readonly idempotencyKey: string;
+  }>;
+  readonly startedIdempotencyKeys: Set<string>;
+  pendingIdempotencyKey: string | null;
+  awaitingObservation: boolean;
+  expectedRepairNarrativeHash: string | null;
+}
+
+function hashUtf8(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function hashControl(control: RoleHostControl): string {
+  return hashUtf8(JSON.stringify(control));
+}
+
+interface PendingControlRepair {
+  sessionId: string;
+  generation: number;
+  sequence: number;
+  narrativeHash: string;
+  controlHash: string;
+  problem: string;
+  idempotencyKey: string;
+  promptHash: string;
+  baselineSequence: number;
+  submission: RoleHostSubmission | null;
+  observation: RoleHostObservation | null;
+  phase: 'rejected' | 'requested' | 'started';
+}
+
 export function verifyRunHistoryEvents(
   events: ReadonlyArray<RunEvent>,
   runId: string,
@@ -1051,12 +1313,15 @@ export function verifyRunHistoryEvents(
   let guidanceFrozen: GuidanceFrozenPayload | null = null;
   let worktreeReady: WorktreeReadyPayload | null = null;
   const attempts: Array<WorkflowAttempt> = [];
-  const roleSessions = new Map<string, RoleHostSessionState>();
+  const roleSessions = new Map<string, RoleSessionVerification>();
+  const roleControlRepairs: Array<RoleControlRepairRecord> = [];
+  const pendingControlRepairs = new Map<string, PendingControlRepair>();
   const permissionViolations: Array<RolePermissionViolationPayload> = [];
   const verifications: Array<VerificationCompletedPayload> = [];
   const testerSkips: Array<TesterSkippedPayload> = [];
   const validationLimitations: Array<ValidationLimitationPayload> = [];
   const runtimeLifecycles: Array<RuntimeLifecyclePayload> = [];
+  const findings: Array<FindingRecord> = [];
   let acceptedPlan: PlanAcceptedPayload | null = null;
   let implementation: ImplementationAcceptedPayload | null = null;
   let previousHash: string | null = null;
@@ -1229,7 +1494,7 @@ export function verifyRunHistoryEvents(
           return { ok: false, problem: `${label} reuses the role session "${sessionId}"` };
         }
         for (const existing of roleSessions.values()) {
-          if (existing.role === role && existing.attempt === attempt) {
+          if (existing.state.role === role && existing.state.attempt === attempt) {
             return {
               ok: false,
               problem: `${label} starts a second session for role "${role}" attempt ${attempt}`,
@@ -1237,18 +1502,25 @@ export function verifyRunHistoryEvents(
           }
         }
         roleSessions.set(sessionId, {
-          role,
-          attempt,
-          generation,
-          sessionId,
-          ownershipToken,
-          initialSequence: event.payload.sequence,
-          runtimeIdentity: event.payload.runtimeIdentity,
-          workingDirectory: event.payload.workingDirectory,
-          submission: null,
-          submissionStarted: null,
-          lastObservation: null,
-          stopDisposition: null,
+          state: {
+            role,
+            attempt,
+            generation,
+            sessionId,
+            ownershipToken,
+            initialSequence: event.payload.sequence,
+            runtimeIdentity: event.payload.runtimeIdentity,
+            workingDirectory: event.payload.workingDirectory,
+            submission: null,
+            submissionStarted: null,
+            lastObservation: null,
+            stopDisposition: null,
+          },
+          submissions: [],
+          startedIdempotencyKeys: new Set(),
+          pendingIdempotencyKey: null,
+          awaitingObservation: false,
+          expectedRepairNarrativeHash: null,
         });
         break;
       }
@@ -1260,29 +1532,110 @@ export function verifyRunHistoryEvents(
             problem: `${label} submits a role turn for an unknown session "${event.payload.sessionId}"`,
           };
         }
-        if (session.submission !== null) {
-          return { ok: false, problem: `${label} records a second submission intent` };
-        }
-        if (session.generation !== event.payload.generation) {
+        if (session.state.generation !== event.payload.generation) {
           return {
             ok: false,
             problem: `${label} records a submission generation that differs from its session`,
           };
         }
-        if (event.payload.baselineSequence < session.initialSequence) {
+        const kind = event.payload.kind ?? 'initial';
+        if (kind === 'initial') {
+          if (session.submissions.length > 0) {
+            return { ok: false, problem: `${label} records a second submission intent` };
+          }
+        } else {
+          if (session.submissions.length === 0) {
+            return {
+              ok: false,
+              problem: `${label} records a repair submission before any initial submission`,
+            };
+          }
+          const observation = session.state.lastObservation;
+          if (
+            observation === null ||
+            observation.status !== 'settled' ||
+            observation.narrative === null
+          ) {
+            return {
+              ok: false,
+              problem: `${label} records a repair submission without a settled rejected report`,
+            };
+          }
+          const repair = event.payload.repair ?? null;
+          if (repair === null) {
+            return {
+              ok: false,
+              problem: `${label} records a repair submission without the rejected envelope context`,
+            };
+          }
+          if (repair.rejectedSequence !== observation.sequence) {
+            return {
+              ok: false,
+              problem: `${label} records a repair for a different rejected sequence`,
+            };
+          }
+          if (repair.rejectedNarrativeHash !== hashUtf8(observation.narrative)) {
+            return {
+              ok: false,
+              problem: `${label} records a repair that does not preserve the rejected narrative`,
+            };
+          }
+          if (observation.control === null) {
+            if (repair.rejectedControl !== null || repair.rejectedControlHash !== null) {
+              return {
+                ok: false,
+                problem: `${label} records a rejected control that the session never produced`,
+              };
+            }
+          } else if (
+            repair.rejectedControl === null ||
+            repair.rejectedControlHash !== hashControl(observation.control)
+          ) {
+            return {
+              ok: false,
+              problem: `${label} records a repair that does not preserve the rejected control`,
+            };
+          }
+          session.expectedRepairNarrativeHash = repair.rejectedNarrativeHash;
+        }
+        if (
+          session.submissions.some((entry) => entry.idempotencyKey === event.payload.idempotencyKey)
+        ) {
+          return { ok: false, problem: `${label} reuses the recorded idempotency key` };
+        }
+        if (session.pendingIdempotencyKey !== null) {
+          return {
+            ok: false,
+            problem: `${label} records a submission intent before the prior submission started`,
+          };
+        }
+        if (event.payload.baselineSequence < session.state.initialSequence) {
           return {
             ok: false,
             problem: `${label} records a submission baseline older than the session sequence`,
           };
         }
-        roleSessions.set(event.payload.sessionId, {
-          ...session,
+        const priorSequence =
+          session.state.lastObservation?.sequence ?? session.state.initialSequence;
+        if (event.payload.baselineSequence < priorSequence) {
+          return {
+            ok: false,
+            problem: `${label} records a submission baseline older than the last observed sequence`,
+          };
+        }
+        session.submissions.push({
+          kind,
+          idempotencyKey: event.payload.idempotencyKey,
+        });
+        session.pendingIdempotencyKey = event.payload.idempotencyKey;
+        session.state = {
+          ...session.state,
           submission: {
             idempotencyKey: event.payload.idempotencyKey,
             promptHash: event.payload.promptHash,
             baselineSequence: event.payload.baselineSequence,
           },
-        });
+        };
         break;
       }
       case 'role-session-submission-started': {
@@ -1293,25 +1646,25 @@ export function verifyRunHistoryEvents(
             problem: `${label} starts a submission for an unknown session "${event.payload.sessionId}"`,
           };
         }
-        if (session.generation !== event.payload.generation) {
+        if (session.state.generation !== event.payload.generation) {
           return {
             ok: false,
             problem: `${label} records a submission generation that differs from its session`,
           };
         }
-        if (session.submission === null) {
+        if (session.pendingIdempotencyKey === null || session.state.submission === null) {
           return { ok: false, problem: `${label} starts a submission before recording its intent` };
         }
-        if (session.submission.idempotencyKey !== event.payload.idempotencyKey) {
+        if (session.pendingIdempotencyKey !== event.payload.idempotencyKey) {
           return { ok: false, problem: `${label} changes the recorded idempotency key` };
         }
-        if (session.submissionStarted !== null) {
+        if (session.startedIdempotencyKeys.has(event.payload.idempotencyKey)) {
           return { ok: false, problem: `${label} records a second submission start` };
         }
-        roleSessions.set(event.payload.sessionId, {
-          ...session,
-          submissionStarted: event.payload.submission,
-        });
+        session.startedIdempotencyKeys.add(event.payload.idempotencyKey);
+        session.pendingIdempotencyKey = null;
+        session.awaitingObservation = true;
+        session.state = { ...session.state, submissionStarted: event.payload.submission };
         break;
       }
       case 'role-session-observed': {
@@ -1322,20 +1675,24 @@ export function verifyRunHistoryEvents(
             problem: `${label} observes an unknown session "${event.payload.sessionId}"`,
           };
         }
-        if (session.generation !== event.payload.generation) {
+        if (session.state.generation !== event.payload.generation) {
           return {
             ok: false,
             problem: `${label} records an observation generation that differs from its session`,
           };
         }
-        const previousObservation = session.lastObservation;
-        if (
+        const previousObservation = session.state.lastObservation;
+        const pendingRepair = pendingControlRepairs.get(event.payload.sessionId);
+        const repairPending = pendingRepair !== undefined && pendingRepair.phase === 'started';
+        const becameTerminal =
           previousObservation !== null &&
-          (previousObservation.status === 'settled' || previousObservation.status === 'lost')
-        ) {
+          (previousObservation.status === 'settled' || previousObservation.status === 'lost');
+        if (becameTerminal && !session.awaitingObservation && !repairPending) {
           return { ok: false, problem: `${label} observes a session after it became terminal` };
         }
-        const baseline = session.submission?.baselineSequence ?? session.initialSequence;
+        const baseline = repairPending
+          ? pendingRepair.baselineSequence
+          : (session.state.submission?.baselineSequence ?? session.state.initialSequence);
         if (event.payload.sequence < baseline) {
           return { ok: false, problem: `${label} regresses the observed session sequence` };
         }
@@ -1364,14 +1721,31 @@ export function verifyRunHistoryEvents(
               problem: `${label} records a settled observation without a control envelope`,
             };
           }
+          if (
+            session.expectedRepairNarrativeHash !== null &&
+            hashUtf8(event.payload.narrative) !== session.expectedRepairNarrativeHash
+          ) {
+            return {
+              ok: false,
+              problem: `${label} records a repair that changed the original narrative`,
+            };
+          }
+          session.expectedRepairNarrativeHash = null;
+          session.awaitingObservation = false;
+          if (repairPending && sha256Hex(event.payload.narrative) !== pendingRepair.narrativeHash) {
+            return {
+              ok: false,
+              problem: `${label} records a control repair that changed the settled narrative`,
+            };
+          }
         } else if (event.payload.narrative !== null || event.payload.control !== null) {
           return {
             ok: false,
             problem: `${label} records an unfinished observation with a settled result`,
           };
         }
-        roleSessions.set(event.payload.sessionId, {
-          ...session,
+        session.state = {
+          ...session.state,
           lastObservation: {
             status: event.payload.status,
             sequence: event.payload.sequence,
@@ -1379,7 +1753,143 @@ export function verifyRunHistoryEvents(
             narrative: event.payload.narrative,
             control: event.payload.control,
           },
+        };
+        if (repairPending) {
+          roleControlRepairs.push({
+            sessionId: pendingRepair.sessionId,
+            generation: pendingRepair.generation,
+            sequence: pendingRepair.sequence,
+            narrativeHash: pendingRepair.narrativeHash,
+            controlHash: pendingRepair.controlHash,
+            problem: pendingRepair.problem,
+            idempotencyKey: pendingRepair.idempotencyKey,
+            promptHash: pendingRepair.promptHash,
+            baselineSequence: pendingRepair.baselineSequence,
+            submission: pendingRepair.submission,
+            observation: {
+              status: event.payload.status,
+              sequence: event.payload.sequence,
+              eventCount: event.payload.eventCount,
+              narrative: event.payload.narrative,
+              control: event.payload.control,
+            },
+          });
+          pendingControlRepairs.delete(event.payload.sessionId);
+        }
+        break;
+      }
+      case 'role-control-rejected': {
+        const session = roleSessions.get(event.payload.sessionId);
+        if (session === undefined) {
+          return {
+            ok: false,
+            problem: `${label} rejects a control for an unknown session "${event.payload.sessionId}"`,
+          };
+        }
+        if (session.state.generation !== event.payload.generation) {
+          return {
+            ok: false,
+            problem: `${label} records a rejection generation that differs from its session`,
+          };
+        }
+        if (pendingControlRepairs.has(event.payload.sessionId)) {
+          return {
+            ok: false,
+            problem: `${label} records a control rejection while a repair is already pending`,
+          };
+        }
+        const observation = session.state.lastObservation;
+        if (observation === null || observation.status !== 'settled') {
+          return {
+            ok: false,
+            problem: `${label} rejects a control without a settled observation`,
+          };
+        }
+        if (observation.sequence !== event.payload.sequence || observation.narrative === null) {
+          return {
+            ok: false,
+            problem: `${label} rejects a control for a different settled observation`,
+          };
+        }
+        if (sha256Hex(observation.narrative) !== event.payload.narrativeHash) {
+          return {
+            ok: false,
+            problem: `${label} records a narrative hash that does not match the settled narrative`,
+          };
+        }
+        pendingControlRepairs.set(event.payload.sessionId, {
+          sessionId: event.payload.sessionId,
+          generation: event.payload.generation,
+          sequence: event.payload.sequence,
+          narrativeHash: event.payload.narrativeHash,
+          controlHash: event.payload.controlHash,
+          problem: event.payload.problem,
+          idempotencyKey: '',
+          promptHash: '',
+          baselineSequence: event.payload.sequence,
+          submission: null,
+          observation: null,
+          phase: 'rejected',
         });
+        break;
+      }
+      case 'role-control-repair-requested': {
+        const pending = pendingControlRepairs.get(event.payload.sessionId);
+        if (pending === undefined) {
+          return {
+            ok: false,
+            problem: `${label} requests a control repair without a recorded rejection`,
+          };
+        }
+        if (pending.generation !== event.payload.generation) {
+          return {
+            ok: false,
+            problem: `${label} records a repair generation that differs from its rejection`,
+          };
+        }
+        if (pending.phase !== 'rejected') {
+          return { ok: false, problem: `${label} records a second control repair request` };
+        }
+        if (event.payload.baselineSequence < pending.sequence) {
+          return {
+            ok: false,
+            problem: `${label} records a repair baseline older than the rejected observation`,
+          };
+        }
+        if (event.payload.problem !== pending.problem) {
+          return {
+            ok: false,
+            problem: `${label} records a repair request that changes the rejection problem`,
+          };
+        }
+        pending.phase = 'requested';
+        pending.idempotencyKey = event.payload.idempotencyKey;
+        pending.promptHash = event.payload.promptHash;
+        pending.baselineSequence = event.payload.baselineSequence;
+        break;
+      }
+      case 'role-control-repair-started': {
+        const pending = pendingControlRepairs.get(event.payload.sessionId);
+        if (pending === undefined) {
+          return {
+            ok: false,
+            problem: `${label} starts a control repair without a recorded request`,
+          };
+        }
+        if (pending.generation !== event.payload.generation) {
+          return {
+            ok: false,
+            problem: `${label} records a repair generation that differs from its request`,
+          };
+        }
+        if (pending.phase !== 'requested') {
+          return { ok: false, problem: `${label} records a second control repair submission` };
+        }
+        if (pending.idempotencyKey !== event.payload.idempotencyKey) {
+          return { ok: false, problem: `${label} changes the recorded repair idempotency key` };
+        }
+        pending.phase = 'started';
+        pending.submission = event.payload.submission;
         break;
       }
       case 'role-session-stopped': {
@@ -1390,19 +1900,16 @@ export function verifyRunHistoryEvents(
             problem: `${label} stops an unknown session "${event.payload.sessionId}"`,
           };
         }
-        if (session.generation !== event.payload.generation) {
+        if (session.state.generation !== event.payload.generation) {
           return {
             ok: false,
             problem: `${label} records a stop generation that differs from its session`,
           };
         }
-        if (session.stopDisposition !== null) {
+        if (session.state.stopDisposition !== null) {
           return { ok: false, problem: `${label} records a second stop disposition` };
         }
-        roleSessions.set(event.payload.sessionId, {
-          ...session,
-          stopDisposition: event.payload.disposition,
-        });
+        session.state = { ...session.state, stopDisposition: event.payload.disposition };
         break;
       }
       case 'plan-accepted': {
@@ -1429,6 +1936,33 @@ export function verifyRunHistoryEvents(
           };
         }
         acceptedPlan = event.payload;
+        break;
+      }
+      case 'finding-recorded': {
+        const resultCommit = currentResultCommit();
+        if (resultCommit === null) {
+          return {
+            ok: false,
+            problem: `${label} records a finding without an accepted implementation commit`,
+          };
+        }
+        if (event.payload.commit !== resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} records a finding for a commit other than the current result head`,
+          };
+        }
+        if (
+          findings.some(
+            (finding) => finding.commit === event.payload.commit && finding.id === event.payload.id,
+          )
+        ) {
+          return {
+            ok: false,
+            problem: `${label} reuses the finding id "${event.payload.id}" for ${event.payload.commit}`,
+          };
+        }
+        findings.push(event.payload);
         break;
       }
       case 'role-permission-violation': {
@@ -1599,8 +2133,25 @@ export function verifyRunHistoryEvents(
       sourceFrozen,
       guidanceFrozen,
       worktreeReady,
-      roleSessions: [...roleSessions.values()],
+      roleSessions: [...roleSessions.values()].map((session) => session.state),
+      roleControlRepairs: [
+        ...roleControlRepairs,
+        ...[...pendingControlRepairs.values()].map((pending) => ({
+          sessionId: pending.sessionId,
+          generation: pending.generation,
+          sequence: pending.sequence,
+          narrativeHash: pending.narrativeHash,
+          controlHash: pending.controlHash,
+          problem: pending.problem,
+          idempotencyKey: pending.idempotencyKey,
+          promptHash: pending.promptHash,
+          baselineSequence: pending.baselineSequence,
+          submission: pending.submission,
+          observation: pending.observation,
+        })),
+      ],
       acceptedPlan,
+      findings,
       implementation,
       permissionViolations,
       verifications,

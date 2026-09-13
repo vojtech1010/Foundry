@@ -3,6 +3,7 @@ import { Effect } from 'effect';
 import type { Schema } from 'effect';
 
 import { decodeReviewerTurnControl } from '../../domain/reviewer-outcomes.js';
+import { recordReviewerCorrectionFinding } from '../findings/index.js';
 import { transitionWorkflow } from '../workflow-transitions/index.js';
 
 import type { RunGit, RunWorkspaceBlocked } from '../git-provisioning/index.js';
@@ -30,6 +31,7 @@ export interface ReviewerEvidenceAssessment {
 export type ReviewerTurnDisposition =
   | { readonly kind: 'approved' }
   | { readonly kind: 'approved-no-change' }
+  | { readonly kind: 'implementation-requested' }
   | { readonly kind: 'changes-requested' }
   | { readonly kind: 'retest-requested' }
   | { readonly kind: 'human-decision-required' }
@@ -41,6 +43,7 @@ export interface HandleReviewerTurnOptions {
   readonly runId: string;
   readonly control: Schema.Json;
   readonly assessment: ReviewerEvidenceAssessment;
+  readonly narrative: string;
   readonly correctionReason: string;
   readonly blockedReason: string;
 }
@@ -66,6 +69,12 @@ function approvalProblem(assessment: ReviewerEvidenceAssessment): string | null 
  * Foundry-owned evidence assessment. Ordinary approval completes locally with
  * no publication. A genuine human-decision result is recorded as the first
  * review outcome; this slice does not open a pull request or route after it.
+ *
+ * A verified no-change candidate cannot complete without passed checks bound to
+ * the frozen source commit, and it can never become a human-decision PR.
+ * Reviewer `changes_requested` on a no-change candidate is actionable Coder work
+ * that returns to `coding` without spending a correction round; an
+ * inapplicable `human_decision_required` is unresolvable ambiguity and blocks.
  */
 export const handleReviewerTurn = Effect.fn('handleReviewerTurn')(function* (
   options: HandleReviewerTurnOptions,
@@ -103,6 +112,8 @@ export const handleReviewerTurn = Effect.fn('handleReviewerTurn')(function* (
             route: 'review-approved-no-change',
             verifiedSourceApproved: true,
             implementationCommit: null,
+            checksPassed: assessment.checksPassed,
+            evidenceCommitMatches: assessment.evidenceCommitMatches,
           },
         });
         return { kind: 'approved-no-change' };
@@ -122,12 +133,31 @@ export const handleReviewerTurn = Effect.fn('handleReviewerTurn')(function* (
       return { kind: 'approved' };
     }
     case 'changes_requested': {
+      if (assessment.noChangeCandidate) {
+        yield* transitionWorkflow({
+          runDirectory: options.runDirectory,
+          runId: options.runId,
+          request: {
+            route: 'review-requested-implementation',
+            verifiedNoChangeCandidate: true,
+          },
+        });
+        return { kind: 'implementation-requested' };
+      }
       if (assessment.correctionRoundsRemaining < 1) {
         return {
           kind: 'control-invalid',
           problem:
             'changes_requested is invalid: no correction round remains. Choose human_decision_required or blocked.',
         };
+      }
+      if (assessment.reviewableCommit !== null) {
+        yield* recordReviewerCorrectionFinding({
+          runDirectory: options.runDirectory,
+          runId: options.runId,
+          commit: assessment.reviewableCommit,
+          narrative: options.narrative,
+        });
       }
       yield* transitionWorkflow({
         runDirectory: options.runDirectory,
@@ -167,11 +197,18 @@ export const handleReviewerTurn = Effect.fn('handleReviewerTurn')(function* (
     }
     case 'human_decision_required': {
       if (assessment.noChangeCandidate) {
-        return {
-          kind: 'control-invalid',
-          problem:
-            'human_decision_required is invalid for a no-change candidate because there is no reviewable implementation to publish.',
-        };
+        const reason =
+          'human_decision_required is invalid for a no-change candidate because there is no reviewable implementation to publish.';
+        yield* transitionWorkflow({
+          runDirectory: options.runDirectory,
+          runId: options.runId,
+          request: {
+            route: 'block-run',
+            recoverablePrerequisite: true,
+            reason,
+          },
+        });
+        return { kind: 'blocked', reason };
       }
       if (!assessment.publicationEligible || assessment.reviewableCommit === null) {
         yield* transitionWorkflow({

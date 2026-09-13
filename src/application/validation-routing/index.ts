@@ -1,5 +1,6 @@
 import { Effect, Schema } from 'effect';
 
+import { checkFindings, environmentFailures, findingAlreadyRecorded } from '../findings/index.js';
 import { transitionWorkflow } from '../workflow-transitions/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../run-history/index.js';
 
@@ -7,6 +8,7 @@ import type { RunGit, RunWorkspaceBlocked } from '../git-provisioning/index.js';
 import type { RunHistoryError, RunHistoryStorage } from '../run-history/index.js';
 import type { IllegalWorkflowTransition } from '../workflow-transitions/index.js';
 import type { RunStateUnavailable } from '../run-identity/index.js';
+import type { FindingRecord } from '../../domain/findings.js';
 import type { VerificationCompletedPayload } from '../../domain/run-history.js';
 
 export class ProjectValidationRoutingError extends Schema.TaggedError<ProjectValidationRoutingError>()(
@@ -25,7 +27,8 @@ export interface RouteAfterProjectChecksOptions {
 export type ProjectValidationRoute =
   | { readonly route: 'testing' }
   | { readonly route: 'reviewing'; readonly testerSkipped: boolean }
-  | { readonly route: 'correcting' }
+  | { readonly route: 'correcting'; readonly findings: ReadonlyArray<FindingRecord> }
+  | { readonly route: 'blocked'; readonly reason: string }
   | { readonly route: 'limitation'; readonly reason: string };
 
 function latestVerificationFor(
@@ -40,6 +43,35 @@ function latestVerificationFor(
   }
   return latest;
 }
+
+const recordFailedCheckFindings = Effect.fn('recordFailedCheckFindings')(function* (options: {
+  readonly runDirectory: string;
+  readonly runId: string;
+  readonly report: VerificationCompletedPayload;
+  readonly existing: ReadonlyArray<FindingRecord>;
+}): Effect.fn.Return<ReadonlyArray<FindingRecord>, RunHistoryError, RunHistoryStorage> {
+  const existingForCommit = options.existing.filter(
+    (finding) => finding.commit === options.report.commit,
+  );
+  const candidates = checkFindings({
+    report: options.report,
+    nextIndex: existingForCommit.length + 1,
+  });
+  const fresh: Array<FindingRecord> = [];
+  for (const candidate of candidates) {
+    if (findingAlreadyRecorded(options.existing, candidate)) {
+      continue;
+    }
+    yield* appendRunEvent({
+      runDirectory: options.runDirectory,
+      runId: options.runId,
+      createIfMissing: false,
+      build: () => Effect.succeed({ type: 'finding-recorded', payload: candidate } as const),
+    });
+    fresh.push(candidate);
+  }
+  return [...existingForCommit, ...fresh];
+});
 
 export const routeAfterProjectChecks = Effect.fn('routeAfterProjectChecks')(function* (
   options: RouteAfterProjectChecksOptions,
@@ -86,6 +118,26 @@ export const routeAfterProjectChecks = Effect.fn('routeAfterProjectChecks')(func
   }
 
   if (report.result === 'failed') {
+    const findings = yield* recordFailedCheckFindings({
+      runDirectory: options.runDirectory,
+      runId: options.runId,
+      report,
+      existing: derived.findings,
+    });
+
+    const environment = environmentFailures(report);
+    if (environment.length > 0) {
+      const reason = `Deterministic verification at ${commit} recorded ${environment.length} environment or operational failure(s) (${environment
+        .map((execution) => execution.name)
+        .join(', ')}); the report cannot justify a Coder correction.`;
+      yield* transitionWorkflow({
+        runDirectory: options.runDirectory,
+        runId: options.runId,
+        request: { route: 'block-run', recoverablePrerequisite: true, reason },
+      });
+      return { route: 'blocked', reason };
+    }
+
     if (options.correctionRoundsRemaining >= 1) {
       yield* transitionWorkflow({
         runDirectory: options.runDirectory,
@@ -96,7 +148,7 @@ export const routeAfterProjectChecks = Effect.fn('routeAfterProjectChecks')(func
           correctionRoundsRemaining: options.correctionRoundsRemaining,
         },
       });
-      return { route: 'correcting' };
+      return { route: 'correcting', findings };
     }
     yield* transitionWorkflow({
       runDirectory: options.runDirectory,

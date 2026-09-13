@@ -7,11 +7,16 @@ import {
   planRequiresImplementation,
   planRuntimeValidationRequired,
 } from '../../domain/architect-plan.js';
-import { appendRunEvent } from '../run-history/index.js';
+import { RunGit, RunWorkspaceBlocked } from '../git-provisioning/index.js';
+import { appendRunEvent, readVerifiedRunHistory } from '../run-history/index.js';
 import { transitionWorkflow, recordWorkflowAttempt } from '../workflow-transitions/index.js';
 
 import type { AcceptanceCriterion, CompiledExecutionPlan } from '../../domain/architect-plan.js';
-import type { PlanAcceptedPayload } from '../../domain/run-history.js';
+import type {
+  ImplementationAcceptedPayload,
+  PlanAcceptedPayload,
+  WorktreeReadyPayload,
+} from '../../domain/run-history.js';
 
 import type { RunHistoryError, RunHistoryStorage } from '../run-history/index.js';
 import type {
@@ -20,7 +25,7 @@ import type {
 } from '../workflow-transitions/index.js';
 import type { IllegalWorkflowAttempt } from '../workflow-transitions/index.js';
 import type { RunStateUnavailable } from '../run-identity/index.js';
-import type { RunWorkspaceBlocked, RunGit } from '../git-provisioning/index.js';
+import type { ImplementationObservation } from '../git-provisioning/index.js';
 
 export class ArchitectPlanRejected extends Schema.TaggedError<ArchitectPlanRejected>()(
   'ArchitectPlanRejected',
@@ -57,6 +62,16 @@ export interface AcceptArchitectPlanOptions {
   readonly retriesRemaining: number;
   readonly repairReason: string;
   readonly retryReason: string;
+}
+
+export interface RoleControlValidation {
+  readonly ok: boolean;
+  readonly problem: string;
+}
+
+export function validateArchitectPlanControl(control: Schema.Json): RoleControlValidation {
+  const decoded = decodeArchitectPlanControl(control);
+  return decoded.ok ? { ok: true, problem: '' } : { ok: false, problem: decoded.problem };
 }
 
 function planAcceptedPayload(plan: AcceptedArchitectPlan): PlanAcceptedPayload {
@@ -169,6 +184,132 @@ export const acceptArchitectPlan = Effect.fn('acceptArchitectPlan')(function* (
   return { outcome: 'accepted', plan, planEvent };
 });
 
+function noChangeCandidateProblem(
+  ready: WorktreeReadyPayload,
+  observed: ImplementationObservation,
+): string | null {
+  if (!observed.workspaceExists) {
+    return `the assigned worktree ${ready.workspace} does not exist`;
+  }
+  if (observed.currentBranch !== ready.taskBranch) {
+    return `the assigned worktree ${ready.workspace} is on ${observed.currentBranch ?? 'a detached HEAD'} instead of the assigned task branch "${ready.taskBranch}"`;
+  }
+  if (observed.headCommit === null) {
+    return `the assigned worktree ${ready.workspace} has no readable HEAD commit`;
+  }
+  if (!observed.baseIsAncestor) {
+    return `HEAD ${observed.headCommit} is not descended from the frozen source commit ${ready.baseCommit}`;
+  }
+  if (!observed.clean) {
+    return `the assigned worktree ${ready.workspace} has uncommitted tracked or untracked changes`;
+  }
+  if (observed.headCommit !== ready.baseCommit) {
+    return `HEAD ${observed.headCommit} differs from the frozen source commit ${ready.baseCommit}; only a source-identical branch is a no-change candidate`;
+  }
+  return null;
+}
+
+const recordArchitectNoChangeCandidate = Effect.fn('recordArchitectNoChangeCandidate')(function* (
+  runDirectory: string,
+  runId: string,
+): Effect.fn.Return<void, RunWorkspaceBlocked | RunHistoryError, RunHistoryStorage | RunGit> {
+  const history = yield* readVerifiedRunHistory({ runDirectory, runId, createIfMissing: false });
+  if (history.derived.implementation !== null) {
+    return;
+  }
+  const ready = history.derived.worktreeReady;
+  if (ready === null) {
+    return yield* new RunWorkspaceBlocked({
+      message: `Run "${runId}" cannot validate an Architect no-change candidate without durable worktree readiness.`,
+      runId,
+      problem: 'durable worktree readiness',
+    });
+  }
+  const git = yield* RunGit;
+  const observed = yield* git.observeImplementation({
+    workspace: ready.workspace,
+    taskBranch: ready.taskBranch,
+    baseCommit: ready.baseCommit,
+    runId,
+  });
+  const problem = noChangeCandidateProblem(ready, observed);
+  if (problem !== null) {
+    return yield* new RunWorkspaceBlocked({
+      message: `Run "${runId}" cannot record an Architect no-change candidate: ${problem}.`,
+      runId,
+      problem,
+    });
+  }
+  const evidence: ImplementationAcceptedPayload = {
+    taskBranch: ready.taskBranch,
+    baseCommit: ready.baseCommit,
+    commit: null,
+    changedFiles: [...observed.changedFiles],
+    noChangeCandidate: true,
+  };
+  yield* appendRunEvent({
+    runDirectory,
+    runId,
+    createIfMissing: false,
+    build: () => Effect.succeed({ type: 'implementation-accepted', payload: evidence } as const),
+  });
+});
+
+function acceptedPlanOf(payload: PlanAcceptedPayload): AcceptedArchitectPlan {
+  return {
+    outcome: payload.outcome,
+    criteria: payload.criteria.map((criterion) => ({ id: criterion.id, text: criterion.text })),
+    runtimeValidationRequired: payload.runtimeValidationRequired,
+    requiresImplementation: payload.outcome === 'plan_ready',
+    execution: {
+      mode: payload.execution.mode,
+      objectives: payload.execution.objectives.map((objective) => ({
+        id: objective.id,
+        title: objective.title,
+        affectedPaths: [...objective.affectedPaths],
+        criterionIds: [...objective.criterionIds],
+      })),
+    },
+  };
+}
+
+export type ResumeArchitectPlanResult =
+  | { readonly outcome: 'none' }
+  | {
+      readonly outcome: 'admitted';
+      readonly plan: AcceptedArchitectPlan;
+      readonly transition: WorkflowTransitionReport;
+    };
+
+export const resumeArchitectPlan = Effect.fn('resumeArchitectPlan')(function* (options: {
+  readonly runDirectory: string;
+  readonly runId: string;
+}): Effect.fn.Return<
+  ResumeArchitectPlanResult,
+  IllegalWorkflowTransition | RunStateUnavailable | RunWorkspaceBlocked | RunHistoryError,
+  RunHistoryStorage | RunGit
+> {
+  const history = yield* readVerifiedRunHistory({
+    runDirectory: options.runDirectory,
+    runId: options.runId,
+    createIfMissing: false,
+  });
+  const payload = history.derived.acceptedPlan;
+  if (payload === null) {
+    return { outcome: 'none' };
+  }
+  const plan = acceptedPlanOf(payload);
+  if (!plan.requiresImplementation) {
+    yield* recordArchitectNoChangeCandidate(options.runDirectory, options.runId);
+  }
+  const transition = yield* transitionWorkflow({
+    runDirectory: options.runDirectory,
+    runId: options.runId,
+    request: plan.requiresImplementation ? { route: 'plan-accepted' } : { route: 'plan-no-change' },
+  });
+  return { outcome: 'admitted', plan, transition };
+});
+
 export type ArchitectPlanAdmission =
   | {
       readonly outcome: 'admitted';
@@ -215,6 +356,9 @@ export const admitArchitectPlan = Effect.fn('admitArchitectPlan')(function* (
   }
   if (acceptance.outcome === 'retry-required') {
     return { outcome: 'retry-required', problem: acceptance.problem };
+  }
+  if (!acceptance.plan.requiresImplementation) {
+    yield* recordArchitectNoChangeCandidate(options.runDirectory, options.runId);
   }
   const transition = yield* transitionWorkflow({
     runDirectory: options.runDirectory,

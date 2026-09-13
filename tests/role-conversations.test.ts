@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import {
   ROLE_HOST_PROTOCOL_VERSION,
@@ -30,6 +30,7 @@ import { CAPABLE_ROLE_HOST_CAPABILITIES } from './fixtures/role-host/role-host-l
 import type {
   RoleHostCreateRequest,
   RoleHostCreateResponse,
+  RoleHostControl,
   RoleHostObserveRequest,
   RoleHostObserveResponse,
   RoleHostOperation,
@@ -39,7 +40,10 @@ import type {
   RoleHostSubmitRequest,
   RoleHostSubmitResponse,
 } from '../src/domain/role-host.js';
-import type { StartOrResumeRoleTurnOptions } from '../src/application/role-conversations/index.js';
+import type {
+  RoleControlRepairPolicy,
+  StartOrResumeRoleTurnOptions,
+} from '../src/application/role-conversations/index.js';
 import type { RunEvent, RunEventDraft } from '../src/domain/run-history.js';
 
 const PARSE_OPTIONS = { onExcessProperty: 'error' } as const;
@@ -153,6 +157,38 @@ function readRecordedSession(runDirectory: string) {
   );
 }
 
+const REPAIR_NARRATIVE = '# Result\n\nImplemented.';
+
+const REPAIR_INVALID_CONTROL = { schemaVersion: 1, outcome: 'needs_repair' } as const;
+
+const REPAIR_VALID_CONTROL = { schemaVersion: 1, outcome: 'implemented' } as const;
+
+function sha256(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+function seedEvents(runDirectory: string, drafts: ReadonlyArray<RunEventDraft>) {
+  return Effect.forEach(drafts, (draft) =>
+    appendRunEvent({
+      runDirectory,
+      runId: RUN_ID,
+      createIfMissing: true,
+      build: () => Effect.succeed(draft),
+    }),
+  ).pipe(Effect.asVoid, Effect.provide(RunHistoryLive));
+}
+
+function readControlRepairs(runDirectory: string) {
+  return readVerifiedRunHistory({
+    runDirectory,
+    runId: RUN_ID,
+    createIfMissing: false,
+  }).pipe(
+    Effect.provide(RunHistoryLive),
+    Effect.map((history) => history.derived.roleControlRepairs),
+  );
+}
+
 const SETTLED_RESPONSE: RoleHostObserveResponse = {
   schemaVersion: ROLE_HOST_PROTOCOL_VERSION,
   status: 'settled',
@@ -184,6 +220,7 @@ interface FakeRoleHostOptions {
   readonly observeResponses: ReadonlyArray<RoleHostObserveResponse>;
   readonly createGeneration?: number;
   readonly submitFails?: boolean;
+  readonly failSubmitOn?: number;
   readonly identity?: RoleHostRuntimeIdentity;
 }
 
@@ -199,6 +236,7 @@ function fakeRoleHost(options: FakeRoleHostOptions): FakeRoleHost {
   const submitKeys: Array<string> = [];
   const createRequests: Array<RoleHostCreateRequest> = [];
   let observeIndex = 0;
+  let submitCall = 0;
   const layer = Layer.succeed(
     RoleHost,
     RoleHost.of({
@@ -225,7 +263,8 @@ function fakeRoleHost(options: FakeRoleHostOptions): FakeRoleHost {
       ): Effect.Effect<RoleHostSubmitResponse, RoleHostOperationalError> => {
         calls.push('submit');
         submitKeys.push(request.idempotencyKey);
-        if (options.submitFails === true) {
+        submitCall += 1;
+        if (options.submitFails === true || options.failSubmitOn === submitCall) {
           return Effect.fail(
             new RoleHostOperationalError({
               message: 'the submit side effect is unknown',
@@ -1187,4 +1226,551 @@ describe('run-derived permission enforcement', () => {
       }
     }),
   );
+});
+
+function repairPolicy(maxRepairs: number): RoleControlRepairPolicy {
+  return {
+    maxRepairs,
+    validate: (control) => {
+      const outcome = control['outcome'];
+      return outcome === 'implemented'
+        ? { ok: true, problem: '' }
+        : { ok: false, problem: `outcome ${JSON.stringify(outcome)} is not implemented` };
+    },
+  };
+}
+
+function settledObservation(
+  sequence: number,
+  narrative: string,
+  control: RoleHostControl,
+): RoleHostObserveResponse {
+  return {
+    schemaVersion: ROLE_HOST_PROTOCOL_VERSION,
+    status: 'settled',
+    sequence,
+    events: [],
+    narrative,
+    control,
+  };
+}
+
+describe('same-session control repair', () => {
+  it.effect('repairs an invalid control in the same session and preserves the report', () =>
+    Effect.gen(function* () {
+      const run = setupRun();
+      try {
+        yield* seedRunCreated(run.runDirectory);
+        const fake = fakeRoleHost({
+          sessionId: 'session-1',
+          ownershipToken: 'owner-1',
+          generation: 1,
+          initialSequence: 0,
+          observeResponses: [
+            settledObservation(1, REPAIR_NARRATIVE, REPAIR_INVALID_CONTROL),
+            settledObservation(2, REPAIR_NARRATIVE, REPAIR_VALID_CONTROL),
+          ],
+        });
+        const result = yield* startOrResumeRoleTurn({
+          ...baseTurnOptions(run.runDirectory),
+          controlRepair: repairPolicy(1),
+        }).pipe(Effect.provide(Layer.mergeAll(RunHistoryLive, fake.layer)));
+
+        expect(result.controlValid).toBe(true);
+        expect(result.controlProblem).toBeNull();
+        expect(result.repairsPerformed).toBe(1);
+        expect(result.narrative).toBe(REPAIR_NARRATIVE);
+        expect(result.control).toEqual(REPAIR_VALID_CONTROL);
+        expect(fake.calls).toEqual(['create', 'submit', 'observe', 'submit', 'observe']);
+        expect(fake.createRequests).toHaveLength(1);
+        expect(fake.submitKeys).toHaveLength(2);
+        expect(fake.submitKeys[0]).not.toBe(fake.submitKeys[1]);
+
+        const history = yield* readVerifiedRunHistory({
+          runDirectory: run.runDirectory,
+          runId: RUN_ID,
+          createIfMissing: false,
+        }).pipe(Effect.provide(RunHistoryLive));
+        expect(history.derived.attempts).toHaveLength(0);
+
+        const repairs = yield* readControlRepairs(run.runDirectory);
+        expect(repairs).toHaveLength(1);
+        expect(repairs[0]?.sessionId).toBe('session-1');
+        expect(repairs[0]?.narrativeHash).toBe(sha256(REPAIR_NARRATIVE));
+        expect(repairs[0]?.submission).toBe('accepted');
+        expect(repairs[0]?.observation?.status).toBe('settled');
+        expect(repairs[0]?.observation?.control).toEqual(REPAIR_VALID_CONTROL);
+      } finally {
+        run.cleanup();
+      }
+    }),
+  );
+
+  it.effect('repairs an invalid envelope through the direct host adapter', () =>
+    Effect.gen(function* () {
+      const run = setupRun();
+      const log = setupLog();
+      try {
+        yield* seedRunCreated(run.runDirectory);
+        const result = yield* startOrResumeRoleTurn({
+          ...baseTurnOptions(run.runDirectory),
+          controlRepair: repairPolicy(1),
+        }).pipe(
+          Effect.provide(Layer.mergeAll(RunHistoryLive, adapterLayer('repair', log.logPath))),
+        );
+
+        expect(result.controlValid).toBe(true);
+        expect(result.repairsPerformed).toBe(1);
+        expect(result.control).toEqual({ schemaVersion: 1, outcome: 'implemented' });
+        expect(readInvocations(log.logPath).map((invocation) => invocation.operation)).toEqual([
+          'create',
+          'submit',
+          'observe',
+          'submit',
+          'observe',
+        ]);
+        expect(yield* readControlRepairs(run.runDirectory)).toHaveLength(1);
+      } finally {
+        log.cleanup();
+        run.cleanup();
+      }
+    }),
+  );
+
+  it.effect(
+    'returns an unrepairable control without spending a repair when no budget remains',
+    () =>
+      Effect.gen(function* () {
+        const run = setupRun();
+        try {
+          yield* seedRunCreated(run.runDirectory);
+          const fake = fakeRoleHost({
+            sessionId: 'session-1',
+            ownershipToken: 'owner-1',
+            generation: 1,
+            initialSequence: 0,
+            observeResponses: [settledObservation(1, REPAIR_NARRATIVE, REPAIR_INVALID_CONTROL)],
+          });
+          const result = yield* startOrResumeRoleTurn({
+            ...baseTurnOptions(run.runDirectory),
+            controlRepair: repairPolicy(0),
+          }).pipe(Effect.provide(Layer.mergeAll(RunHistoryLive, fake.layer)));
+
+          expect(result.controlValid).toBe(false);
+          expect(result.controlProblem).toContain('not implemented');
+          expect(result.repairsPerformed).toBe(0);
+          expect(fake.calls).toEqual(['create', 'submit', 'observe']);
+          expect(yield* readControlRepairs(run.runDirectory)).toHaveLength(0);
+        } finally {
+          run.cleanup();
+        }
+      }),
+  );
+
+  it.effect('spends repeated repairs when the corrected control still fails semantic checks', () =>
+    Effect.gen(function* () {
+      const run = setupRun();
+      try {
+        yield* seedRunCreated(run.runDirectory);
+        const fake = fakeRoleHost({
+          sessionId: 'session-1',
+          ownershipToken: 'owner-1',
+          generation: 1,
+          initialSequence: 0,
+          observeResponses: [
+            settledObservation(1, REPAIR_NARRATIVE, { schemaVersion: 1, outcome: 'needs_repair' }),
+            settledObservation(2, REPAIR_NARRATIVE, { schemaVersion: 1, outcome: 'still_wrong' }),
+            settledObservation(3, REPAIR_NARRATIVE, REPAIR_VALID_CONTROL),
+          ],
+        });
+        const result = yield* startOrResumeRoleTurn({
+          ...baseTurnOptions(run.runDirectory),
+          controlRepair: repairPolicy(2),
+        }).pipe(Effect.provide(Layer.mergeAll(RunHistoryLive, fake.layer)));
+
+        expect(result.controlValid).toBe(true);
+        expect(result.repairsPerformed).toBe(2);
+        expect(fake.calls).toEqual([
+          'create',
+          'submit',
+          'observe',
+          'submit',
+          'observe',
+          'submit',
+          'observe',
+        ]);
+        expect(yield* readControlRepairs(run.runDirectory)).toHaveLength(2);
+      } finally {
+        run.cleanup();
+      }
+    }),
+  );
+
+  it.effect('fails closed when a repair changes or empties the settled narrative', () =>
+    Effect.gen(function* () {
+      const changedRun = setupRun();
+      try {
+        yield* seedRunCreated(changedRun.runDirectory);
+        const fake = fakeRoleHost({
+          sessionId: 'session-1',
+          ownershipToken: 'owner-1',
+          generation: 1,
+          initialSequence: 0,
+          observeResponses: [
+            settledObservation(1, REPAIR_NARRATIVE, REPAIR_INVALID_CONTROL),
+            settledObservation(2, '# Rewritten', REPAIR_VALID_CONTROL),
+          ],
+        });
+        const error = yield* startOrResumeRoleTurn({
+          ...baseTurnOptions(changedRun.runDirectory),
+          controlRepair: repairPolicy(1),
+        }).pipe(Effect.provide(Layer.mergeAll(RunHistoryLive, fake.layer)), Effect.flip);
+        expect(error).toBeInstanceOf(RoleConversationError);
+        if (error instanceof RoleConversationError) {
+          expect(error.reason).toBe('narrative-changed');
+        }
+        const repairs = yield* readControlRepairs(changedRun.runDirectory);
+        expect(repairs).toHaveLength(1);
+        expect(repairs[0]?.observation).toBeNull();
+      } finally {
+        changedRun.cleanup();
+      }
+
+      const emptyRun = setupRun();
+      try {
+        yield* seedRunCreated(emptyRun.runDirectory);
+        const fake = fakeRoleHost({
+          sessionId: 'session-1',
+          ownershipToken: 'owner-1',
+          generation: 1,
+          initialSequence: 0,
+          observeResponses: [
+            settledObservation(1, REPAIR_NARRATIVE, REPAIR_INVALID_CONTROL),
+            settledObservation(2, '   ', REPAIR_VALID_CONTROL),
+          ],
+        });
+        const error = yield* startOrResumeRoleTurn({
+          ...baseTurnOptions(emptyRun.runDirectory),
+          controlRepair: repairPolicy(1),
+        }).pipe(Effect.provide(Layer.mergeAll(RunHistoryLive, fake.layer)), Effect.flip);
+        expect(error).toBeInstanceOf(RoleConversationError);
+        if (error instanceof RoleConversationError) {
+          expect(error.reason).toBe('empty-narrative');
+        }
+      } finally {
+        emptyRun.cleanup();
+      }
+    }),
+  );
+
+  it.effect('fails closed on a regressed repair sequence or an ambiguous repair submission', () =>
+    Effect.gen(function* () {
+      const regressionRun = setupRun();
+      try {
+        yield* seedRunCreated(regressionRun.runDirectory);
+        const fake = fakeRoleHost({
+          sessionId: 'session-1',
+          ownershipToken: 'owner-1',
+          generation: 1,
+          initialSequence: 0,
+          observeResponses: [
+            settledObservation(1, REPAIR_NARRATIVE, REPAIR_INVALID_CONTROL),
+            settledObservation(1, REPAIR_NARRATIVE, REPAIR_VALID_CONTROL),
+          ],
+        });
+        const error = yield* startOrResumeRoleTurn({
+          ...baseTurnOptions(regressionRun.runDirectory),
+          controlRepair: repairPolicy(1),
+        }).pipe(Effect.provide(Layer.mergeAll(RunHistoryLive, fake.layer)), Effect.flip);
+        expect(error).toBeInstanceOf(RoleConversationError);
+        if (error instanceof RoleConversationError) {
+          expect(error.reason).toBe('sequence-regression');
+        }
+      } finally {
+        regressionRun.cleanup();
+      }
+
+      const ambiguousRun = setupRun();
+      try {
+        yield* seedRunCreated(ambiguousRun.runDirectory);
+        const fake = fakeRoleHost({
+          sessionId: 'session-1',
+          ownershipToken: 'owner-1',
+          generation: 1,
+          initialSequence: 0,
+          observeResponses: [settledObservation(1, REPAIR_NARRATIVE, REPAIR_INVALID_CONTROL)],
+          failSubmitOn: 2,
+        });
+        const error = yield* startOrResumeRoleTurn({
+          ...baseTurnOptions(ambiguousRun.runDirectory),
+          controlRepair: repairPolicy(1),
+        }).pipe(Effect.provide(Layer.mergeAll(RunHistoryLive, fake.layer)), Effect.flip);
+        expect(error).toBeInstanceOf(RoleConversationError);
+        if (error instanceof RoleConversationError) {
+          expect(error.reason).toBe('ambiguous-submission');
+        }
+        const repairs = yield* readControlRepairs(ambiguousRun.runDirectory);
+        expect(repairs).toHaveLength(1);
+        expect(repairs[0]?.submission).toBeNull();
+        expect(repairs[0]?.idempotencyKey.length).toBeGreaterThan(0);
+      } finally {
+        ambiguousRun.cleanup();
+      }
+    }),
+  );
+
+  it.effect('resumes a requested repair by submitting once and observing the repaired turn', () =>
+    Effect.gen(function* () {
+      const run = setupRun();
+      try {
+        const narrative = '# Result';
+        yield* seedEvents(run.runDirectory, [
+          RUN_CREATED_DRAFT,
+          SESSION_CREATED_DRAFT,
+          SUBMISSION_REQUESTED_DRAFT,
+          SUBMISSION_STARTED_DRAFT,
+          SETTLED_OBSERVED_DRAFT,
+          {
+            type: 'role-control-rejected',
+            payload: {
+              sessionId: 'session-1',
+              generation: 1,
+              sequence: 1,
+              narrativeHash: sha256(narrative),
+              controlHash: 'a'.repeat(64),
+              problem: 'invalid envelope',
+            },
+          },
+          {
+            type: 'role-control-repair-requested',
+            payload: {
+              sessionId: 'session-1',
+              generation: 1,
+              idempotencyKey: 'repair-key-1',
+              promptHash: 'b'.repeat(64),
+              baselineSequence: 1,
+              problem: 'invalid envelope',
+            },
+          },
+        ]);
+        const fake = fakeRoleHost({
+          sessionId: 'session-1',
+          ownershipToken: 'owner-1',
+          generation: 1,
+          initialSequence: 0,
+          observeResponses: [settledObservation(2, narrative, REPAIR_VALID_CONTROL)],
+        });
+        const result = yield* startOrResumeRoleTurn({
+          ...baseTurnOptions(run.runDirectory),
+          controlRepair: repairPolicy(1),
+        }).pipe(Effect.provide(Layer.mergeAll(RunHistoryLive, fake.layer)));
+
+        expect(result.controlValid).toBe(true);
+        expect(result.repairsPerformed).toBe(1);
+        expect(fake.calls).toEqual(['submit', 'observe']);
+        expect(fake.submitKeys).toEqual(['repair-key-1']);
+        const repairs = yield* readControlRepairs(run.runDirectory);
+        expect(repairs).toHaveLength(1);
+        expect(repairs[0]?.observation?.status).toBe('settled');
+      } finally {
+        run.cleanup();
+      }
+    }),
+  );
+
+  it.effect('resumes a started repair without resubmitting the prompt', () =>
+    Effect.gen(function* () {
+      const run = setupRun();
+      try {
+        const narrative = '# Result';
+        yield* seedEvents(run.runDirectory, [
+          RUN_CREATED_DRAFT,
+          SESSION_CREATED_DRAFT,
+          SUBMISSION_REQUESTED_DRAFT,
+          SUBMISSION_STARTED_DRAFT,
+          SETTLED_OBSERVED_DRAFT,
+          {
+            type: 'role-control-rejected',
+            payload: {
+              sessionId: 'session-1',
+              generation: 1,
+              sequence: 1,
+              narrativeHash: sha256(narrative),
+              controlHash: 'a'.repeat(64),
+              problem: 'invalid envelope',
+            },
+          },
+          {
+            type: 'role-control-repair-requested',
+            payload: {
+              sessionId: 'session-1',
+              generation: 1,
+              idempotencyKey: 'repair-key-1',
+              promptHash: 'b'.repeat(64),
+              baselineSequence: 1,
+              problem: 'invalid envelope',
+            },
+          },
+          {
+            type: 'role-control-repair-started',
+            payload: {
+              sessionId: 'session-1',
+              generation: 1,
+              idempotencyKey: 'repair-key-1',
+              submission: 'accepted',
+            },
+          },
+        ]);
+        const fake = fakeRoleHost({
+          sessionId: 'session-1',
+          ownershipToken: 'owner-1',
+          generation: 1,
+          initialSequence: 0,
+          observeResponses: [settledObservation(2, narrative, REPAIR_VALID_CONTROL)],
+        });
+        const result = yield* startOrResumeRoleTurn({
+          ...baseTurnOptions(run.runDirectory),
+          controlRepair: repairPolicy(1),
+        }).pipe(Effect.provide(Layer.mergeAll(RunHistoryLive, fake.layer)));
+
+        expect(result.controlValid).toBe(true);
+        expect(result.repairsPerformed).toBe(1);
+        expect(fake.calls).toEqual(['observe']);
+        expect(fake.submitKeys).toEqual([]);
+      } finally {
+        run.cleanup();
+      }
+    }),
+  );
+});
+
+describe('control repair history replay', () => {
+  const narrative = '# Result';
+
+  const rejectionDraft: RunEventDraft = {
+    type: 'role-control-rejected',
+    payload: {
+      sessionId: 'session-1',
+      generation: 1,
+      sequence: 1,
+      narrativeHash: sha256(narrative),
+      controlHash: 'a'.repeat(64),
+      problem: 'invalid envelope',
+    },
+  };
+
+  const requestedDraft: RunEventDraft = {
+    type: 'role-control-repair-requested',
+    payload: {
+      sessionId: 'session-1',
+      generation: 1,
+      idempotencyKey: 'key-2',
+      promptHash: 'b'.repeat(64),
+      baselineSequence: 1,
+      problem: 'invalid envelope',
+    },
+  };
+
+  const startedDraft: RunEventDraft = {
+    type: 'role-control-repair-started',
+    payload: {
+      sessionId: 'session-1',
+      generation: 1,
+      idempotencyKey: 'key-2',
+      submission: 'accepted',
+    },
+  };
+
+  const repairedObservedDraft = (text: string): RunEventDraft => ({
+    type: 'role-session-observed',
+    payload: {
+      sessionId: 'session-1',
+      generation: 1,
+      status: 'settled',
+      sequence: 2,
+      eventCount: 1,
+      narrative: text,
+      control: { schemaVersion: 1, outcome: 'implemented' },
+    },
+  });
+
+  it('derives durable repair evidence from a valid chain', () => {
+    const verification = verifyRunHistoryEvents(
+      buildRoleHistory([
+        RUN_CREATED_DRAFT,
+        SESSION_CREATED_DRAFT,
+        SUBMISSION_REQUESTED_DRAFT,
+        SUBMISSION_STARTED_DRAFT,
+        SETTLED_OBSERVED_DRAFT,
+        rejectionDraft,
+        requestedDraft,
+        startedDraft,
+        repairedObservedDraft(narrative),
+      ]),
+      RUN_ID,
+    );
+    expect(verification.ok).toBe(true);
+    if (verification.ok) {
+      expect(verification.derived.roleControlRepairs).toHaveLength(1);
+      expect(verification.derived.roleControlRepairs[0]?.submission).toBe('accepted');
+      expect(verification.derived.roleControlRepairs[0]?.observation?.status).toBe('settled');
+      expect(verification.derived.roleSessions[0]?.lastObservation?.sequence).toBe(2);
+    }
+  });
+
+  it('rejects a repair that changes the settled narrative', () => {
+    const verification = verifyRunHistoryEvents(
+      buildRoleHistory([
+        RUN_CREATED_DRAFT,
+        SESSION_CREATED_DRAFT,
+        SUBMISSION_REQUESTED_DRAFT,
+        SUBMISSION_STARTED_DRAFT,
+        SETTLED_OBSERVED_DRAFT,
+        rejectionDraft,
+        requestedDraft,
+        startedDraft,
+        repairedObservedDraft('# Changed'),
+      ]),
+      RUN_ID,
+    );
+    expect(verification.ok).toBe(false);
+    if (!verification.ok) {
+      expect(verification.problem).toContain('changed the settled narrative');
+    }
+  });
+
+  it('rejects a duplicate rejection and a repair without a rejection', () => {
+    const duplicate = verifyRunHistoryEvents(
+      buildRoleHistory([
+        RUN_CREATED_DRAFT,
+        SESSION_CREATED_DRAFT,
+        SUBMISSION_REQUESTED_DRAFT,
+        SUBMISSION_STARTED_DRAFT,
+        SETTLED_OBSERVED_DRAFT,
+        rejectionDraft,
+        rejectionDraft,
+      ]),
+      RUN_ID,
+    );
+    expect(duplicate.ok).toBe(false);
+    if (!duplicate.ok) {
+      expect(duplicate.problem).toContain('already pending');
+    }
+
+    const orphan = verifyRunHistoryEvents(
+      buildRoleHistory([
+        RUN_CREATED_DRAFT,
+        SESSION_CREATED_DRAFT,
+        SUBMISSION_REQUESTED_DRAFT,
+        SUBMISSION_STARTED_DRAFT,
+        SETTLED_OBSERVED_DRAFT,
+        requestedDraft,
+      ]),
+      RUN_ID,
+    );
+    expect(orphan.ok).toBe(false);
+    if (!orphan.ok) {
+      expect(orphan.problem).toContain('without a recorded rejection');
+    }
+  });
 });

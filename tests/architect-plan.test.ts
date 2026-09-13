@@ -8,8 +8,10 @@ import {
   ArchitectPlanRejected,
   acceptArchitectPlan,
   admitArchitectPlan,
+  resumeArchitectPlan,
+  validateArchitectPlanControl,
 } from '../src/application/architect-plan/index.js';
-import { RunGit } from '../src/application/git-provisioning/index.js';
+import { RunGit, RunWorkspaceBlocked } from '../src/application/git-provisioning/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../src/application/run-history/index.js';
 import {
   IllegalWorkflowTransition,
@@ -157,6 +159,15 @@ const CLEAN_IMPLEMENTATION: ImplementationObservation = {
   changedFiles: ['src/implementation.ts'],
 };
 
+const SOURCE_IDENTICAL: ImplementationObservation = {
+  workspaceExists: true,
+  currentBranch: TASK_BRANCH,
+  headCommit: FROZEN_COMMIT,
+  clean: true,
+  baseIsAncestor: true,
+  changedFiles: [],
+};
+
 function readPlan(runDirectory: string) {
   return readVerifiedRunHistory({
     runDirectory,
@@ -217,6 +228,13 @@ describe('architect plan control contract', () => {
     for (const invalid of invalidControls) {
       expect(decodeArchitectPlanControl(invalid).ok, JSON.stringify(invalid)).toBe(false);
     }
+  });
+
+  it('validates the envelope for same-session control repair', () => {
+    expect(validateArchitectPlanControl(PLAN_READY)).toEqual({ ok: true, problem: '' });
+    const invalid = validateArchitectPlanControl({ schemaVersion: 1, outcome: 'maybe' });
+    expect(invalid.ok).toBe(false);
+    expect(invalid.problem.length).toBeGreaterThan(0);
   });
 
   it('labels criteria in order without paraphrasing the operator', () => {
@@ -492,6 +510,88 @@ describe('architect plan routing', () => {
     }),
   );
 
+  it.effect('sends a no-change plan to verifying as a Git-derived source-identical candidate', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* seedPlanning(fixture);
+        const admission = yield* admitArchitectPlan({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          control: {
+            schemaVersion: 1,
+            outcome: 'no_change_candidate',
+            acceptanceCriteria: ['the source already satisfies the request'],
+            runtimeValidation: 'not_required',
+          },
+          controlRepairsRemaining: 1,
+          retriesRemaining: 1,
+        }).pipe(Effect.provide(observingGit(SOURCE_IDENTICAL)), Effect.provide(LiveStore));
+        expect(admission.outcome).toBe('admitted');
+        if (admission.outcome === 'admitted') {
+          expect(admission.transition.workflowState).toBe('verifying');
+        }
+        const history = yield* readVerifiedRunHistory({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          createIfMissing: false,
+        }).pipe(Effect.provide(RunHistoryLive));
+        expect(history.derived.state).toBe('verifying');
+        expect(history.derived.implementation).toMatchObject({
+          baseCommit: FROZEN_COMMIT,
+          commit: null,
+          noChangeCandidate: true,
+          changedFiles: [],
+        });
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('refuses an Architect no-change candidate on a dirty or changed branch', () =>
+    Effect.gen(function* () {
+      for (const observation of [
+        { ...SOURCE_IDENTICAL, clean: false },
+        { ...CLEAN_IMPLEMENTATION },
+        { ...SOURCE_IDENTICAL, currentBranch: 'other-branch' },
+      ] satisfies ReadonlyArray<ImplementationObservation>) {
+        const fixture = setupFixture();
+        try {
+          yield* seedPlanning(fixture);
+          const error = yield* admitArchitectPlan({
+            runDirectory: fixture.runDirectory,
+            runId: RUN_ID,
+            control: {
+              schemaVersion: 1,
+              outcome: 'no_change_candidate',
+              acceptanceCriteria: ['the source already satisfies the request'],
+              runtimeValidation: 'not_required',
+            },
+            controlRepairsRemaining: 1,
+            retriesRemaining: 1,
+          }).pipe(
+            Effect.provide(observingGit(observation)),
+            Effect.provide(LiveStore),
+            Effect.flip,
+          );
+          expect(error).toBeInstanceOf(RunWorkspaceBlocked);
+          const history = yield* readVerifiedRunHistory({
+            runDirectory: fixture.runDirectory,
+            runId: RUN_ID,
+            createIfMissing: false,
+          }).pipe(Effect.provide(RunHistoryLive));
+          expect(history.derived.implementation).toBeNull();
+          expect(history.derived.state).toBe('planning');
+        } finally {
+          fixture.cleanup();
+        }
+      }
+    }),
+  );
+});
+
+describe('architect no-change candidate provenance', () => {
   it.effect('sends a plan that does not require runtime validation straight to Reviewer', () =>
     Effect.gen(function* () {
       const fixture = setupFixture();
@@ -544,6 +644,112 @@ describe('architect plan routing', () => {
           },
         }).pipe(Effect.provide(observingGit(CLEAN_IMPLEMENTATION)), Effect.provide(LiveStore));
         expect(reviewing.workflowState).toBe('reviewing');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+});
+
+describe('architect plan resume routing', () => {
+  it.effect('routes an accepted plan after an interruption without accepting a second one', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* seedPlanning(fixture);
+        yield* acceptArchitectPlan({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          control: PLAN_READY,
+          controlRepairsRemaining: 1,
+          retriesRemaining: 1,
+          repairReason: 'repair',
+          retryReason: 'retry',
+        }).pipe(Effect.provide(LiveStore));
+
+        const resumed = yield* resumeArchitectPlan({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+        }).pipe(Effect.provide(observingGit(CLEAN_IMPLEMENTATION)), Effect.provide(LiveStore));
+        expect(resumed.outcome).toBe('admitted');
+        if (resumed.outcome === 'admitted') {
+          expect(resumed.transition.workflowState).toBe('coding');
+        }
+        const history = yield* readVerifiedRunHistory({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          createIfMissing: false,
+        }).pipe(Effect.provide(RunHistoryLive));
+        expect(history.derived.state).toBe('coding');
+        expect(history.events.filter((event) => event.type === 'plan-accepted')).toHaveLength(1);
+        expect(history.derived.roleSessions).toHaveLength(0);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('records a missing no-change candidate and routes on resume', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* seedPlanning(fixture);
+        yield* acceptArchitectPlan({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          control: {
+            schemaVersion: 1,
+            outcome: 'no_change_candidate',
+            acceptanceCriteria: ['nothing to change'],
+            runtimeValidation: 'not_required',
+          },
+          controlRepairsRemaining: 1,
+          retriesRemaining: 1,
+          repairReason: 'repair',
+          retryReason: 'retry',
+        }).pipe(Effect.provide(LiveStore));
+
+        const resumed = yield* resumeArchitectPlan({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+        }).pipe(Effect.provide(observingGit(SOURCE_IDENTICAL)), Effect.provide(LiveStore));
+        expect(resumed.outcome).toBe('admitted');
+        if (resumed.outcome === 'admitted') {
+          expect(resumed.transition.workflowState).toBe('verifying');
+        }
+        const history = yield* readVerifiedRunHistory({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          createIfMissing: false,
+        }).pipe(Effect.provide(RunHistoryLive));
+        expect(history.derived.state).toBe('verifying');
+        expect(history.derived.implementation).toMatchObject({
+          commit: null,
+          noChangeCandidate: true,
+        });
+        expect(history.events.filter((event) => event.type === 'plan-accepted')).toHaveLength(1);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('does nothing when no durable accepted plan exists', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* seedPlanning(fixture);
+        const resumed = yield* resumeArchitectPlan({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+        }).pipe(Effect.provide(observingGit(CLEAN_IMPLEMENTATION)), Effect.provide(LiveStore));
+        expect(resumed.outcome).toBe('none');
+        const history = yield* readVerifiedRunHistory({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          createIfMissing: false,
+        }).pipe(Effect.provide(RunHistoryLive));
+        expect(history.derived.state).toBe('planning');
       } finally {
         fixture.cleanup();
       }

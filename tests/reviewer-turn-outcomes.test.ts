@@ -190,12 +190,14 @@ function handle(
   runDirectory: string,
   control: Schema.Json,
   overrides: Partial<ReviewerEvidenceAssessment> = {},
+  narrative = '# Reviewer findings\n\nClose every medium finding.\n',
 ) {
   return handleReviewerTurn({
     runDirectory,
     runId: RUN_ID,
     control,
     assessment: assessment(overrides),
+    narrative,
     correctionReason: 'correction requested',
     blockedReason: 'reviewer reported a problem',
   }).pipe(Effect.provide(Live));
@@ -295,6 +297,134 @@ describe('Reviewer closed outcomes', () => {
     }),
   );
 
+  it.effect('approves a verified no-change candidate with source-bound checks', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture('no-change-approved');
+      try {
+        yield* seedReviewing(fixture.runDirectory, { runtimeValidationRequired: false });
+        const disposition = yield* handle(
+          fixture.runDirectory,
+          { schemaVersion: 1, outcome: 'approved' },
+          {
+            noChangeCandidate: true,
+            reviewableCommit: null,
+            checksPassed: true,
+            evidenceCommitMatches: true,
+          },
+        );
+        expect(disposition).toEqual({ kind: 'approved-no-change' });
+        const after = yield* history(fixture.runDirectory);
+        expect(after.derived.state).toBe('completed_no_change');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('cannot approve a no-change candidate without passed source-bound checks', () =>
+    Effect.gen(function* () {
+      const failedChecks = setupFixture('no-change-failed-checks');
+      try {
+        yield* seedReviewing(failedChecks.runDirectory, { runtimeValidationRequired: false });
+        const disposition = yield* handle(
+          failedChecks.runDirectory,
+          { schemaVersion: 1, outcome: 'approved' },
+          {
+            noChangeCandidate: true,
+            reviewableCommit: null,
+            checksPassed: false,
+            evidenceCommitMatches: true,
+          },
+        );
+        expect(disposition.kind).toBe('blocked');
+        const after = yield* history(failedChecks.runDirectory);
+        expect(after.derived.state).toBe('blocked');
+      } finally {
+        failedChecks.cleanup();
+      }
+
+      const missingEvidence = setupFixture('no-change-missing-evidence');
+      try {
+        yield* seedReviewing(missingEvidence.runDirectory, { runtimeValidationRequired: false });
+        const disposition = yield* handle(
+          missingEvidence.runDirectory,
+          { schemaVersion: 1, outcome: 'approved' },
+          {
+            noChangeCandidate: true,
+            reviewableCommit: null,
+            checksPassed: true,
+            evidenceCommitMatches: false,
+          },
+        );
+        expect(disposition.kind).toBe('blocked');
+        const after = yield* history(missingEvidence.runDirectory);
+        expect(after.derived.state).toBe('blocked');
+      } finally {
+        missingEvidence.cleanup();
+      }
+    }),
+  );
+
+  it.effect('routes a no-change changes_requested to coding without a correction round', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture('no-change-implementation');
+      try {
+        yield* seedReviewing(fixture.runDirectory, { runtimeValidationRequired: false });
+        const disposition = yield* handle(
+          fixture.runDirectory,
+          { schemaVersion: 1, outcome: 'changes_requested' },
+          {
+            noChangeCandidate: true,
+            reviewableCommit: null,
+            correctionRoundsRemaining: 0,
+          },
+        );
+        expect(disposition).toEqual({ kind: 'implementation-requested' });
+        const after = yield* history(fixture.runDirectory);
+        expect(after.derived.state).toBe('coding');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('blocks an inapplicable human_decision_required on a no-change candidate', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture('no-change-human');
+      try {
+        yield* seedReviewing(fixture.runDirectory, { runtimeValidationRequired: false });
+        const disposition = yield* handle(
+          fixture.runDirectory,
+          {
+            schemaVersion: 1,
+            outcome: 'human_decision_required',
+            decision: {
+              question: 'Should the stricter bound remain?',
+              options: [
+                { label: 'Keep it', action: 'accept' },
+                { label: 'Relax it', action: 'correct' },
+              ],
+            },
+          },
+          {
+            noChangeCandidate: true,
+            reviewableCommit: null,
+            publicationEligible: true,
+          },
+        );
+        expect(disposition.kind).toBe('blocked');
+        if (disposition.kind !== 'blocked') {
+          throw new Error('Expected the no-change decision to block.');
+        }
+        expect(disposition.reason).toContain('no-change candidate');
+        const after = yield* history(fixture.runDirectory);
+        expect(after.derived.state).toBe('blocked');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
   it.effect('changes_requested is bounded by the remaining correction round', () =>
     Effect.gen(function* () {
       const fixture = setupFixture('changes');
@@ -314,6 +444,36 @@ describe('Reviewer closed outcomes', () => {
           { correctionRoundsRemaining: 0 },
         );
         expect(noBudget.kind).toBe('control-invalid');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('records a durable blocking correction brief before entering correcting', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture('changes-finding');
+      const narrative = '# Reviewer findings\n\n1. Handle the empty state.\n';
+      try {
+        yield* seedReviewing(fixture.runDirectory, { runtimeValidationRequired: false });
+        const disposition = yield* handle(
+          fixture.runDirectory,
+          { schemaVersion: 1, outcome: 'changes_requested' },
+          {},
+          narrative,
+        );
+        expect(disposition).toEqual({ kind: 'changes-requested' });
+        const after = yield* history(fixture.runDirectory);
+        expect(after.derived.state).toBe('correcting');
+        expect(after.derived.findings).toHaveLength(1);
+        const finding = after.derived.findings[0]!;
+        expect(finding.source).toBe('reviewer-changes-requested');
+        expect(finding.blocking).toBe(true);
+        expect(finding.commit).toBe(IMPLEMENTED_COMMIT);
+        expect(finding.detail).toBe(narrative);
+        expect(finding.evidence).toContain(
+          `reviewer changes_requested for commit ${IMPLEMENTED_COMMIT}`,
+        );
       } finally {
         fixture.cleanup();
       }

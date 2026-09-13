@@ -22,6 +22,18 @@ export const CoderTurnControlSchema = Schema.Struct({
 
 export type CoderTurnControl = (typeof CoderTurnControlSchema)['Type'];
 
+export function validateCoderTurnControl(control: Schema.Json): {
+  readonly ok: boolean;
+  readonly problem: string;
+} {
+  const decoded = Schema.decodeUnknownResult(CoderTurnControlSchema, {
+    onExcessProperty: 'error',
+  })(control);
+  return Result.isSuccess(decoded)
+    ? { ok: true, problem: '' }
+    : { ok: false, problem: decoded.failure.message };
+}
+
 export class CoderTurnRejected extends Schema.TaggedError<CoderTurnRejected>()(
   'CoderTurnRejected',
   {

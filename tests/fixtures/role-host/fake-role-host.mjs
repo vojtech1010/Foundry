@@ -88,6 +88,14 @@ function submitAlreadyAccepted() {
   return submits.length > 1;
 }
 
+function submitCount() {
+  if (logPath.length === 0) {
+    return 0;
+  }
+  const lines = readFileSync(logPath, 'utf8').split('\n');
+  return lines.filter((line) => line.includes('"operation":"submit"')).length;
+}
+
 function writeDocument(document) {
   process.stdout.write(`${JSON.stringify(document)}\n`);
 }
@@ -172,6 +180,29 @@ switch (operation) {
         narrative: 'done',
         control: 'not-an-object',
       });
+      break;
+    }
+    if (scenario === 'repair') {
+      const narrative = '# Role result\n\nThe turn settled.';
+      if (submitCount() <= 1) {
+        writeDocument({
+          schemaVersion: 1,
+          status: 'settled',
+          sequence: 1,
+          events: [],
+          narrative,
+          control: { schemaVersion: 1, outcome: 'needs_repair' },
+        });
+      } else {
+        writeDocument({
+          schemaVersion: 1,
+          status: 'settled',
+          sequence: 2,
+          events: [],
+          narrative,
+          control: { schemaVersion: 1, outcome: 'implemented' },
+        });
+      }
       break;
     }
     if (scenario === 'oversized') {

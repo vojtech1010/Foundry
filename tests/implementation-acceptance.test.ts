@@ -279,9 +279,80 @@ describe('implementation acceptance provenance', () => {
 
         const history = yield* readHistory(fixture);
         expect(history.derived.implementation).toMatchObject({
+          taskBranch: TASK_BRANCH,
+          baseCommit: FROZEN_COMMIT,
           commit: null,
           noChangeCandidate: true,
           changedFiles: [],
+        });
+        expect(history.derived.state).toBe('verifying');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('refuses a no-change claim from a dirty branch', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* seedCoding(fixture);
+        yield* transition(fixture, {
+          route: 'run-created',
+          provisioning: { source: true, lease: true, storage: true, worktree: true },
+        });
+        yield* appendAcceptedPlan(fixture);
+        yield* transition(fixture, { route: 'plan-accepted' });
+
+        const error = yield* transition(
+          fixture,
+          {
+            route: 'implementation-ready',
+            branchClean: true,
+            candidateCommit: null,
+            noChangeCandidateValidated: true,
+          },
+          { ...CLEAN, headCommit: FROZEN_COMMIT, changedFiles: [], clean: false },
+        ).pipe(Effect.flip);
+        expect(error).toBeInstanceOf(IllegalWorkflowTransition);
+
+        const history = yield* readHistory(fixture);
+        expect(history.derived.implementation).toBeNull();
+        expect(history.derived.state).toBe('coding');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('does not treat a no-change claim on a changed branch as source-identical', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* seedCoding(fixture);
+        yield* transition(fixture, {
+          route: 'run-created',
+          provisioning: { source: true, lease: true, storage: true, worktree: true },
+        });
+        yield* appendAcceptedPlan(fixture);
+        yield* transition(fixture, { route: 'plan-accepted' });
+
+        yield* transition(
+          fixture,
+          {
+            route: 'implementation-ready',
+            branchClean: true,
+            candidateCommit: null,
+            noChangeCandidateValidated: true,
+          },
+          { ...CLEAN, headCommit: IMPLEMENTED_COMMIT, changedFiles: ['src/implementation.ts'] },
+        );
+
+        const history = yield* readHistory(fixture);
+        expect(history.derived.implementation).toMatchObject({
+          baseCommit: FROZEN_COMMIT,
+          commit: IMPLEMENTED_COMMIT,
+          noChangeCandidate: false,
         });
       } finally {
         fixture.cleanup();
