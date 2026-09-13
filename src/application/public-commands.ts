@@ -44,6 +44,7 @@ import type {
   RunStateUnavailable,
 } from './run-identity/index.js';
 import type { RepositoryHostIdentity, RepositoryLeaseStore } from './repository-lease/index.js';
+import type { RoleHostCapabilityError, RoleHostLauncher } from './role-conversations/index.js';
 
 export interface StubCommandReport {
   readonly availability: typeof NOT_AVAILABLE;
@@ -67,6 +68,7 @@ export type PublicCommandError =
   | RunIdentityError
   | RunStateUnavailable
   | RunWorkspaceBlocked
+  | RoleHostCapabilityError
   | RunHistoryIntegrityError
   | RunHistoryStorageError
   | RunHistoryConflict;
@@ -97,6 +99,7 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
   | RunHistoryStorage
   | RepositoryLeaseStore
   | RepositoryHostIdentity
+  | RoleHostLauncher
   | RunGit
   | GuidanceGit
   | GuidanceSnapshotStore

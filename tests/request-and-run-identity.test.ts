@@ -74,6 +74,7 @@ import { GuidanceLive } from '../src/platform/guidance.js';
 import { RepositoryLeaseLive } from '../src/platform/repository-lease.js';
 import { RunHistoryLive } from '../src/platform/run-history.js';
 import { RunIdentityLive } from '../src/platform/run-identity.js';
+import { capableRoleHostLauncher } from './fixtures/role-host/role-host-launcher.js';
 
 import type { WorkflowState, WorkflowTransitionRequest } from '../src/domain/workflow.js';
 import type { RunProgressReport } from '../src/application/run-identity/index.js';
@@ -215,6 +216,7 @@ const LiveFilesAndStore = Layer.mergeAll(
   RunHistoryLive,
   RepositoryLeaseLive,
   GuidanceLive,
+  capableRoleHostLauncher(),
 );
 
 function unusedRunGit(name: string) {
@@ -277,6 +279,7 @@ const CliLayer = Layer.mergeAll(
   RepositoryLeaseLive,
   RunGitLive,
   GuidanceLive,
+  capableRoleHostLauncher(),
 );
 
 function recordWithLive(options: {
@@ -751,6 +754,7 @@ describe('workflow state through run storage', () => {
           RunIdentityLive,
           Layer.succeed(RunHistoryStorage, failingHistory),
           RepositoryLeaseLive,
+          capableRoleHostLauncher(),
         );
         const error = yield* recordRunIdentity({
           configArg: fixture.configPath,

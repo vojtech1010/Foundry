@@ -2,8 +2,13 @@ import { spawn } from 'node:child_process';
 
 import { Duration, Effect, Layer, Schema } from 'effect';
 
-import { RoleHost, RoleHostOperationalError } from '../application/role-conversations/index.js';
 import {
+  RoleHost,
+  RoleHostLauncher,
+  RoleHostOperationalError,
+} from '../application/role-conversations/index.js';
+import {
+  RoleHostCapabilitiesResponseSchema,
   RoleHostCreateResponseSchema,
   RoleHostObserveResponseSchema,
   RoleHostStopResponseSchema,
@@ -11,6 +16,8 @@ import {
 } from '../domain/role-host.js';
 
 import type {
+  RoleHostCapabilitiesRequest,
+  RoleHostCapabilitiesResponse,
   RoleHostCreateRequest,
   RoleHostCreateResponse,
   RoleHostObserveRequest,
@@ -205,6 +212,15 @@ export const roleHostProcessLayer = (options: RoleHostProcessOptions): Layer.Lay
   Layer.succeed(
     RoleHost,
     RoleHost.of({
+      capabilities: (
+        request: RoleHostCapabilitiesRequest,
+      ): Effect.Effect<RoleHostCapabilitiesResponse, RoleHostOperationalError> =>
+        runOperation(
+          options,
+          'capabilities',
+          JSON.stringify(request),
+          RoleHostCapabilitiesResponseSchema,
+        ),
       create: (
         request: RoleHostCreateRequest,
       ): Effect.Effect<RoleHostCreateResponse, RoleHostOperationalError> =>
@@ -223,3 +239,10 @@ export const roleHostProcessLayer = (options: RoleHostProcessOptions): Layer.Lay
         runOperation(options, 'stop', JSON.stringify(request), RoleHostStopResponseSchema),
     }),
   );
+
+export const RoleHostLauncherLive: Layer.Layer<RoleHostLauncher> = Layer.succeed(
+  RoleHostLauncher,
+  RoleHostLauncher.of({
+    launch: (options) => roleHostProcessLayer(options),
+  }),
+);

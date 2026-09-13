@@ -23,6 +23,9 @@ import { RunIdentityStore } from '../src/application/run-identity/index.js';
 import { EXIT_CODES } from '../src/domain/public-commands.js';
 import { ProjectCommandProcessLive } from '../src/platform/commands.js';
 import { ReadinessFilesLive, ReadinessGitLive } from '../src/platform/readiness.js';
+import { capableRoleHostLauncher } from './fixtures/role-host/role-host-launcher.js';
+
+import type { RoleHostLauncher } from '../src/application/role-conversations/index.js';
 
 import type { ProjectCommandResult } from '../src/application/profile-check/index.js';
 
@@ -165,6 +168,7 @@ interface BuiltProfileWorld {
     | ProjectCommandProcess
     | RunIdentityStore
     | RunHistoryStorage
+    | RoleHostLauncher
   >;
   readonly processCalls: Array<ProcessCall>;
   readonly gitCalls: Array<GitCall>;
@@ -272,8 +276,10 @@ function buildProfileWorld(options: {
       RunHistoryStorage.of({
         readHistoryFiles: (_runDirectory: string) => mustNotTouchRunStorage('readHistoryFiles'),
         commitHistory: (_options) => mustNotTouchRunStorage('commitHistory'),
+        replaceDerivedReports: (_options) => mustNotTouchRunStorage('replaceDerivedReports'),
       }),
     ),
+    capableRoleHostLauncher(),
   );
   return { layer, processCalls, gitCalls, gitState };
 }

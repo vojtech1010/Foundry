@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
+import { RoleHostCapabilityError } from '../src/application/role-conversations/index.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
 import {
   ReadinessError,
@@ -25,6 +26,12 @@ import {
 } from '../src/domain/readiness.js';
 import { EXIT_CODES } from '../src/domain/public-commands.js';
 import { ReadinessFilesLive, ReadinessGitLive } from '../src/platform/readiness.js';
+import {
+  capableRoleHostLauncher,
+  incapableRoleHostLauncher,
+} from './fixtures/role-host/role-host-launcher.js';
+
+import type { RoleHostLauncher } from '../src/application/role-conversations/index.js';
 
 const ReportEnvelopeJson = Schema.fromJsonString(ReportEnvelope);
 
@@ -147,7 +154,9 @@ interface FakeWorld {
 }
 
 interface BuiltWorld {
-  readonly layer: Layer.Layer<ReadinessHost | ReadinessFiles | ReadinessGit>;
+  readonly layer: Layer.Layer<
+    ReadinessHost | ReadinessFiles | ReadinessGit | ProjectCommandProcess | RoleHostLauncher
+  >;
   readonly gitCalls: Array<{ readonly args: ReadonlyArray<string>; readonly cwd: string }>;
 }
 
@@ -194,7 +203,10 @@ const UnusedProcess = Layer.succeed(
   }),
 );
 
-function buildWorld(world: FakeWorld): BuiltWorld {
+function buildWorld(
+  world: FakeWorld,
+  roleHostLayer: Layer.Layer<RoleHostLauncher> = capableRoleHostLauncher(),
+): BuiltWorld {
   const gitCalls: BuiltWorld['gitCalls'] = [];
   const layer = Layer.mergeAll(
     Layer.succeed(
@@ -290,6 +302,7 @@ function buildWorld(world: FakeWorld): BuiltWorld {
       }),
     ),
     UnusedProcess,
+    roleHostLayer,
   );
   return { layer, gitCalls };
 }
@@ -590,7 +603,24 @@ describe('readiness check with fake services', () => {
       expect(data.config.path).toBe(CONFIG_PATH);
       expect(data.storage.path).toBe('/target/.agent');
       expect(data.repository.commit).toBe(COMMIT);
-      expect(Object.keys(data)).toEqual(['readiness', 'host', 'config', 'storage', 'repository']);
+      expect(data.roleHost.protocol).toBe('foundry-role-host-v1');
+      expect(data.roleHost.resumable).toBe(true);
+      expect(data.roleHost.availableRoles).toEqual([
+        'architect',
+        'coder',
+        'lead_coder',
+        'tester',
+        'reviewer',
+      ]);
+      expect(data.roleHost.networkProfiles).toEqual(['network_denied', 'runtime_origin_only']);
+      expect(Object.keys(data)).toEqual([
+        'readiness',
+        'host',
+        'config',
+        'storage',
+        'repository',
+        'roleHost',
+      ]);
       expectNoBranchMutation(built.gitCalls);
     }),
   );
@@ -614,6 +644,11 @@ describe('readiness check with fake services', () => {
       expect(humanResult.stdout).toContain(`data.config.path: ${data.config.path}`);
       expect(humanResult.stdout).toContain(`data.storage.path: ${data.storage.path}`);
       expect(humanResult.stdout).toContain(`data.repository.commit: ${data.repository.commit}`);
+      expect(humanResult.stdout).toContain(`data.roleHost.protocol: ${data.roleHost.protocol}`);
+      expect(humanResult.stdout).toContain(`data.roleHost.resumable: ${data.roleHost.resumable}`);
+      expect(humanResult.stdout).toContain(
+        `data.roleHost.availableRoles: ${data.roleHost.availableRoles.join(' ')}`,
+      );
       expect(humanResult.stdout.endsWith('\n')).toBe(true);
     }),
   );
@@ -635,6 +670,79 @@ describe('readiness check with fake services', () => {
       expect(envelope.error.kind).toBe('invalid_invocation');
       expect(envelope.error.retryable).toBe(false);
       expect(envelope.error.message).toContain('is not clean');
+    }),
+  );
+
+  it.effect('fails clearly when the role host cannot attest sessions or required profiles', () =>
+    Effect.gen(function* () {
+      const incapableCases = [
+        {
+          label: 'non-resumable',
+          launcher: incapableRoleHostLauncher({ resumable: false }),
+          reason: 'not-resumable',
+          fragment: 'resumable',
+        },
+        {
+          label: 'unsupported protocol',
+          launcher: incapableRoleHostLauncher({ protocol: 'foundry-role-host-v0' }),
+          reason: 'unsupported-protocol',
+          fragment: 'foundry-role-host-v0',
+        },
+        {
+          label: 'missing role',
+          launcher: incapableRoleHostLauncher({
+            availableRoles: ['architect', 'coder', 'lead_coder', 'reviewer'],
+          }),
+          reason: 'missing-role',
+          fragment: '"tester"',
+        },
+        {
+          label: 'missing network profile',
+          launcher: incapableRoleHostLauncher({
+            capabilityProfiles: {
+              filesystem: [
+                'read_only_snapshot',
+                'run_owned_worktree',
+                'owned_scratch',
+                'owned_capture_scratch',
+              ],
+              network: ['network_denied'],
+            },
+          }),
+          reason: 'missing-profile',
+          fragment: 'runtime_origin_only',
+        },
+      ];
+
+      for (const testCase of incapableCases) {
+        const built = buildWorld(defaultWorld(), testCase.launcher);
+        const error = yield* checkReadiness({ configArg: CONFIG_ARG, cwd: CONFIG_DIR }).pipe(
+          Effect.provide(built.layer),
+          Effect.flip,
+        );
+        expect(error, testCase.label).toBeInstanceOf(RoleHostCapabilityError);
+        if (!(error instanceof RoleHostCapabilityError)) {
+          throw new Error(`Expected a RoleHostCapabilityError for ${testCase.label}.`);
+        }
+        expect(error.reason, testCase.label).toBe(testCase.reason);
+        expect(error.message, testCase.label).toContain(testCase.fragment);
+      }
+    }),
+  );
+
+  it.effect('maps an incapable role host to a failed report rather than an argument error', () =>
+    Effect.gen(function* () {
+      const built = buildWorld(defaultWorld(), incapableRoleHostLauncher({ resumable: false }));
+      const result = yield* runCli(['doctor', '--config', CONFIG_PATH, '--json']).pipe(
+        Effect.provide(built.layer),
+      );
+
+      expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
+      const envelope = expectDoctorFailure(result.stdout);
+      expect(envelope.command).toBe('doctor');
+      expect(envelope.error.kind).toBe('failed');
+      expect(envelope.error.retryable).toBe(false);
+      expect(envelope.error.message).toContain('resumable');
     }),
   );
 });
@@ -686,7 +794,12 @@ const integrationHost = Layer.succeed(
   }),
 );
 
-const integrationLayer = Layer.mergeAll(integrationHost, ReadinessFilesLive, ReadinessGitLive);
+const integrationLayer = Layer.mergeAll(
+  integrationHost,
+  ReadinessFilesLive,
+  ReadinessGitLive,
+  capableRoleHostLauncher(),
+);
 
 describe('doctor against real temporary git repositories', () => {
   it.effect('succeeds on a clean repository without touching the checkout or creating runs', () =>

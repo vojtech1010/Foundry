@@ -1,16 +1,67 @@
 import { Schema } from 'effect';
 
+import { ROLE_HARNESS_PROTOCOL } from './project-configuration.js';
 import { Identifier } from './run-identity.js';
 
 export const ROLE_HOST_PROTOCOL_VERSION = 1 as const;
 
-export const ROLE_HOST_OPERATIONS = ['create', 'submit', 'observe', 'stop'] as const;
+export const ROLE_HOST_PROTOCOL_NAME = ROLE_HARNESS_PROTOCOL;
+
+export const ROLE_HOST_OPERATIONS = [
+  'capabilities',
+  'create',
+  'submit',
+  'observe',
+  'stop',
+] as const;
 
 export type RoleHostOperation = (typeof ROLE_HOST_OPERATIONS)[number];
 
 export const ROLE_HOST_ROLES = ['architect', 'coder', 'lead_coder', 'tester', 'reviewer'] as const;
 
 export type RoleHostRole = (typeof ROLE_HOST_ROLES)[number];
+
+export const ROLE_HOST_FILESYSTEM_PROFILES = [
+  'read_only_snapshot',
+  'run_owned_worktree',
+  'owned_scratch',
+  'owned_capture_scratch',
+] as const;
+
+export type RoleHostFilesystemProfile = (typeof ROLE_HOST_FILESYSTEM_PROFILES)[number];
+
+export const ROLE_HOST_NETWORK_PROFILES = ['network_denied', 'runtime_origin_only'] as const;
+
+export type RoleHostNetworkProfile = (typeof ROLE_HOST_NETWORK_PROFILES)[number];
+
+export interface RoleHostRoleRequirement {
+  readonly filesystem: ReadonlyArray<RoleHostFilesystemProfile>;
+  readonly network: ReadonlyArray<RoleHostNetworkProfile>;
+}
+
+export const ROLE_HOST_ROLE_REQUIREMENTS: Readonly<Record<RoleHostRole, RoleHostRoleRequirement>> =
+  {
+    architect: {
+      filesystem: ['read_only_snapshot', 'owned_scratch'],
+      network: ['network_denied'],
+    },
+    coder: {
+      filesystem: ['run_owned_worktree', 'owned_scratch'],
+      network: ['network_denied'],
+    },
+    lead_coder: {
+      filesystem: ['run_owned_worktree', 'owned_scratch'],
+      network: ['network_denied'],
+    },
+    tester: {
+      filesystem: ['read_only_snapshot', 'owned_capture_scratch'],
+      network: ['runtime_origin_only'],
+    },
+    reviewer: {
+      filesystem: ['read_only_snapshot', 'owned_scratch'],
+      network: ['network_denied'],
+    },
+  };
 
 export const ROLE_HOST_STATUSES = ['active', 'settled', 'lost'] as const;
 
@@ -159,6 +210,106 @@ export const RoleHostStopResponseSchema = Schema.Struct({
 });
 
 export type RoleHostStopResponse = (typeof RoleHostStopResponseSchema)['Type'];
+
+export const RoleHostCapabilitiesRequestSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(ROLE_HOST_PROTOCOL_VERSION),
+});
+
+export type RoleHostCapabilitiesRequest = (typeof RoleHostCapabilitiesRequestSchema)['Type'];
+
+export const RoleHostCapabilityProfilesSchema = Schema.Struct({
+  filesystem: Schema.Array(Schema.Literals(ROLE_HOST_FILESYSTEM_PROFILES)),
+  network: Schema.Array(Schema.Literals(ROLE_HOST_NETWORK_PROFILES)),
+});
+
+export type RoleHostCapabilityProfiles = (typeof RoleHostCapabilityProfilesSchema)['Type'];
+
+export const RoleHostCapabilitiesResponseSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(ROLE_HOST_PROTOCOL_VERSION),
+  protocol: Schema.NonEmptyString,
+  resumable: Schema.Boolean,
+  availableRoles: Schema.Array(Schema.Literals(ROLE_HOST_ROLES)),
+  capabilityProfiles: RoleHostCapabilityProfilesSchema,
+  adapterVersion: Schema.NonEmptyString,
+});
+
+export type RoleHostCapabilitiesResponse = (typeof RoleHostCapabilitiesResponseSchema)['Type'];
+
+export type RoleHostCapabilityProblemKind =
+  | 'protocol'
+  | 'resumable'
+  | 'role'
+  | 'filesystem-profile'
+  | 'network-profile';
+
+export interface RoleHostCapabilityProblem {
+  readonly kind: RoleHostCapabilityProblemKind;
+  readonly detail: string;
+}
+
+export type RoleHostCapabilityEvaluation =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly problem: RoleHostCapabilityProblem };
+
+export function evaluateRoleHostCapabilities(
+  report: RoleHostCapabilitiesResponse,
+): RoleHostCapabilityEvaluation {
+  if (report.protocol !== ROLE_HOST_PROTOCOL_NAME) {
+    return {
+      ok: false,
+      problem: {
+        kind: 'protocol',
+        detail: `The role host reports protocol "${report.protocol}", but Foundry requires "${ROLE_HOST_PROTOCOL_NAME}".`,
+      },
+    };
+  }
+  if (!report.resumable) {
+    return {
+      ok: false,
+      problem: {
+        kind: 'resumable',
+        detail: 'The role host does not attest resumable sessions.',
+      },
+    };
+  }
+  for (const role of ROLE_HOST_ROLES) {
+    if (!report.availableRoles.includes(role)) {
+      return {
+        ok: false,
+        problem: {
+          kind: 'role',
+          detail: `The role host cannot run the required role "${role}".`,
+        },
+      };
+    }
+  }
+  for (const role of ROLE_HOST_ROLES) {
+    const requirement = ROLE_HOST_ROLE_REQUIREMENTS[role];
+    for (const profile of requirement.filesystem) {
+      if (!report.capabilityProfiles.filesystem.includes(profile)) {
+        return {
+          ok: false,
+          problem: {
+            kind: 'filesystem-profile',
+            detail: `The role host does not enforce the "${profile}" filesystem profile required by role "${role}".`,
+          },
+        };
+      }
+    }
+    for (const profile of requirement.network) {
+      if (!report.capabilityProfiles.network.includes(profile)) {
+        return {
+          ok: false,
+          problem: {
+            kind: 'network-profile',
+            detail: `The role host does not enforce the "${profile}" network profile required by role "${role}".`,
+          },
+        };
+      }
+    }
+  }
+  return { ok: true };
+}
 
 export interface RoleHostSubmissionIntent {
   readonly idempotencyKey: string;

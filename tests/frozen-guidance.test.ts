@@ -42,6 +42,7 @@ import { RunGitLive } from '../src/platform/git-provisioning.js';
 import { GuidanceGitLive, GuidanceSnapshotStoreLive } from '../src/platform/guidance.js';
 import { RunHistoryLive } from '../src/platform/run-history.js';
 import { RunIdentityLive } from '../src/platform/run-identity.js';
+import { capableRoleHostLauncher } from './fixtures/role-host/role-host-launcher.js';
 
 import type { RunEvent, RunEventDraft, RunEventEnvelope } from '../src/domain/run-history.js';
 import type { GuidanceSnapshotManifest } from '../src/domain/guidance.js';
@@ -55,6 +56,7 @@ import type {
 } from '../src/application/repository-lease/index.js';
 import type { RunHistoryStorage } from '../src/application/run-history/index.js';
 import type { RunIdentityStore } from '../src/application/run-identity/index.js';
+import type { RoleHostLauncher } from '../src/application/role-conversations/index.js';
 
 type ApplicationLayer =
   | ReadinessHost
@@ -63,6 +65,7 @@ type ApplicationLayer =
   | RunHistoryStorage
   | RepositoryLeaseStore
   | RepositoryHostIdentity
+  | RoleHostLauncher
   | RunGit
   | GuidanceGit
   | GuidanceSnapshotStore;
@@ -241,6 +244,7 @@ const AppLive = Layer.mergeAll(
   RunGitLive,
   GuidanceGitLive,
   GuidanceSnapshotStoreLive,
+  capableRoleHostLauncher(),
 );
 
 function failingGuidanceGit(): Layer.Layer<GuidanceGit> {
@@ -826,6 +830,7 @@ describe('frozen guidance snapshot', () => {
           RunGitLive,
           GuidanceSnapshotStoreLive,
           failingGuidanceGit(),
+          capableRoleHostLauncher(),
         );
 
         const failed = yield* record(fixture, 'RUN-GUIDE-PREFIX', partialLayer).pipe(Effect.flip);

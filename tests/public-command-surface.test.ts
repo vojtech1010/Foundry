@@ -13,6 +13,7 @@ import {
 } from '../src/application/repository-lease/index.js';
 import { RunHistoryStorage } from '../src/application/run-history/index.js';
 import { RunIdentityStore } from '../src/application/run-identity/index.js';
+import { RoleHostLauncher } from '../src/application/role-conversations/index.js';
 import {
   EXIT_CODES,
   INTERRUPT_EXIT_CODES,
@@ -134,6 +135,14 @@ const UntouchedReadiness = Layer.mergeAll(
       hostIdentity: untouchedReadiness('repositoryLease.hostIdentity'),
       currentProcess: untouchedReadiness('repositoryLease.currentProcess'),
       probeProcess: (_processId: number) => untouchedReadiness('repositoryLease.probeProcess'),
+    }),
+  ),
+  Layer.succeed(
+    RoleHostLauncher,
+    RoleHostLauncher.of({
+      launch: () => {
+        throw new Error('Stub commands must not launch the role host');
+      },
     }),
   ),
 );

@@ -1,12 +1,22 @@
 import { Context, Duration, Effect, Schema } from 'effect';
 import { createHash, randomUUID } from 'node:crypto';
 
-import { ROLE_HOST_PROTOCOL_VERSION, roleHostEventsAreOrdered } from '../../domain/role-host.js';
+import type { Layer } from 'effect';
+
+import {
+  ROLE_HOST_OPERATIONS,
+  ROLE_HOST_PROTOCOL_VERSION,
+  evaluateRoleHostCapabilities,
+  roleHostEventsAreOrdered,
+} from '../../domain/role-host.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../run-history/index.js';
 
 import type { RunHistoryStorage } from '../run-history/index.js';
 import type { RunHistoryError } from '../run-history/index.js';
 import type {
+  RoleHostCapabilitiesRequest,
+  RoleHostCapabilitiesResponse,
+  RoleHostCapabilityProblemKind,
   RoleHostControl,
   RoleHostCreateRequest,
   RoleHostCreateResponse,
@@ -20,12 +30,13 @@ import type {
   RoleHostSubmitRequest,
   RoleHostSubmitResponse,
 } from '../../domain/role-host.js';
+import type { CommandVector, ProjectConfiguration } from '../../domain/project-configuration.js';
 
 export class RoleHostOperationalError extends Schema.TaggedError<RoleHostOperationalError>()(
   'RoleHostOperationalError',
   {
     message: Schema.String,
-    operation: Schema.Literals(['create', 'submit', 'observe', 'stop']),
+    operation: Schema.Literals(ROLE_HOST_OPERATIONS),
   },
 ) {}
 
@@ -53,6 +64,9 @@ export class RoleConversationError extends Schema.TaggedError<RoleConversationEr
 export class RoleHost extends Context.Service<
   RoleHost,
   {
+    readonly capabilities: (
+      request: RoleHostCapabilitiesRequest,
+    ) => Effect.Effect<RoleHostCapabilitiesResponse, RoleHostOperationalError>;
     readonly create: (
       request: RoleHostCreateRequest,
     ) => Effect.Effect<RoleHostCreateResponse, RoleHostOperationalError>;
@@ -67,6 +81,93 @@ export class RoleHost extends Context.Service<
     ) => Effect.Effect<RoleHostStopResponse, RoleHostOperationalError>;
   }
 >()('foundry/application/role-conversations/Host') {}
+
+export interface RoleHostLaunchOptions {
+  readonly command: CommandVector;
+  readonly cwd: string;
+  readonly environmentAllowlist: ReadonlyArray<string>;
+  readonly timeoutMs: number;
+  readonly maxOutputBytes: number;
+}
+
+export class RoleHostLauncher extends Context.Service<
+  RoleHostLauncher,
+  {
+    readonly launch: (options: RoleHostLaunchOptions) => Layer.Layer<RoleHost>;
+  }
+>()('foundry/application/role-conversations/Launcher') {}
+
+export const ROLE_HOST_CAPABILITY_FAILURE_REASONS = [
+  'unsupported-protocol',
+  'not-resumable',
+  'missing-role',
+  'missing-profile',
+  'unavailable',
+] as const;
+
+export type RoleHostCapabilityFailureReason = (typeof ROLE_HOST_CAPABILITY_FAILURE_REASONS)[number];
+
+export class RoleHostCapabilityError extends Schema.TaggedError<RoleHostCapabilityError>()(
+  'RoleHostCapabilityError',
+  {
+    message: Schema.String,
+    reason: Schema.Literals(ROLE_HOST_CAPABILITY_FAILURE_REASONS),
+    runId: Schema.optional(Schema.String),
+  },
+) {}
+
+const CAPABILITY_REASON_BY_PROBLEM: Readonly<
+  Record<RoleHostCapabilityProblemKind, RoleHostCapabilityFailureReason>
+> = {
+  protocol: 'unsupported-protocol',
+  resumable: 'not-resumable',
+  role: 'missing-role',
+  'filesystem-profile': 'missing-profile',
+  'network-profile': 'missing-profile',
+};
+
+export interface RoleHostCapabilityPreflightOptions {
+  readonly configuration: ProjectConfiguration;
+  readonly runId?: string;
+}
+
+export const preflightRoleHostCapabilities = Effect.fn('preflightRoleHostCapabilities')(function* (
+  options: RoleHostCapabilityPreflightOptions,
+): Effect.fn.Return<RoleHostCapabilitiesResponse, RoleHostCapabilityError, RoleHostLauncher> {
+  const launcher = yield* RoleHostLauncher;
+  const hostLayer = launcher.launch({
+    command: options.configuration.roleHarness.command,
+    cwd: options.configuration.targetRepository,
+    environmentAllowlist: options.configuration.roleHarness.environmentAllowlist,
+    timeoutMs: options.configuration.timeouts.commandMs,
+    maxOutputBytes: options.configuration.artifacts.maxRoleHandoffBytes,
+  });
+
+  const report = yield* Effect.gen(function* () {
+    const host = yield* RoleHost;
+    return yield* host.capabilities({ schemaVersion: ROLE_HOST_PROTOCOL_VERSION });
+  }).pipe(
+    Effect.provide(hostLayer),
+    Effect.mapError(
+      (error) =>
+        new RoleHostCapabilityError({
+          message: `The configured role host did not report usable capabilities: ${error.message}`,
+          reason: 'unavailable',
+          runId: options.runId,
+        }),
+    ),
+  );
+
+  const evaluation = evaluateRoleHostCapabilities(report);
+  if (!evaluation.ok) {
+    return yield* new RoleHostCapabilityError({
+      message: evaluation.problem.detail,
+      reason: CAPABILITY_REASON_BY_PROBLEM[evaluation.problem.kind],
+      runId: options.runId,
+    });
+  }
+  return report;
+});
 
 export interface RoleTurnTarget {
   readonly runDirectory: string;

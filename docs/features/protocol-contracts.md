@@ -118,6 +118,27 @@ diagnostics and may be empty. `status` is `active`, `settled`, or `lost`.
 Every listed object is closed and every string/array is subject to the configured
 handoff or terminal-capture limits.
 
+The `capabilities` response attests the host's executable surface. `protocol` is
+the literal `foundry-role-host-v1`, `resumable` is a boolean, `availableRoles`
+lists the runnable roles, `adapterVersion` is a non-empty build identifier, and
+`capabilityProfiles` is a closed object with `filesystem` and `network` arrays.
+The filesystem vocabulary is `read_only_snapshot`, `run_owned_worktree`,
+`owned_scratch`, and `owned_capture_scratch`; the network vocabulary is
+`network_denied` and `runtime_origin_only`. Foundry derives this required
+role/profile matrix from the role permission table:
+
+| Role               | Required filesystem profiles                  | Required network profile |
+| ------------------ | --------------------------------------------- | ------------------------ |
+| Architect          | `read_only_snapshot`, `owned_scratch`         | `network_denied`         |
+| Coder / Lead Coder | `run_owned_worktree`, `owned_scratch`         | `network_denied`         |
+| Tester             | `read_only_snapshot`, `owned_capture_scratch` | `runtime_origin_only`    |
+| Reviewer           | `read_only_snapshot`, `owned_scratch`         | `network_denied`         |
+
+An unknown, malformed, omitted, or negative attestation is never treated as
+support. A single application-owned rule compares the decoded report with this
+matrix, and both `doctor` and a live `run` fail clearly on an unsupported
+protocol, non-resumable sessions, a missing role, or a missing profile.
+
 Model/provider selection belongs to the role host, not Foundry configuration.
 `doctor` requires every role and capability profile, and `runtimeIdentity`
 is exactly `{ adapterVersion, provider, model, toolProfile }`, recording the
