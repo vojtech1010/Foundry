@@ -1,22 +1,35 @@
-import { Context, Effect, Schema } from 'effect';
+import { Context, Effect, Option, Result, Schema } from 'effect';
 import { dirname, join, resolve } from 'node:path';
 
 import {
   GIT_OPERATION_MARKERS,
+  PUBLICATION_CAPABILITIES,
   REQUIRED_NODE_VERSION,
   REQUIRED_NPM_VERSION,
   RUN_STORAGE_DIRECTORY_NAME,
   displayPlatform,
   extractGitVersionNumber,
+  githubRepositoriesMatch,
   isSupportedGitVersion,
   isSupportedPlatform,
   normalizeToolVersion,
+  parseGitHubRepositoryRemote,
   parseGitVersion,
+  publicationRepositoryScope,
+  renderGitHubRepository,
 } from '../../domain/readiness.js';
+import { BRANCH_PROTECTION_NOT_CONFIGURED } from '../../domain/run-locations.js';
 
 import { decodeProjectConfiguration } from '../project-configuration.js';
 import { preflightRoleHostCapabilities } from '../role-conversations/index.js';
 
+import type {
+  PublicationCapability,
+  PublicationCapabilityState,
+  PublicationRepositoryScope,
+} from '../../domain/readiness.js';
+import type { DecisionPublicationConfiguration } from '../../domain/project-configuration.js';
+import type { BranchProtectionEvidence } from '../../domain/run-locations.js';
 import type { RoleHostCapabilityError, RoleHostLauncher } from '../role-conversations/index.js';
 
 export class ReadinessError extends Schema.TaggedError<ReadinessError>()('ReadinessError', {
@@ -62,6 +75,50 @@ export class ReadinessGit extends Context.Service<
   }
 >()('foundry/application/readiness/Git') {}
 
+export type PublicationCollaboratorPermission =
+  | 'admin'
+  | 'maintain'
+  | 'write'
+  | 'triage'
+  | 'read'
+  | 'none';
+
+export interface PublicationProbeRequest {
+  readonly repository: string;
+}
+
+/**
+ * Bounded, non-mutating observation of GitHub publication capability. Every
+ * nullable field is `null` when the probe could not establish the fact, which
+ * keeps unverified privilege absence out of the readiness classification.
+ */
+export interface PublicationProbeObservation {
+  readonly repository: string;
+  readonly tokenPresent: boolean;
+  readonly push: boolean;
+  readonly collaboratorPermission: PublicationCollaboratorPermission | null;
+  readonly issueCommentReadable: boolean | null;
+  readonly tokenScopes: ReadonlyArray<string> | null;
+  readonly protectedBranches: ReadonlyArray<string> | null;
+  readonly limitations: ReadonlyArray<string>;
+}
+
+export class PublicationProbeError extends Schema.TaggedError<PublicationProbeError>()(
+  'PublicationProbeError',
+  {
+    message: Schema.String,
+  },
+) {}
+
+export class PublicationProbe extends Context.Service<
+  PublicationProbe,
+  {
+    readonly observe: (
+      request: PublicationProbeRequest,
+    ) => Effect.Effect<PublicationProbeObservation, PublicationProbeError>;
+  }
+>()('foundry/application/readiness/PublicationProbe') {}
+
 export interface DoctorHostReport {
   readonly platform: string;
   readonly nodeVersion: string;
@@ -95,12 +152,28 @@ export interface DoctorRoleHostReport {
   readonly networkProfiles: ReadonlyArray<string>;
 }
 
+export interface DoctorPublicationCapabilityReport {
+  readonly capability: PublicationCapability;
+  readonly state: PublicationCapabilityState;
+}
+
+export interface DoctorPublicationReport {
+  readonly configured: boolean;
+  readonly eligible: boolean;
+  readonly remote: string | null;
+  readonly repository: string | null;
+  readonly repositoryScope: PublicationRepositoryScope;
+  readonly reason: string | null;
+  readonly capabilities: ReadonlyArray<DoctorPublicationCapabilityReport>;
+}
+
 export interface DoctorReport {
   readonly host: DoctorHostReport;
   readonly config: DoctorConfigReport;
   readonly storage: DoctorStorageReport;
   readonly repository: DoctorRepositoryReport;
   readonly roleHost: DoctorRoleHostReport;
+  readonly publication: DoctorPublicationReport;
 }
 
 export interface CheckReadinessOptions {
@@ -124,6 +197,209 @@ function firstReachableCommit(output: string): string | undefined {
 function excerpt(output: string): string {
   return output.trim().replaceAll(/\s+/gu, ' ').trim().slice(0, 500);
 }
+
+const NOT_CONFIGURED_PUBLICATION: DoctorPublicationReport = {
+  configured: false,
+  eligible: false,
+  remote: null,
+  repository: null,
+  repositoryScope: 'unknown',
+  reason: null,
+  capabilities: [],
+};
+
+function unknownPublicationCapabilities(): ReadonlyArray<DoctorPublicationCapabilityReport> {
+  return PUBLICATION_CAPABILITIES.map((capability) => ({ capability, state: 'unknown' }));
+}
+
+function unavailablePublicationReport(
+  reason: string,
+  remote: string | null,
+  repository: string | null,
+): DoctorPublicationReport {
+  return {
+    configured: true,
+    eligible: false,
+    remote,
+    repository,
+    repositoryScope: 'unknown',
+    reason,
+    capabilities: unknownPublicationCapabilities(),
+  };
+}
+
+function summarizePublicationObservation(
+  remote: string,
+  repository: string,
+  observation: PublicationProbeObservation,
+): DoctorPublicationReport {
+  if (!observation.tokenPresent) {
+    return unavailablePublicationReport(
+      'GITHUB_TOKEN is not set for the configured publication remote.',
+      remote,
+      repository,
+    );
+  }
+  const repositoryScope = publicationRepositoryScope(observation.tokenScopes);
+  const capabilities: ReadonlyArray<DoctorPublicationCapabilityReport> = [
+    { capability: 'push', state: observation.push ? 'granted' : 'denied' },
+    { capability: 'pull_request', state: observation.push ? 'granted' : 'denied' },
+    {
+      capability: 'issue_comment_read',
+      state:
+        observation.issueCommentReadable === null
+          ? 'unknown'
+          : observation.issueCommentReadable
+            ? 'granted'
+            : 'denied',
+    },
+    {
+      capability: 'collaborator_permission',
+      state: observation.collaboratorPermission === null ? 'unknown' : 'granted',
+    },
+  ];
+  const unresolved = capabilities.filter((entry) => entry.state !== 'granted');
+  let reason: string | null = null;
+  if (!githubRepositoriesMatch(observation.repository, repository)) {
+    reason = `Credential identifies GitHub repository "${observation.repository}" instead of the configured publication repository "${repository}".`;
+  } else if (repositoryScope === 'broad') {
+    reason = 'Credential is not limited to the configured publication repository.';
+  } else if (unresolved.length > 0) {
+    reason = `Credential cannot confirm required GitHub capabilities: ${unresolved
+      .map((entry) => entry.capability)
+      .join(', ')}.`;
+  } else if (observation.limitations.length > 0) {
+    reason = observation.limitations.join(' ');
+  }
+  return {
+    configured: true,
+    eligible: reason === null,
+    remote,
+    repository,
+    repositoryScope,
+    reason,
+    capabilities,
+  };
+}
+
+export function branchProtectionEvidenceFromProbeResult(input: {
+  readonly publicationConfigured: boolean;
+  readonly observation: PublicationProbeObservation | null;
+  readonly probeUnavailableReason: string | null;
+}): BranchProtectionEvidence {
+  if (!input.publicationConfigured) {
+    return BRANCH_PROTECTION_NOT_CONFIGURED;
+  }
+  if (input.observation === null) {
+    return {
+      _tag: 'Uncertain',
+      reason:
+        input.probeUnavailableReason ??
+        'GitHub protected branch evidence could not be resolved for the configured publication repository.',
+    };
+  }
+  if (input.observation.protectedBranches === null) {
+    return {
+      _tag: 'Uncertain',
+      reason:
+        'GitHub protected branch names could not be established for the configured publication repository.',
+    };
+  }
+  return { _tag: 'Known', protectedBranches: input.observation.protectedBranches };
+}
+
+export const resolveBranchProtectionEvidence = Effect.fn('resolveBranchProtectionEvidence')(
+  function* (
+    publication: DecisionPublicationConfiguration | null,
+    repositoryPath: string,
+  ): Effect.fn.Return<BranchProtectionEvidence, ReadinessError, ReadinessGit | PublicationProbe> {
+    if (publication === null) {
+      return BRANCH_PROTECTION_NOT_CONFIGURED;
+    }
+    const git = yield* ReadinessGit;
+    const remoteUrlResult = yield* git.run(
+      ['remote', 'get-url', publication.remote],
+      repositoryPath,
+    );
+    if (remoteUrlResult.exitCode !== 0 || remoteUrlResult.stdout.trim().length === 0) {
+      return branchProtectionEvidenceFromProbeResult({
+        publicationConfigured: true,
+        observation: null,
+        probeUnavailableReason: `Cannot resolve publication remote "${publication.remote}" in target repository at ${repositoryPath}.`,
+      });
+    }
+    const reference = parseGitHubRepositoryRemote(remoteUrlResult.stdout);
+    if (reference === undefined) {
+      return branchProtectionEvidenceFromProbeResult({
+        publicationConfigured: true,
+        observation: null,
+        probeUnavailableReason: `Publication remote "${publication.remote}" is not a GitHub repository.`,
+      });
+    }
+    const repository = renderGitHubRepository(reference);
+    const probe = yield* Effect.serviceOption(PublicationProbe);
+    if (Option.isNone(probe)) {
+      return branchProtectionEvidenceFromProbeResult({
+        publicationConfigured: true,
+        observation: null,
+        probeUnavailableReason: `GitHub publication probe is unavailable for remote "${publication.remote}".`,
+      });
+    }
+    const observed = yield* probe.value.observe({ repository }).pipe(Effect.result);
+    if (Result.isFailure(observed)) {
+      return branchProtectionEvidenceFromProbeResult({
+        publicationConfigured: true,
+        observation: null,
+        probeUnavailableReason: observed.failure.message,
+      });
+    }
+    return branchProtectionEvidenceFromProbeResult({
+      publicationConfigured: true,
+      observation: observed.success,
+      probeUnavailableReason: null,
+    });
+  },
+);
+
+export const describePublicationReadiness = Effect.fn('describePublicationReadiness')(function* (
+  publication: DecisionPublicationConfiguration | null,
+  repositoryPath: string,
+): Effect.fn.Return<DoctorPublicationReport, ReadinessError, ReadinessGit> {
+  if (publication === null) {
+    return NOT_CONFIGURED_PUBLICATION;
+  }
+  const git = yield* ReadinessGit;
+  const remoteUrlResult = yield* git.run(['remote', 'get-url', publication.remote], repositoryPath);
+  if (remoteUrlResult.exitCode !== 0 || remoteUrlResult.stdout.trim().length === 0) {
+    return unavailablePublicationReport(
+      `Cannot resolve publication remote "${publication.remote}" in target repository at ${repositoryPath}.`,
+      publication.remote,
+      null,
+    );
+  }
+  const reference = parseGitHubRepositoryRemote(remoteUrlResult.stdout);
+  if (reference === undefined) {
+    return unavailablePublicationReport(
+      `Publication remote "${publication.remote}" is not a GitHub repository.`,
+      publication.remote,
+      null,
+    );
+  }
+  const repository = renderGitHubRepository(reference);
+  const probe = yield* Effect.serviceOption(PublicationProbe);
+  if (Option.isNone(probe)) {
+    return unavailablePublicationReport(
+      `GitHub publication probe is unavailable for remote "${publication.remote}".`,
+      publication.remote,
+      repository,
+    );
+  }
+  const observed = yield* probe.value.observe({ repository }).pipe(Effect.result);
+  if (Result.isFailure(observed)) {
+    return unavailablePublicationReport(observed.failure.message, publication.remote, repository);
+  }
+  return summarizePublicationObservation(publication.remote, repository, observed.success);
+});
 
 export const checkReadiness = Effect.fn('checkReadiness')(function* (
   options: CheckReadinessOptions,
@@ -296,6 +572,11 @@ export const checkReadiness = Effect.fn('checkReadiness')(function* (
 
   const capabilities = yield* preflightRoleHostCapabilities({ configuration });
 
+  const publication = yield* describePublicationReadiness(
+    configuration.decisionPublication,
+    repositoryPath,
+  );
+
   return {
     host: {
       platform: displayPlatform(platform),
@@ -325,5 +606,6 @@ export const checkReadiness = Effect.fn('checkReadiness')(function* (
       filesystemProfiles: [...capabilities.capabilityProfiles.filesystem],
       networkProfiles: [...capabilities.capabilityProfiles.network],
     },
+    publication,
   };
 });

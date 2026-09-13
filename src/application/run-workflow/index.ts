@@ -16,12 +16,14 @@ import {
   validateCoderTurnControl,
 } from '../coder-result/index.js';
 import { bootstrapRoleGuidance } from '../guidance/index.js';
+import { reconcileHandoff } from '../handoff/index.js';
 import { prepareAndHoldApplicationRuntime } from '../project-runtime/index.js';
 import { runProjectVerification } from '../project-verification/index.js';
 import { buildRolePacket } from '../role-packets/index.js';
 import { startGovernedRoleTurn } from '../role-permissions/index.js';
 import { handleReviewerTurn } from '../reviewer-outcomes/index.js';
 import { RoleHostLauncher } from '../role-conversations/index.js';
+import { describePublicationReadiness } from '../readiness/index.js';
 import { RunIdentityStore, RunIdentityStorageError } from '../run-identity/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../run-history/index.js';
 import { handleTesterTurn, validateTesterTurnControl } from '../tester-validation/index.js';
@@ -546,6 +548,10 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
         (record) => record.commit === commit && record.outcome === 'ready',
       );
     const testerRequired = plan?.runtimeValidationRequired ?? false;
+    const publicationReport = yield* describePublicationReadiness(
+      configuration.decisionPublication,
+      configuration.targetRepository,
+    );
     const assessment = {
       reviewableCommit:
         implementation !== null && !implementation.noChangeCandidate ? implementation.commit : null,
@@ -562,7 +568,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
         0,
         configuration.retryBudgets.tester - retriesUsed(history.derived, 'tester'),
       ),
-      publicationEligible: configuration.decisionPublication !== null,
+      publicationEligible: publicationReport.eligible,
     };
     const prompt = yield* promptFor('reviewer', history);
     const attempt = countSessions(history.derived, 'reviewer') + 1;
@@ -694,8 +700,17 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     Effect.ensuring(disposeRuntime().pipe(Effect.ignore)),
     Effect.result,
   );
-  if (Result.isSuccess(completed)) {
-    return completed.success;
-  }
-  return yield* blockOnFailure(errorMessage(completed.failure));
+  const summary = Result.isSuccess(completed)
+    ? completed.success
+    : yield* blockOnFailure(errorMessage(completed.failure));
+
+  /**
+   * A completed or no-change run owns exactly one canonical handoff. The write
+   * is idempotent: it reconciles from verified history, so an already-settled
+   * run (including `resume`) rewrites identical bytes or repairs a missing
+   * report. A run that is not terminally successful has no handoff and this is
+   * a no-op.
+   */
+  yield* reconcileHandoff({ runDirectory, runId });
+  return summary;
 });

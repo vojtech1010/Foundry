@@ -5,8 +5,8 @@ import { dirname, join, resolve } from 'node:path';
 import { RUN_STORAGE_DIRECTORY_NAME } from '../../domain/readiness.js';
 import {
   RUNS_DIRECTORY_NAME,
-  isLegalGitBranchName,
   isPathInside,
+  preflightTaskBranch,
   renderTaskBranch,
   renderWorkspacePath,
 } from '../../domain/run-locations.js';
@@ -34,7 +34,7 @@ import {
   provisionRunWorktree,
 } from '../git-provisioning/index.js';
 import { ensureGuidanceSnapshot } from '../guidance/index.js';
-import { ReadinessFiles } from '../readiness/index.js';
+import { ReadinessFiles, resolveBranchProtectionEvidence } from '../readiness/index.js';
 import { withRepositoryLease } from '../repository-lease/index.js';
 import { preflightRoleHostCapabilities } from '../role-conversations/index.js';
 import {
@@ -66,6 +66,8 @@ import type {
   WorktreeReadyPayload,
 } from '../../domain/run-history.js';
 import type { ProjectConfiguration } from '../../domain/project-configuration.js';
+import type { ReadinessError, ReadinessGit, PublicationProbe } from '../readiness/index.js';
+import type { BranchProtectionEvidence } from '../../domain/run-locations.js';
 import type { RequestIdentityDocument } from '../../domain/run-identity.js';
 import type { RunGit } from '../git-provisioning/index.js';
 import type {
@@ -112,7 +114,8 @@ export type RunIdentityError =
   | RunHistoryError
   | GuidanceError
   | RoleHostCapabilityError
-  | RepositoryLeaseError;
+  | RepositoryLeaseError
+  | ReadinessError;
 
 export interface RunStorageFileStatus {
   readonly exists: boolean;
@@ -176,6 +179,7 @@ export interface RecordRunIdentityOptions {
   readonly requestArg: string;
   readonly taskId: string;
   readonly runId: string;
+  readonly protection?: BranchProtectionEvidence;
 }
 
 export interface RunProgressReport {
@@ -380,6 +384,8 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   RecordedRunIdentityReport,
   RunIdentityError,
   | ReadinessFiles
+  | ReadinessGit
+  | PublicationProbe
   | RunIdentityStore
   | RunHistoryStorage
   | RepositoryLeaseStore
@@ -458,15 +464,20 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   const normalizedPromptHash = sha256HexOfBytes(normalizedBytes);
 
   const taskBranch = renderTaskBranch(configuration.taskBranchPolicy, options.taskId);
-  if (taskBranch === configuration.sourceBranch) {
+  const protection =
+    options.protection ??
+    (yield* resolveBranchProtectionEvidence(
+      configuration.decisionPublication,
+      configuration.targetRepository,
+    ).pipe(Effect.mapError((error) => new InvalidRunRequest({ message: error.message, runId }))));
+  const branchPreflight = preflightTaskBranch({
+    taskBranch,
+    sourceBranch: configuration.sourceBranch,
+    protection,
+  });
+  if (branchPreflight._tag === 'Rejected') {
     return yield* new InvalidRunRequest({
-      message: `Rendered task branch "${taskBranch}" must not equal source branch "${configuration.sourceBranch}".`,
-      runId,
-    });
-  }
-  if (!isLegalGitBranchName(taskBranch)) {
-    return yield* new InvalidRunRequest({
-      message: `Rendered task branch "${taskBranch}" is not a legal Git branch name.`,
+      message: branchPreflight.rejection.message,
       runId,
     });
   }

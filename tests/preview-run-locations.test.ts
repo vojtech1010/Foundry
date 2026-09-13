@@ -8,6 +8,8 @@ import { join } from 'node:path';
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
 import {
+  PublicationProbe,
+  PublicationProbeError,
   ReadinessError,
   ReadinessFiles,
   ReadinessGit,
@@ -27,6 +29,10 @@ import { EXIT_CODES } from '../src/domain/public-commands.js';
 import { ReadinessFilesLive, ReadinessGitLive } from '../src/platform/readiness.js';
 import { capableRoleHostLauncher } from './fixtures/role-host/role-host-launcher.js';
 
+import type {
+  PublicationProbeObservation,
+  PublicationProbeRequest,
+} from '../src/application/readiness/index.js';
 import type { RoleHostLauncher } from '../src/application/role-conversations/index.js';
 
 const ReportEnvelopeJson = Schema.fromJsonString(ReportEnvelope);
@@ -71,7 +77,15 @@ const TASK_ID = 'example-change';
 
 function goldenDocument(
   targetRepository: string,
-  overrides?: { readonly taskBranchPolicy?: string },
+  overrides?: {
+    readonly taskBranchPolicy?: string;
+    readonly sourceBranch?: string;
+    readonly decisionPublication?: {
+      readonly remote: string;
+      readonly draft: true;
+      readonly maintainersCanModify: false;
+    } | null;
+  },
 ) {
   return {
     schemaVersion: 1,
@@ -147,19 +161,49 @@ interface GitScript {
   readonly statusStdout: string;
   readonly checkIgnoreExit: number;
   readonly trackedStdout: string;
+  readonly remoteUrlStdout: string;
+  readonly remoteUrlExit: number;
+}
+
+interface PublicationScript {
+  readonly provided: boolean;
+  readonly observation: PublicationProbeObservation;
+  readonly error: string | null;
 }
 
 interface FakeWorld {
   readonly host: HostScript;
   readonly files: FilesScript;
   readonly git: GitScript;
+  readonly publication: PublicationScript;
 }
 
 interface BuiltWorld {
   readonly layer: Layer.Layer<
-    ReadinessHost | ReadinessFiles | ReadinessGit | ProjectCommandProcess | RoleHostLauncher
+    | ReadinessHost
+    | ReadinessFiles
+    | ReadinessGit
+    | ProjectCommandProcess
+    | RoleHostLauncher
+    | PublicationProbe
   >;
   readonly gitCalls: Array<{ readonly args: ReadonlyArray<string>; readonly cwd: string }>;
+}
+
+function publicationObservation(
+  overrides: Partial<PublicationProbeObservation> = {},
+): PublicationProbeObservation {
+  return {
+    repository: 'foundry/target',
+    tokenPresent: true,
+    push: true,
+    collaboratorPermission: 'maintain',
+    issueCommentReadable: true,
+    tokenScopes: null,
+    protectedBranches: ['main'],
+    limitations: [],
+    ...overrides,
+  };
 }
 
 function defaultWorld(): FakeWorld {
@@ -186,7 +230,26 @@ function defaultWorld(): FakeWorld {
       statusStdout: '',
       checkIgnoreExit: 0,
       trackedStdout: '',
+      remoteUrlStdout: 'git@github.com:foundry/target.git\n',
+      remoteUrlExit: 0,
     },
+    publication: {
+      provided: false,
+      observation: publicationObservation(),
+      error: null,
+    },
+  };
+}
+
+function publicationWorld(
+  publication: Partial<PublicationScript> = {},
+  git: Partial<GitScript> = {},
+): FakeWorld {
+  const world = defaultWorld();
+  return {
+    ...world,
+    git: { ...world.git, ...git },
+    publication: { ...world.publication, provided: true, ...publication },
   };
 }
 
@@ -274,6 +337,9 @@ function buildWorld(
                 ? { stdout: 'true\n', exitCode: 0 }
                 : { stdout: 'fatal: not a git repository\n', exitCode: 128 };
             }
+            if (head === 'remote' && args[1] === 'get-url') {
+              return { stdout: world.git.remoteUrlStdout, exitCode: world.git.remoteUrlExit };
+            }
             if (head === 'remote') {
               return {
                 stdout: world.git.remotes.length === 0 ? '' : `${world.git.remotes.join('\n')}\n`,
@@ -301,6 +367,17 @@ function buildWorld(
     ),
     UnusedProcess,
     roleHostLayer,
+    world.publication.provided
+      ? Layer.succeed(
+          PublicationProbe,
+          PublicationProbe.of({
+            observe: (_request: PublicationProbeRequest) =>
+              world.publication.error === null
+                ? Effect.succeed(world.publication.observation)
+                : Effect.fail(new PublicationProbeError({ message: world.publication.error })),
+          }),
+        )
+      : Layer.empty,
   );
   return { layer, gitCalls };
 }
@@ -439,6 +516,120 @@ describe('preview run locations with fake services', () => {
       const error = yield* preview.pipe(Effect.flip);
       expect(error).toBeInstanceOf(PreviewLocationsError);
       expect(error.message).toContain('is not a legal Git branch name');
+    }),
+  );
+
+  it.effect('fails closed when configured publication has no resolved protection evidence', () =>
+    Effect.gen(function* () {
+      const world = withTexts(
+        defaultWorld(),
+        new Map([
+          [
+            CONFIG_PATH,
+            JSON.stringify(
+              goldenDocument(TARGET, {
+                decisionPublication: { remote: 'origin', draft: true, maintainersCanModify: false },
+              }),
+            ),
+          ],
+        ]),
+      );
+      const built = buildWorld(world);
+      const error = yield* previewRunLocations({
+        configArg: CONFIG_ARG,
+        cwd: CONFIG_DIR,
+        taskId: TASK_ID,
+      }).pipe(Effect.provide(built.layer), Effect.flip);
+
+      expect(error).toBeInstanceOf(PreviewLocationsError);
+      expect(error.message).toContain('cannot be checked against GitHub protected branches');
+      expectReadOnlyGitCalls(built.gitCalls);
+    }),
+  );
+
+  it.effect('fails when the rendered branch collides with a GitHub protected branch', () =>
+    Effect.gen(function* () {
+      const world = withTexts(
+        defaultWorld(),
+        new Map([
+          [
+            CONFIG_PATH,
+            JSON.stringify(
+              goldenDocument(TARGET, {
+                decisionPublication: { remote: 'origin', draft: true, maintainersCanModify: false },
+              }),
+            ),
+          ],
+        ]),
+      );
+      const built = buildWorld(world);
+      const error = yield* previewRunLocations({
+        configArg: CONFIG_ARG,
+        cwd: CONFIG_DIR,
+        taskId: TASK_ID,
+        protection: { _tag: 'Known', protectedBranches: ['main', 'foundry/example-change'] },
+      }).pipe(Effect.provide(built.layer), Effect.flip);
+
+      expect(error).toBeInstanceOf(PreviewLocationsError);
+      expect(error.message).toContain('collides with a protected branch');
+      expectReadOnlyGitCalls(built.gitCalls);
+    }),
+  );
+
+  it.effect('accepts configured publication when the probe resolves known protected branches', () =>
+    Effect.gen(function* () {
+      const world = withTexts(
+        publicationWorld({
+          observation: publicationObservation({ protectedBranches: ['main', 'release'] }),
+        }),
+        new Map([
+          [
+            CONFIG_PATH,
+            JSON.stringify(
+              goldenDocument(TARGET, {
+                decisionPublication: { remote: 'origin', draft: true, maintainersCanModify: false },
+              }),
+            ),
+          ],
+        ]),
+      );
+      const built = buildWorld(world);
+      const report = yield* previewRunLocations({
+        configArg: CONFIG_ARG,
+        cwd: CONFIG_DIR,
+        taskId: TASK_ID,
+      }).pipe(Effect.provide(built.layer));
+
+      expect(report.branch).toBe('foundry/example-change');
+      expectReadOnlyGitCalls(built.gitCalls);
+    }),
+  );
+
+  it.effect('accepts a protected-branch probe that does not name the rendered branch', () =>
+    Effect.gen(function* () {
+      const world = withTexts(
+        defaultWorld(),
+        new Map([
+          [
+            CONFIG_PATH,
+            JSON.stringify(
+              goldenDocument(TARGET, {
+                decisionPublication: { remote: 'origin', draft: true, maintainersCanModify: false },
+              }),
+            ),
+          ],
+        ]),
+      );
+      const built = buildWorld(world);
+      const report = yield* previewRunLocations({
+        configArg: CONFIG_ARG,
+        cwd: CONFIG_DIR,
+        taskId: TASK_ID,
+        protection: { _tag: 'Known', protectedBranches: ['main', 'release'] },
+      }).pipe(Effect.provide(built.layer));
+
+      expect(report.branch).toBe('foundry/example-change');
+      expectReadOnlyGitCalls(built.gitCalls);
     }),
   );
 

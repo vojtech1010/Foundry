@@ -9,11 +9,16 @@ import { ReportEnvelope, runCli } from '../src/cli/program.js';
 import { RoleHostCapabilityError } from '../src/application/role-conversations/index.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
 import {
+  PublicationProbe,
+  PublicationProbeError,
   ReadinessError,
   ReadinessFiles,
   ReadinessGit,
   ReadinessHost,
+  branchProtectionEvidenceFromProbeResult,
   checkReadiness,
+  describePublicationReadiness,
+  resolveBranchProtectionEvidence,
 } from '../src/application/readiness/index.js';
 import {
   GIT_OPERATION_MARKERS,
@@ -22,8 +27,11 @@ import {
   isSupportedGitVersion,
   isSupportedPlatform,
   normalizeToolVersion,
+  parseGitHubRepositoryRemote,
   parseGitVersion,
+  publicationRepositoryScope,
 } from '../src/domain/readiness.js';
+import { BRANCH_PROTECTION_NOT_CONFIGURED } from '../src/domain/run-locations.js';
 import { EXIT_CODES } from '../src/domain/public-commands.js';
 import { ReadinessFilesLive, ReadinessGitLive } from '../src/platform/readiness.js';
 import {
@@ -31,6 +39,10 @@ import {
   incapableRoleHostLauncher,
 } from './fixtures/role-host/role-host-launcher.js';
 
+import type {
+  PublicationProbeObservation,
+  PublicationProbeRequest,
+} from '../src/application/readiness/index.js';
 import type { RoleHostLauncher } from '../src/application/role-conversations/index.js';
 
 const ReportEnvelopeJson = Schema.fromJsonString(ReportEnvelope);
@@ -121,6 +133,29 @@ function goldenDocument(targetRepository: string) {
   };
 }
 
+function publicationDocument(targetRepository: string) {
+  return {
+    ...goldenDocument(targetRepository),
+    decisionPublication: { remote: 'origin', draft: true, maintainersCanModify: false },
+  };
+}
+
+function eligibleObservation(
+  overrides: Partial<PublicationProbeObservation> = {},
+): PublicationProbeObservation {
+  return {
+    repository: 'foundry/target',
+    tokenPresent: true,
+    push: true,
+    collaboratorPermission: 'maintain',
+    issueCommentReadable: true,
+    tokenScopes: null,
+    protectedBranches: [],
+    limitations: [],
+    ...overrides,
+  };
+}
+
 interface HostScript {
   readonly platform: string;
   readonly nodeVersion: string;
@@ -145,17 +180,31 @@ interface GitScript {
   readonly statusStdout: string;
   readonly checkIgnoreExit: number;
   readonly trackedStdout: string;
+  readonly remoteUrlStdout: string;
+  readonly remoteUrlExit: number;
+}
+
+interface PublicationScript {
+  readonly provided: boolean;
+  readonly observation: PublicationProbeObservation;
+  readonly error: string | null;
 }
 
 interface FakeWorld {
   readonly host: HostScript;
   readonly files: FilesScript;
   readonly git: GitScript;
+  readonly publication: PublicationScript;
 }
 
 interface BuiltWorld {
   readonly layer: Layer.Layer<
-    ReadinessHost | ReadinessFiles | ReadinessGit | ProjectCommandProcess | RoleHostLauncher
+    | ReadinessHost
+    | ReadinessFiles
+    | ReadinessGit
+    | ProjectCommandProcess
+    | RoleHostLauncher
+    | PublicationProbe
   >;
   readonly gitCalls: Array<{ readonly args: ReadonlyArray<string>; readonly cwd: string }>;
 }
@@ -184,7 +233,30 @@ function defaultWorld(): FakeWorld {
       statusStdout: '',
       checkIgnoreExit: 0,
       trackedStdout: '',
+      remoteUrlStdout: 'git@github.com:foundry/target.git\n',
+      remoteUrlExit: 0,
     },
+    publication: {
+      provided: true,
+      observation: eligibleObservation(),
+      error: null,
+    },
+  };
+}
+
+function publicationWorld(
+  publication: Partial<PublicationScript> = {},
+  git: Partial<GitScript> = {},
+): FakeWorld {
+  const world = defaultWorld();
+  return {
+    ...world,
+    files: {
+      ...world.files,
+      texts: new Map([[CONFIG_PATH, JSON.stringify(publicationDocument(TARGET))]]),
+    },
+    git: { ...world.git, ...git },
+    publication: { ...world.publication, ...publication },
   };
 }
 
@@ -276,6 +348,12 @@ function buildWorld(
                 ? { stdout: 'true\n', exitCode: 0 }
                 : { stdout: 'fatal: not a git repository\n', exitCode: 128 };
             }
+            if (head === 'remote' && args[1] === 'get-url') {
+              return { stdout: world.git.remoteUrlStdout, exitCode: world.git.remoteUrlExit };
+            }
+            if (head === 'remote' && args[1] === 'get-url') {
+              return { stdout: world.git.remoteUrlStdout, exitCode: world.git.remoteUrlExit };
+            }
             if (head === 'remote') {
               return {
                 stdout: world.git.remotes.length === 0 ? '' : `${world.git.remotes.join('\n')}\n`,
@@ -303,6 +381,17 @@ function buildWorld(
     ),
     UnusedProcess,
     roleHostLayer,
+    world.publication.provided
+      ? Layer.succeed(
+          PublicationProbe,
+          PublicationProbe.of({
+            observe: (_request: PublicationProbeRequest) =>
+              world.publication.error === null
+                ? Effect.succeed(world.publication.observation)
+                : Effect.fail(new PublicationProbeError({ message: world.publication.error })),
+          }),
+        )
+      : Layer.empty,
   );
   return { layer, gitCalls };
 }
@@ -347,6 +436,32 @@ describe('readiness domain vocabulary', () => {
     expect(isSupportedGitVersion({ major: 3, minor: 0 })).toBe(true);
     expect(extractGitVersionNumber('git version 2.53.0\n')).toBe('2.53.0');
     expect(extractGitVersionNumber('unexpected')).toBeUndefined();
+  });
+
+  it('recognizes GitHub repository remotes in common forms', () => {
+    expect(parseGitHubRepositoryRemote('git@github.com:foundry/target.git')).toEqual({
+      owner: 'foundry',
+      name: 'target',
+    });
+    expect(parseGitHubRepositoryRemote('https://github.com/foundry/target.git\n')).toEqual({
+      owner: 'foundry',
+      name: 'target',
+    });
+    expect(parseGitHubRepositoryRemote('ssh://git@github.com/foundry/target')).toEqual({
+      owner: 'foundry',
+      name: 'target',
+    });
+    expect(parseGitHubRepositoryRemote('https://gitlab.com/foundry/target.git')).toBeUndefined();
+    expect(parseGitHubRepositoryRemote('/srv/git/target.git')).toBeUndefined();
+    expect(parseGitHubRepositoryRemote('')).toBeUndefined();
+  });
+
+  it('classifies repository scope from advertised token scopes', () => {
+    expect(publicationRepositoryScope(null)).toBe('repository');
+    expect(publicationRepositoryScope([])).toBe('repository');
+    expect(publicationRepositoryScope(['read:user'])).toBe('repository');
+    expect(publicationRepositoryScope(['repo'])).toBe('broad');
+    expect(publicationRepositoryScope(['read:user', 'workflow'])).toBe('broad');
   });
 });
 
@@ -613,6 +728,14 @@ describe('readiness check with fake services', () => {
         'reviewer',
       ]);
       expect(data.roleHost.networkProfiles).toEqual(['network_denied', 'runtime_origin_only']);
+      expect(data.publication).toEqual({
+        configured: false,
+        eligible: false,
+        repository: null,
+        repositoryScope: 'unknown',
+        reason: null,
+        capabilities: [],
+      });
       expect(Object.keys(data)).toEqual([
         'readiness',
         'host',
@@ -620,6 +743,7 @@ describe('readiness check with fake services', () => {
         'storage',
         'repository',
         'roleHost',
+        'publication',
       ]);
       expectNoBranchMutation(built.gitCalls);
     }),
@@ -743,6 +867,301 @@ describe('readiness check with fake services', () => {
       expect(envelope.error.kind).toBe('failed');
       expect(envelope.error.retryable).toBe(false);
       expect(envelope.error.message).toContain('resumable');
+    }),
+  );
+});
+
+describe('publication readiness with fake services', () => {
+  it.effect('reports publication as not configured without probing GitHub', () =>
+    Effect.gen(function* () {
+      const { built, check } = checkWith(defaultWorld());
+      const report = yield* check;
+
+      expect(report.publication).toEqual({
+        configured: false,
+        eligible: false,
+        remote: null,
+        repository: null,
+        repositoryScope: 'unknown',
+        reason: null,
+        capabilities: [],
+      });
+      expect(built.gitCalls.some((call) => call.args[1] === 'get-url')).toBe(false);
+    }),
+  );
+
+  it.effect('reports eligible publication when identity and capabilities verify', () =>
+    Effect.gen(function* () {
+      const { check } = checkWith(publicationWorld());
+      const report = yield* check;
+
+      expect(report.publication).toEqual({
+        configured: true,
+        eligible: true,
+        remote: 'origin',
+        repository: 'foundry/target',
+        repositoryScope: 'repository',
+        reason: null,
+        capabilities: [
+          { capability: 'push', state: 'granted' },
+          { capability: 'pull_request', state: 'granted' },
+          { capability: 'issue_comment_read', state: 'granted' },
+          { capability: 'collaborator_permission', state: 'granted' },
+        ],
+      });
+    }),
+  );
+
+  it.effect('presents eligible publication with a null reason through the cli envelope', () =>
+    Effect.gen(function* () {
+      const { built } = checkWith(publicationWorld());
+      const jsonResult = yield* runCli(['doctor', '--config', CONFIG_PATH, '--json']).pipe(
+        Effect.provide(built.layer),
+      );
+      const humanResult = yield* runCli(['doctor', '--config', CONFIG_PATH]).pipe(
+        Effect.provide(built.layer),
+      );
+
+      expect(jsonResult.exitCode).toBe(EXIT_CODES.reported);
+      expect(humanResult.exitCode).toBe(EXIT_CODES.reported);
+      const { data } = expectDoctorEnvelope(jsonResult.stdout);
+      expect(data.publication).toEqual({
+        configured: true,
+        eligible: true,
+        repository: 'foundry/target',
+        repositoryScope: 'repository',
+        reason: null,
+        capabilities: [
+          { capability: 'push', state: 'granted' },
+          { capability: 'pull_request', state: 'granted' },
+          { capability: 'issue_comment_read', state: 'granted' },
+          { capability: 'collaborator_permission', state: 'granted' },
+        ],
+      });
+      expect(humanResult.stdout).toContain('data.publication.configured: true');
+      expect(humanResult.stdout).toContain('data.publication.eligible: true');
+      expect(humanResult.stdout).toContain('data.publication.repository: foundry/target');
+      expect(humanResult.stdout).toContain('data.publication.repositoryScope: repository');
+      expect(humanResult.stdout).toContain('data.publication.reason: none');
+      expect(humanResult.stdout).toContain(
+        'data.publication.capabilities: push=granted pull_request=granted issue_comment_read=granted collaborator_permission=granted',
+      );
+    }),
+  );
+
+  it.effect('reports a specific reason when the publication remote is not GitHub', () =>
+    Effect.gen(function* () {
+      const { check } = checkWith(
+        publicationWorld({}, { remoteUrlStdout: 'https://gitlab.com/foundry/target.git\n' }),
+      );
+      const report = yield* check;
+
+      expect(report.publication.eligible).toBe(false);
+      expect(report.publication.repository).toBeNull();
+      expect(report.publication.reason).toContain('is not a GitHub repository');
+    }),
+  );
+
+  it.effect('reports a specific reason when the publication remote cannot be resolved', () =>
+    Effect.gen(function* () {
+      const { check } = checkWith(
+        publicationWorld({}, { remoteUrlStdout: '', remoteUrlExit: 128 }),
+      );
+      const report = yield* check;
+
+      expect(report.publication.eligible).toBe(false);
+      expect(report.publication.reason).toContain('Cannot resolve publication remote "origin"');
+    }),
+  );
+
+  it.effect('reports missing credentials without asserting unverified capability absence', () =>
+    Effect.gen(function* () {
+      const { check } = checkWith(
+        publicationWorld({
+          observation: eligibleObservation({
+            repository: 'foundry/target',
+            tokenPresent: false,
+            push: false,
+            collaboratorPermission: null,
+            issueCommentReadable: null,
+            tokenScopes: null,
+          }),
+        }),
+      );
+      const report = yield* check;
+
+      expect(report.publication.eligible).toBe(false);
+      expect(report.publication.reason).toContain('GITHUB_TOKEN is not set');
+      expect(report.publication.capabilities.map((entry) => entry.state)).toEqual([
+        'unknown',
+        'unknown',
+        'unknown',
+        'unknown',
+      ]);
+    }),
+  );
+
+  it.effect('reports denied capabilities with a concrete reason', () =>
+    Effect.gen(function* () {
+      const { check } = checkWith(
+        publicationWorld({ observation: eligibleObservation({ push: false }) }),
+      );
+      const report = yield* check;
+
+      expect(report.publication.eligible).toBe(false);
+      expect(report.publication.reason).toContain('push');
+      expect(report.publication.reason).toContain('pull_request');
+      expect(report.publication.capabilities).toContainEqual({
+        capability: 'push',
+        state: 'denied',
+      });
+    }),
+  );
+
+  it.effect('reports ineligible when the credential is not limited to the repository', () =>
+    Effect.gen(function* () {
+      const { check } = checkWith(
+        publicationWorld({
+          observation: eligibleObservation({ tokenScopes: ['repo', 'workflow'] }),
+        }),
+      );
+      const report = yield* check;
+
+      expect(report.publication.eligible).toBe(false);
+      expect(report.publication.repositoryScope).toBe('broad');
+      expect(report.publication.reason).toContain(
+        'not limited to the configured publication repository',
+      );
+    }),
+  );
+
+  it.effect('reports ineligible when the credential resolves to another repository', () =>
+    Effect.gen(function* () {
+      const { check } = checkWith(
+        publicationWorld({ observation: eligibleObservation({ repository: 'other/repo' }) }),
+      );
+      const report = yield* check;
+
+      expect(report.publication.eligible).toBe(false);
+      expect(report.publication.reason).toContain('other/repo');
+      expect(report.publication.reason).toContain('foundry/target');
+    }),
+  );
+
+  it.effect('reports ineligible rather than failing when the GitHub probe is unavailable', () =>
+    Effect.gen(function* () {
+      const { check } = checkWith(publicationWorld({ error: 'GitHub API is unreachable.' }));
+      const report = yield* check;
+
+      expect(report.publication.eligible).toBe(false);
+      expect(report.publication.reason).toContain('GitHub API is unreachable');
+      expect(report.publication.capabilities.map((entry) => entry.state)).toEqual([
+        'unknown',
+        'unknown',
+        'unknown',
+        'unknown',
+      ]);
+    }),
+  );
+
+  it.effect('reports ineligible when no publication probe is provided', () =>
+    Effect.gen(function* () {
+      const { check } = checkWith(publicationWorld({ provided: false }));
+      const report = yield* check;
+
+      expect(report.publication.eligible).toBe(false);
+      expect(report.publication.repository).toBe('foundry/target');
+      expect(report.publication.reason).toContain('probe is unavailable');
+    }),
+  );
+});
+
+describe('publication branch protection evidence', () => {
+  it('maps publication configuration and probe observations to branch protection evidence', () => {
+    expect(
+      branchProtectionEvidenceFromProbeResult({
+        publicationConfigured: false,
+        observation: null,
+        probeUnavailableReason: null,
+      }),
+    ).toEqual(BRANCH_PROTECTION_NOT_CONFIGURED);
+
+    expect(
+      branchProtectionEvidenceFromProbeResult({
+        publicationConfigured: true,
+        observation: eligibleObservation({ protectedBranches: ['main', 'release'] }),
+        probeUnavailableReason: null,
+      }),
+    ).toEqual({ _tag: 'Known', protectedBranches: ['main', 'release'] });
+
+    expect(
+      branchProtectionEvidenceFromProbeResult({
+        publicationConfigured: true,
+        observation: eligibleObservation({ protectedBranches: null }),
+        probeUnavailableReason: null,
+      })._tag,
+    ).toBe('Uncertain');
+
+    expect(
+      branchProtectionEvidenceFromProbeResult({
+        publicationConfigured: true,
+        observation: null,
+        probeUnavailableReason: 'GitHub API is unreachable.',
+      }),
+    ).toEqual({
+      _tag: 'Uncertain',
+      reason: 'GitHub API is unreachable.',
+    });
+  });
+
+  it.effect(
+    'resolves known protected branches from the publication probe without an override',
+    () =>
+      Effect.gen(function* () {
+        const { built } = checkWith(
+          publicationWorld({
+            observation: eligibleObservation({ protectedBranches: ['main', 'release'] }),
+          }),
+        );
+        const evidence = yield* resolveBranchProtectionEvidence(
+          { remote: 'origin', draft: true, maintainersCanModify: false },
+          TARGET,
+        ).pipe(Effect.provide(built.layer));
+
+        expect(evidence).toEqual({ _tag: 'Known', protectedBranches: ['main', 'release'] });
+      }),
+  );
+
+  it.effect('fails closed when the probe cannot establish protected branch names', () =>
+    Effect.gen(function* () {
+      const { built } = checkWith(
+        publicationWorld({
+          observation: eligibleObservation({ protectedBranches: null }),
+        }),
+      );
+      const evidence = yield* resolveBranchProtectionEvidence(
+        { remote: 'origin', draft: true, maintainersCanModify: false },
+        TARGET,
+      ).pipe(Effect.provide(built.layer));
+
+      expect(evidence._tag).toBe('Uncertain');
+    }),
+  );
+
+  it.effect('treats configured but doctor-ineligible publication as not publication-eligible', () =>
+    Effect.gen(function* () {
+      const { built } = checkWith(
+        publicationWorld({
+          observation: eligibleObservation({ tokenPresent: false, protectedBranches: null }),
+        }),
+      );
+      const report = yield* describePublicationReadiness(
+        { remote: 'origin', draft: true, maintainersCanModify: false },
+        TARGET,
+      ).pipe(Effect.provide(built.layer));
+
+      expect(report.configured).toBe(true);
+      expect(report.eligible).toBe(false);
     }),
   );
 });

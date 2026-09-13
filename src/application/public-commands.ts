@@ -17,11 +17,11 @@ import {
   RunIdentityStore,
   RunStateUnavailable,
   readRetainedRunIdentity,
-  readRunWorkflowState,
   reconcileRunReports,
   recordRunIdentity,
   resolveRunContext,
 } from './run-identity/index.js';
+import { readRunStatus } from './status/index.js';
 
 import type { PublicCommandInvocation } from '../domain/public-commands.js';
 import type { RunWorkflowOutcome } from './run-workflow/index.js';
@@ -37,6 +37,7 @@ import type { RunGit, RunWorkspaceBlocked } from './git-provisioning/index.js';
 import type { GuidanceGit, GuidanceSnapshotStore } from './guidance/index.js';
 import type {
   DoctorReport,
+  PublicationProbe,
   ReadinessError,
   ReadinessFiles,
   ReadinessGit,
@@ -57,9 +58,9 @@ import type {
   RecordedRunIdentityReport,
   RunIdentityError,
   RunIdentityStore as RunIdentityStoreService,
-  RunProgressReport,
   RunProvenance,
 } from './run-identity/index.js';
+import type { RunStatusReport } from './status/index.js';
 import type { RepositoryHostIdentity, RepositoryLeaseStore } from './repository-lease/index.js';
 import type { RoleHostCapabilityError, RoleHostLauncher } from './role-conversations/index.js';
 import type { RoleTurnResourceObserver } from './role-permissions/index.js';
@@ -89,7 +90,7 @@ export type PublicCommandReport =
   | PreviewLocationsReport
   | ProfileCheckReport
   | RecordedRunIdentityReport
-  | RunProgressReport
+  | RunStatusReport
   | RunWorkflowReport;
 
 export type PublicCommandError =
@@ -160,6 +161,7 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
   | ReadinessHost
   | ReadinessFiles
   | ReadinessGit
+  | PublicationProbe
   | ProjectCommandProcess
   | ProjectEvidenceStore
   | OwnedProjectProcess
@@ -279,7 +281,7 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
     if (configArg === undefined || cwd === undefined || runId === undefined) {
       return stubReport(invocation);
     }
-    return yield* readRunWorkflowState({ configArg, cwd, runId });
+    return yield* readRunStatus({ configArg, cwd, runId });
   }
   if (invocation.command === 'doctor') {
     const configArg = invocation.config;
