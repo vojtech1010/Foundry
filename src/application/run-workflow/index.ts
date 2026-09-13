@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { REQUEST_NORMALIZED_FILENAME } from '../../domain/run-identity.js';
 import { decodeTesterTurnControl } from '../../domain/tester-outcomes.js';
 import { isActiveWorkflowState } from '../../domain/workflow.js';
-import { admitArchitectPlan } from '../architect-plan/index.js';
+import { admitArchitectPlan, resumeArchitectPlan } from '../architect-plan/index.js';
 import { CoderTurnRejected, handleCoderTurn } from '../coder-result/index.js';
 import { bootstrapRoleGuidance } from '../guidance/index.js';
 import { prepareAndHoldApplicationRuntime } from '../project-runtime/index.js';
@@ -277,6 +277,10 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
   const runArchitect = Effect.fn('advanceRun.runArchitect')(function* (
     history: VerifiedRunHistory,
   ) {
+    const resumeRouting = yield* resumeArchitectPlan({ runDirectory, runId });
+    if (resumeRouting.outcome === 'admitted') {
+      return;
+    }
     const prompt = yield* promptFor('architect', history);
     const attempt = countSessions(history.derived, 'architect') + 1;
     const settled = yield* performRoleTurn('architect', attempt, prompt, null);

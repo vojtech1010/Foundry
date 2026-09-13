@@ -245,6 +245,61 @@ const recordArchitectNoChangeCandidate = Effect.fn('recordArchitectNoChangeCandi
   });
 });
 
+function acceptedPlanOf(payload: PlanAcceptedPayload): AcceptedArchitectPlan {
+  return {
+    outcome: payload.outcome,
+    criteria: payload.criteria.map((criterion) => ({ id: criterion.id, text: criterion.text })),
+    runtimeValidationRequired: payload.runtimeValidationRequired,
+    requiresImplementation: payload.outcome === 'plan_ready',
+    execution: {
+      mode: payload.execution.mode,
+      objectives: payload.execution.objectives.map((objective) => ({
+        id: objective.id,
+        title: objective.title,
+        affectedPaths: [...objective.affectedPaths],
+        criterionIds: [...objective.criterionIds],
+      })),
+    },
+  };
+}
+
+export type ResumeArchitectPlanResult =
+  | { readonly outcome: 'none' }
+  | {
+      readonly outcome: 'admitted';
+      readonly plan: AcceptedArchitectPlan;
+      readonly transition: WorkflowTransitionReport;
+    };
+
+export const resumeArchitectPlan = Effect.fn('resumeArchitectPlan')(function* (options: {
+  readonly runDirectory: string;
+  readonly runId: string;
+}): Effect.fn.Return<
+  ResumeArchitectPlanResult,
+  IllegalWorkflowTransition | RunStateUnavailable | RunWorkspaceBlocked | RunHistoryError,
+  RunHistoryStorage | RunGit
+> {
+  const history = yield* readVerifiedRunHistory({
+    runDirectory: options.runDirectory,
+    runId: options.runId,
+    createIfMissing: false,
+  });
+  const payload = history.derived.acceptedPlan;
+  if (payload === null) {
+    return { outcome: 'none' };
+  }
+  const plan = acceptedPlanOf(payload);
+  if (!plan.requiresImplementation) {
+    yield* recordArchitectNoChangeCandidate(options.runDirectory, options.runId);
+  }
+  const transition = yield* transitionWorkflow({
+    runDirectory: options.runDirectory,
+    runId: options.runId,
+    request: plan.requiresImplementation ? { route: 'plan-accepted' } : { route: 'plan-no-change' },
+  });
+  return { outcome: 'admitted', plan, transition };
+});
+
 export type ArchitectPlanAdmission =
   | {
       readonly outcome: 'admitted';
