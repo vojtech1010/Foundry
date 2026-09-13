@@ -53,8 +53,12 @@ parallel implementation may help, but the accepted plan controls execution.
 
 ## Lifecycle
 
-1. **Provision source.** Fetch and verify the configured source branch, acquire
-   the repository lease, and create run-owned storage and a worktree.
+1. **Provision source.** Fetch the configured source branch, freeze its commit
+   without touching the operator checkout, acquire the repository lease, and
+   create run-owned storage plus the task branch and worktree at that commit.
+   Until the durable `worktree-ready` checkpoint exists the run derives
+   `blocked`; a colliding branch or workspace that this run cannot prove it owns
+   blocks without moving or deleting it.
 2. **Plan.** Architect produces a strictly validated plan with acceptance
    criteria and a runtime-validation decision.
 3. **Implement.** Coder implements the accepted plan and commits on the task

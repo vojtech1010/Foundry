@@ -18,6 +18,7 @@ import type {
   RunHistoryStorage,
   RunHistoryStorageError,
 } from './run-history/index.js';
+import type { RunGit, RunWorkspaceBlocked } from './git-provisioning/index.js';
 import type {
   DoctorReport,
   ReadinessError,
@@ -64,6 +65,7 @@ export type PublicCommandError =
   | ProfileCheckError
   | RunIdentityError
   | RunStateUnavailable
+  | RunWorkspaceBlocked
   | RunHistoryIntegrityError
   | RunHistoryStorageError
   | RunHistoryConflict;
@@ -94,6 +96,7 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
   | RunHistoryStorage
   | RepositoryLeaseStore
   | RepositoryHostIdentity
+  | RunGit
 > {
   if (invocation.command === 'run') {
     const configArg = invocation.config;

@@ -17,6 +17,7 @@ import { WorkflowStateSchema } from '../domain/workflow.js';
 import type { PublicCommand, PublicCommandInvocation } from '../domain/public-commands.js';
 import type { ReportFailureKind } from '../domain/public-commands.js';
 import type { PublicCommandError, PublicCommandReport } from '../application/public-commands.js';
+import type { RunGit } from '../application/git-provisioning/index.js';
 import type { ProjectCommandProcess } from '../application/profile-check/index.js';
 import type { RunHistoryStorage } from '../application/run-history/index.js';
 import type {
@@ -255,12 +256,38 @@ const ProfileCheckReportData = Schema.Struct({
 const RunWorkflowStateReportData = Schema.Struct({
   runId: Schema.String,
   workflowState: WorkflowStateSchema,
+  provenance: Schema.NullOr(
+    Schema.Struct({
+      repositoryRoot: Schema.String,
+      gitDirectory: Schema.String,
+      remoteUrl: Schema.String,
+      sourceRemote: Schema.String,
+      sourceBranch: Schema.String,
+      sourceCommit: Schema.String,
+      taskBranch: Schema.String,
+      workspace: Schema.String,
+      headCommit: Schema.String,
+    }),
+  ),
+});
+
+const RunProvenanceData = Schema.Struct({
+  repositoryRoot: Schema.String,
+  gitDirectory: Schema.String,
+  remoteUrl: Schema.String,
+  sourceRemote: Schema.String,
+  sourceBranch: Schema.String,
+  sourceCommit: Schema.String,
+  taskBranch: Schema.String,
+  workspace: Schema.String,
+  headCommit: Schema.String,
 });
 
 const RecordedRunReportData = Schema.Struct({
   runId: Schema.String,
   taskId: Schema.String,
   runDirectory: Schema.String,
+  provenance: RunProvenanceData,
   request: Schema.Struct({
     sourcePath: Schema.String,
     originalPath: Schema.String,
@@ -443,6 +470,35 @@ const decodeInvocation = Effect.fn('decodeInvocation')(function* (
   return { invocation: decoded, json };
 });
 
+function renderProvenanceLines(
+  provenance: {
+    readonly repositoryRoot: string;
+    readonly gitDirectory: string;
+    readonly remoteUrl: string;
+    readonly sourceRemote: string;
+    readonly sourceBranch: string;
+    readonly sourceCommit: string;
+    readonly taskBranch: string;
+    readonly workspace: string;
+    readonly headCommit: string;
+  } | null,
+): ReadonlyArray<string> {
+  if (provenance === null) {
+    return ['data.provenance: null'];
+  }
+  return [
+    `data.provenance.repositoryRoot: ${provenance.repositoryRoot}`,
+    `data.provenance.gitDirectory: ${provenance.gitDirectory}`,
+    `data.provenance.remoteUrl: ${provenance.remoteUrl}`,
+    `data.provenance.sourceRemote: ${provenance.sourceRemote}`,
+    `data.provenance.sourceBranch: ${provenance.sourceBranch}`,
+    `data.provenance.sourceCommit: ${provenance.sourceCommit}`,
+    `data.provenance.taskBranch: ${provenance.taskBranch}`,
+    `data.provenance.workspace: ${provenance.workspace}`,
+    `data.provenance.headCommit: ${provenance.headCommit}`,
+  ];
+}
+
 function renderHuman(envelope: ReportEnvelopeValue): string {
   const lines = [
     `schemaVersion: ${envelope.schemaVersion}`,
@@ -490,6 +546,7 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         `data.runId: ${data.runId}`,
         `data.taskId: ${data.taskId}`,
         `data.runDirectory: ${data.runDirectory}`,
+        ...renderProvenanceLines(data.provenance),
         `data.request.sourcePath: ${data.request.sourcePath}`,
         `data.request.originalPath: ${data.request.originalPath}`,
         `data.request.normalizedPath: ${data.request.normalizedPath}`,
@@ -500,7 +557,11 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         `data.request.normalizedPromptHash: ${data.request.normalizedPromptHash}`,
       );
     } else if ('workflowState' in data) {
-      lines.push(`data.runId: ${data.runId}`, `data.workflowState: ${data.workflowState}`);
+      lines.push(
+        `data.runId: ${data.runId}`,
+        `data.workflowState: ${data.workflowState}`,
+        ...renderProvenanceLines(data.provenance),
+      );
     } else {
       lines.push(
         `data.taskId: ${data.taskId}`,
@@ -536,6 +597,7 @@ function failureKindFor(error: PublicCommandError): ReportFailureKind {
     case 'RepositoryLeaseOwnershipLost':
     case 'RepositoryLeaseStorageError':
       return 'failed';
+    case 'RunWorkspaceBlocked':
     case 'RepositoryLeaseContended':
     case 'RepositoryLeaseAmbiguous':
       return 'blocked';
@@ -683,6 +745,7 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       runId: report.runId,
       taskId: report.taskId,
       runDirectory: report.runDirectory,
+      provenance: { ...report.provenance },
       request: {
         sourcePath: report.request.sourcePath,
         originalPath: report.request.originalPath,
@@ -699,6 +762,7 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
     return {
       runId: report.runId,
       workflowState: report.workflowState,
+      provenance: report.provenance === null ? null : { ...report.provenance },
     };
   }
   return {
@@ -733,6 +797,7 @@ export const runCli = Effect.fn('runCli')(function* (
   | RunHistoryStorage
   | RepositoryLeaseStore
   | RepositoryHostIdentity
+  | RunGit
 > {
   const decoded = yield* decodeInvocation(argv).pipe(Effect.result);
 

@@ -161,6 +161,23 @@ and worker resource records additionally identify their owned runtime sessions
 and working directories. A workspace or pane identifier alone does not prove
 which repository, branch, or role conversation is active.
 
+Run creation fetches the configured source branch without switching or updating
+the operator's checked-out branch, resolves the fetched commit, and appends a
+closed `source-frozen` event carrying the repository identity (root, Git
+directory, remote URL), source remote/branch/commit, task branch, workspace, and
+expected head. Foundry creates the task branch and run-owned worktree at that
+frozen commit and appends `worktree-ready` only after Git confirms the branch,
+HEAD, workspace, and base. The creation-to-`planning` transition follows that
+checkpoint, so verified history that stops at `run-created` or `source-frozen`
+derives `blocked` instead of an active role. Later forward movement of the
+remote source never rewrites the run's frozen base or its worktree.
+
+An existing task branch or workspace without this run's durable ownership
+evidence blocks the run without moving or deleting it. A retried run reuses an
+owned branch or worktree only when the recorded head still matches Git, and an
+ambiguous interruption before ownership was recorded blocks rather than
+adopting a coincidentally matching branch.
+
 Keep source/Git provenance and resource-provisioning evidence linked but
 distinct: a ready runtime is not proof of source ancestry, and a valid source
 commit is not proof that runtime provisioning or cleanup succeeded.
