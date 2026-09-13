@@ -70,6 +70,7 @@ import {
 } from '../src/domain/workflow.js';
 import { ReadinessFilesLive } from '../src/platform/readiness.js';
 import { RunGitLive } from '../src/platform/git-provisioning.js';
+import { GuidanceLive } from '../src/platform/guidance.js';
 import { RepositoryLeaseLive } from '../src/platform/repository-lease.js';
 import { RunHistoryLive } from '../src/platform/run-history.js';
 import { RunIdentityLive } from '../src/platform/run-identity.js';
@@ -213,6 +214,7 @@ const LiveFilesAndStore = Layer.mergeAll(
   RunIdentityLive,
   RunHistoryLive,
   RepositoryLeaseLive,
+  GuidanceLive,
 );
 
 function unusedRunGit(name: string) {
@@ -274,6 +276,7 @@ const CliLayer = Layer.mergeAll(
   RunHistoryLive,
   RepositoryLeaseLive,
   RunGitLive,
+  GuidanceLive,
 );
 
 function recordWithLive(options: {
@@ -720,7 +723,7 @@ describe('workflow state through run storage', () => {
         expect(identityText).toContain(`"schemaVersion": ${REQUEST_IDENTITY_SCHEMA_VERSION}`);
 
         const events = readHistoryEvents(report.runDirectory);
-        expect(events).toHaveLength(4);
+        expect(events).toHaveLength(5);
       } finally {
         fixture.cleanup();
       }
@@ -785,7 +788,7 @@ describe('workflow state through run storage', () => {
           runId: 'RUN-READ',
           runDirectory: recorded.runDirectory,
           historyPath: join(recorded.runDirectory, RUN_HISTORY_FILENAME),
-          revision: 4,
+          revision: 5,
           workflowState: 'planning',
           checkpoint: null,
           attempts: [],
@@ -794,7 +797,7 @@ describe('workflow state through run storage', () => {
         expect(planning.provenance).not.toBeNull();
 
         const events = readHistoryEvents(recorded.runDirectory);
-        expect(events).toHaveLength(4);
+        expect(events).toHaveLength(5);
         const [genesis] = events;
         if (genesis === undefined) {
           throw new Error('Expected a genesis event.');
@@ -806,13 +809,14 @@ describe('workflow state through run storage', () => {
           previousEventHash: null,
         });
         expect(events[1]).toMatchObject({ revision: 2, type: 'source-frozen' });
-        expect(events[2]).toMatchObject({ revision: 3, type: 'worktree-ready' });
-        const head = events[3];
+        expect(events[2]).toMatchObject({ revision: 3, type: 'guidance-frozen' });
+        expect(events[3]).toMatchObject({ revision: 4, type: 'worktree-ready' });
+        const head = events[4];
         if (head === undefined) {
           throw new Error('Expected a workflow transition event.');
         }
         expect(head).toMatchObject({
-          revision: 4,
+          revision: 5,
           type: 'workflow-transition',
           payload: { route: 'run-created', from: null, to: 'planning' },
         });
@@ -820,7 +824,7 @@ describe('workflow state through run storage', () => {
         expect(readHistoryWitness(recorded.runDirectory)).toEqual({
           schemaVersion: 1,
           runId: 'RUN-READ',
-          revision: 4,
+          revision: 5,
           eventHash: head.eventHash,
         });
         expect(verifyRunHistoryEvents(events, 'RUN-READ').ok).toBe(true);
@@ -834,7 +838,7 @@ describe('workflow state through run storage', () => {
           configPath: fixture.configPath,
           runId: 'RUN-READ',
         });
-        expect(coding).toMatchObject({ runId: 'RUN-READ', workflowState: 'coding', revision: 5 });
+        expect(coding).toMatchObject({ runId: 'RUN-READ', workflowState: 'coding', revision: 6 });
 
         writeState(fixture, 'RUN-READ', 'completed');
         const rebuilt = yield* readWithLive({
@@ -854,7 +858,7 @@ describe('workflow state through run storage', () => {
           checkpoint: null,
           attempts: [],
         });
-        expect(readHistoryEvents(recorded.runDirectory)).toHaveLength(5);
+        expect(readHistoryEvents(recorded.runDirectory)).toHaveLength(6);
       } finally {
         fixture.cleanup();
       }
@@ -914,7 +918,7 @@ describe('workflow state through run storage', () => {
         const readState = () => readWithLive({ configPath: fixture.configPath, runId: 'RUN-BAD' });
         const expectRebuiltPlanning = (report: RunProgressReport): void => {
           expect(report.workflowState).toBe('planning');
-          expect(report.revision).toBe(4);
+          expect(report.revision).toBe(5);
           expect(existsSync(statePath)).toBe(true);
           expect(
             Schema.decodeUnknownSync(WorkflowProgressDocumentSchema, {

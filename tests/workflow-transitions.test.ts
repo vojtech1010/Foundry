@@ -55,6 +55,8 @@ const WORKSPACE = '/target/.agent/worktrees/RUN-LEGAL';
 
 const IMPLEMENTED_COMMIT = 'abc123';
 
+const FROZEN_GUIDANCE_AGGREGATE_HASH = 'f'.repeat(64);
+
 const LiveStore = Layer.mergeAll(RunIdentityLive, RunHistoryLive);
 
 const REVIEW_APPROVAL: WorkflowTransitionRequest = {
@@ -213,6 +215,21 @@ function seedProvisioning(fixture: Fixture) {
             taskBranch: TASK_BRANCH,
             workspace: WORKSPACE,
             expectedHead: FROZEN_COMMIT,
+          },
+        } as const),
+    });
+    yield* appendRunEvent({
+      runDirectory: fixture.runDirectory,
+      runId: RUN_ID,
+      createIfMissing: false,
+      build: () =>
+        Effect.succeed({
+          type: 'guidance-frozen',
+          payload: {
+            sourceCommit: FROZEN_COMMIT,
+            manifestPath: 'guidance-manifest.json',
+            aggregateHash: FROZEN_GUIDANCE_AGGREGATE_HASH,
+            files: [],
           },
         } as const),
     });
@@ -441,7 +458,7 @@ describe('workflow transitions with live storage', () => {
           attempts: [],
         });
         const events = historyEventsOf(created);
-        expect(events).toHaveLength(4);
+        expect(events).toHaveLength(5);
         expect(events[0]).toMatchObject({
           revision: 1,
           previousEventHash: null,
@@ -449,9 +466,10 @@ describe('workflow transitions with live storage', () => {
           payload: { taskId: 'TASK-LEGAL' },
         });
         expect(events[1]).toMatchObject({ revision: 2, type: 'source-frozen' });
-        expect(events[2]).toMatchObject({ revision: 3, type: 'worktree-ready' });
-        expect(events[3]).toMatchObject({
-          revision: 4,
+        expect(events[2]).toMatchObject({ revision: 3, type: 'guidance-frozen' });
+        expect(events[3]).toMatchObject({ revision: 4, type: 'worktree-ready' });
+        expect(events[4]).toMatchObject({
+          revision: 5,
           type: 'workflow-transition',
           payload: {
             route: 'run-created',
@@ -463,7 +481,7 @@ describe('workflow transitions with live storage', () => {
 
         const alreadyCreated = yield* transition(created, RUN_CREATED).pipe(Effect.flip);
         expect(expectTransitionRefusal(alreadyCreated).from).toBe('planning');
-        expect(historyEventsOf(created)).toHaveLength(4);
+        expect(historyEventsOf(created)).toHaveLength(5);
       } finally {
         created.cleanup();
       }
@@ -1066,7 +1084,7 @@ describe('workflow transitions with live storage', () => {
           state: 'planning',
           reason: 'role timeout',
         });
-        expect(historyEventsOf(fixture)).toHaveLength(5);
+        expect(historyEventsOf(fixture)).toHaveLength(6);
 
         const second = yield* recordAttempt(fixture, {
           kind: 'repair',
@@ -1083,14 +1101,14 @@ describe('workflow transitions with live storage', () => {
           attempts: [first.attempt, second.attempt],
         });
         const events = historyEventsOf(fixture);
-        expect(events).toHaveLength(6);
-        expect(events[4]).toMatchObject({
-          revision: 5,
+        expect(events).toHaveLength(7);
+        expect(events[5]).toMatchObject({
+          revision: 6,
           type: 'workflow-attempt',
           payload: first.attempt,
         });
-        expect(events[5]).toMatchObject({
-          revision: 6,
+        expect(events[6]).toMatchObject({
+          revision: 7,
           type: 'workflow-attempt',
           payload: second.attempt,
         });

@@ -18,6 +18,7 @@ import type { PublicCommand, PublicCommandInvocation } from '../domain/public-co
 import type { ReportFailureKind } from '../domain/public-commands.js';
 import type { PublicCommandError, PublicCommandReport } from '../application/public-commands.js';
 import type { RunGit } from '../application/git-provisioning/index.js';
+import type { GuidanceGit, GuidanceSnapshotStore } from '../application/guidance/index.js';
 import type { ProjectCommandProcess } from '../application/profile-check/index.js';
 import type { RunHistoryStorage } from '../application/run-history/index.js';
 import type {
@@ -600,7 +601,11 @@ function failureKindFor(error: PublicCommandError): ReportFailureKind {
     case 'RunWorkspaceBlocked':
     case 'RepositoryLeaseContended':
     case 'RepositoryLeaseAmbiguous':
+    case 'GuidanceSnapshotRejected':
       return 'blocked';
+    case 'GuidanceSnapshotInvalid':
+    case 'GuidanceStorageError':
+      return 'failed';
     default:
       return INVALID_INVOCATION_KIND;
   }
@@ -798,6 +803,8 @@ export const runCli = Effect.fn('runCli')(function* (
   | RepositoryLeaseStore
   | RepositoryHostIdentity
   | RunGit
+  | GuidanceGit
+  | GuidanceSnapshotStore
 > {
   const decoded = yield* decodeInvocation(argv).pipe(Effect.result);
 

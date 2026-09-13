@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Schema } from 'effect';
 
+import { GuidanceSnapshotFileSchema } from './guidance.js';
 import { GitCommitId } from './run-locations.js';
 import { Identifier, Sha256Hex } from './run-identity.js';
 import {
@@ -29,6 +30,7 @@ export const RUN_HISTORY_LOCK_FILENAME = 'events.jsonl.lock' as const;
 export const RUN_HISTORY_EVENT_TYPES = [
   'run-created',
   'source-frozen',
+  'guidance-frozen',
   'worktree-ready',
   'workflow-transition',
   'workflow-attempt',
@@ -80,6 +82,15 @@ export const WorktreeReadyPayloadSchema = Schema.Struct({
 
 export type WorktreeReadyPayload = (typeof WorktreeReadyPayloadSchema)['Type'];
 
+export const GuidanceFrozenPayloadSchema = Schema.Struct({
+  sourceCommit: GitCommitId,
+  manifestPath: Schema.NonEmptyString,
+  aggregateHash: Sha256Hex,
+  files: Schema.Array(GuidanceSnapshotFileSchema),
+});
+
+export type GuidanceFrozenPayload = (typeof GuidanceFrozenPayloadSchema)['Type'];
+
 export const WorkflowTransitionPayloadSchema = Schema.Struct({
   route: Schema.Literals(WORKFLOW_TRANSITION_ROUTE_KINDS),
   from: Schema.NullOr(WorkflowStateSchema),
@@ -128,6 +139,12 @@ export const SourceFrozenEventSchema = Schema.Struct({
   payload: SourceFrozenPayloadSchema,
 });
 
+export const GuidanceFrozenEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('guidance-frozen'),
+  payload: GuidanceFrozenPayloadSchema,
+});
+
 export const WorktreeReadyEventSchema = Schema.Struct({
   ...RunEventEnvelopeFields,
   type: Schema.Literal('worktree-ready'),
@@ -155,6 +172,7 @@ export const CleanupProgressEventSchema = Schema.Struct({
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
+  GuidanceFrozenEventSchema,
   WorktreeReadyEventSchema,
   WorkflowTransitionEventSchema,
   WorkflowAttemptEventSchema,
@@ -175,6 +193,7 @@ export type RunEventEnvelope = {
 export type RunEventDraft =
   | { readonly type: 'run-created'; readonly payload: RunCreatedPayload }
   | { readonly type: 'source-frozen'; readonly payload: SourceFrozenPayload }
+  | { readonly type: 'guidance-frozen'; readonly payload: GuidanceFrozenPayload }
   | { readonly type: 'worktree-ready'; readonly payload: WorktreeReadyPayload }
   | { readonly type: 'workflow-transition'; readonly payload: WorkflowTransitionPayload }
   | { readonly type: 'workflow-attempt'; readonly payload: WorkflowAttemptPayload }
@@ -196,6 +215,7 @@ export interface RunHistoryDerivedState {
   readonly attempts: ReadonlyArray<WorkflowAttempt>;
   readonly cleanupProgress: CleanupProgressPayload | null;
   readonly sourceFrozen: SourceFrozenPayload | null;
+  readonly guidanceFrozen: GuidanceFrozenPayload | null;
   readonly worktreeReady: WorktreeReadyPayload | null;
 }
 
@@ -254,6 +274,27 @@ function canonicalEventText(event: UnsignedRunEvent): string {
           sourceRemote: event.payload.sourceRemote,
           taskBranch: event.payload.taskBranch,
           workspace: event.payload.workspace,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'guidance-frozen':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          aggregateHash: event.payload.aggregateHash,
+          files: event.payload.files.map((file) => ({
+            byteLength: file.byteLength,
+            contentHash: file.contentHash,
+            path: file.path,
+            retainedPath: file.retainedPath,
+          })),
+          manifestPath: event.payload.manifestPath,
+          sourceCommit: event.payload.sourceCommit,
         },
         previousEventHash: event.previousEventHash,
         revision: event.revision,
@@ -357,6 +398,8 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'run-created', payload: event.payload };
     case 'source-frozen':
       return { ...envelope, type: 'source-frozen', payload: event.payload };
+    case 'guidance-frozen':
+      return { ...envelope, type: 'guidance-frozen', payload: event.payload };
     case 'worktree-ready':
       return { ...envelope, type: 'worktree-ready', payload: event.payload };
     case 'workflow-transition':
@@ -424,6 +467,7 @@ export function verifyRunHistoryEvents(
   let checkpoint: WorkflowState | null = null;
   let cleanupProgress: CleanupProgressPayload | null = null;
   let sourceFrozen: SourceFrozenPayload | null = null;
+  let guidanceFrozen: GuidanceFrozenPayload | null = null;
   let worktreeReady: WorktreeReadyPayload | null = null;
   const attempts: Array<WorkflowAttempt> = [];
   let previousHash: string | null = null;
@@ -477,6 +521,31 @@ export function verifyRunHistoryEvents(
         sourceFrozen = event.payload;
         break;
       }
+      case 'guidance-frozen': {
+        if (state !== null) {
+          return {
+            ok: false,
+            problem: `${label} records frozen guidance after workflow work began`,
+          };
+        }
+        if (sourceFrozen === null) {
+          return {
+            ok: false,
+            problem: `${label} records frozen guidance before the source freeze`,
+          };
+        }
+        if (guidanceFrozen !== null) {
+          return { ok: false, problem: `frozen guidance appears again at ${label}` };
+        }
+        if (event.payload.sourceCommit !== sourceFrozen.sourceCommit) {
+          return {
+            ok: false,
+            problem: `${label} records guidance for a different source commit`,
+          };
+        }
+        guidanceFrozen = event.payload;
+        break;
+      }
       case 'worktree-ready': {
         if (state !== null) {
           return {
@@ -521,6 +590,12 @@ export function verifyRunHistoryEvents(
             problem: `${label} records run creation before durable worktree readiness`,
           };
         }
+        if (event.payload.route === 'run-created' && guidanceFrozen === null) {
+          return {
+            ok: false,
+            problem: `${label} records run creation before durable frozen guidance`,
+          };
+        }
         const problem = verifyTransitionPayload(event.payload, state, checkpoint);
         if (problem !== null) {
           return { ok: false, problem: `${label}: ${problem}` };
@@ -563,6 +638,14 @@ export function verifyRunHistoryEvents(
   return {
     ok: true,
     head: { revision: events.length, eventHash: previousHash },
-    derived: { state, checkpoint, attempts, cleanupProgress, sourceFrozen, worktreeReady },
+    derived: {
+      state,
+      checkpoint,
+      attempts,
+      cleanupProgress,
+      sourceFrozen,
+      guidanceFrozen,
+      worktreeReady,
+    },
   };
 }
