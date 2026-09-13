@@ -4,7 +4,11 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { CoderTurnRejected, handleCoderTurn } from '../src/application/coder-result/index.js';
+import {
+  CoderTurnRejected,
+  handleCoderTurn,
+  validateCoderTurnControl,
+} from '../src/application/coder-result/index.js';
 import { RunGit } from '../src/application/git-provisioning/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../src/application/run-history/index.js';
 import { transitionWorkflow } from '../src/application/workflow-transitions/index.js';
@@ -204,6 +208,18 @@ function readHistory(fixture: Fixture) {
     createIfMissing: false,
   }).pipe(Effect.provide(RunHistoryLive));
 }
+
+describe('coder turn control validation', () => {
+  it('accepts the closed outcomes and names the envelope error otherwise', () => {
+    expect(validateCoderTurnControl({ schemaVersion: 1, outcome: 'implemented' })).toEqual({
+      ok: true,
+      problem: '',
+    });
+    const invalid = validateCoderTurnControl({ schemaVersion: 1, outcome: 'maybe' });
+    expect(invalid.ok).toBe(false);
+    expect(invalid.problem.length).toBeGreaterThan(0);
+  });
+});
 
 describe('blocked coder turn', () => {
   it.effect('preserves evidence without recording a result or transitioning', () =>

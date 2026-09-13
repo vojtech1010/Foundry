@@ -9,6 +9,7 @@ import {
   acceptArchitectPlan,
   admitArchitectPlan,
   resumeArchitectPlan,
+  validateArchitectPlanControl,
 } from '../src/application/architect-plan/index.js';
 import { RunGit, RunWorkspaceBlocked } from '../src/application/git-provisioning/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../src/application/run-history/index.js';
@@ -227,6 +228,13 @@ describe('architect plan control contract', () => {
     for (const invalid of invalidControls) {
       expect(decodeArchitectPlanControl(invalid).ok, JSON.stringify(invalid)).toBe(false);
     }
+  });
+
+  it('validates the envelope for same-session control repair', () => {
+    expect(validateArchitectPlanControl(PLAN_READY)).toEqual({ ok: true, problem: '' });
+    const invalid = validateArchitectPlanControl({ schemaVersion: 1, outcome: 'maybe' });
+    expect(invalid.ok).toBe(false);
+    expect(invalid.problem.length).toBeGreaterThan(0);
   });
 
   it('labels criteria in order without paraphrasing the operator', () => {

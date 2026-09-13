@@ -64,6 +64,16 @@ export interface AcceptArchitectPlanOptions {
   readonly retryReason: string;
 }
 
+export interface RoleControlValidation {
+  readonly ok: boolean;
+  readonly problem: string;
+}
+
+export function validateArchitectPlanControl(control: Schema.Json): RoleControlValidation {
+  const decoded = decodeArchitectPlanControl(control);
+  return decoded.ok ? { ok: true, problem: '' } : { ok: false, problem: decoded.problem };
+}
+
 function planAcceptedPayload(plan: AcceptedArchitectPlan): PlanAcceptedPayload {
   return {
     outcome: plan.outcome,

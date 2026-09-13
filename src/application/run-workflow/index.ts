@@ -1,11 +1,20 @@
 import { DateTime, Duration, Effect, Ref, Result, Schema } from 'effect';
 import { dirname, join } from 'node:path';
 
+import { decodeReviewerTurnControl } from '../../domain/reviewer-outcomes.js';
 import { REQUEST_NORMALIZED_FILENAME } from '../../domain/run-identity.js';
 import { decodeTesterTurnControl } from '../../domain/tester-outcomes.js';
 import { isActiveWorkflowState } from '../../domain/workflow.js';
-import { admitArchitectPlan, resumeArchitectPlan } from '../architect-plan/index.js';
-import { CoderTurnRejected, handleCoderTurn } from '../coder-result/index.js';
+import {
+  admitArchitectPlan,
+  resumeArchitectPlan,
+  validateArchitectPlanControl,
+} from '../architect-plan/index.js';
+import {
+  CoderTurnRejected,
+  handleCoderTurn,
+  validateCoderTurnControl,
+} from '../coder-result/index.js';
 import { bootstrapRoleGuidance } from '../guidance/index.js';
 import { prepareAndHoldApplicationRuntime } from '../project-runtime/index.js';
 import { runProjectVerification } from '../project-verification/index.js';
@@ -15,7 +24,7 @@ import { handleReviewerTurn } from '../reviewer-outcomes/index.js';
 import { RoleHostLauncher } from '../role-conversations/index.js';
 import { RunIdentityStore, RunIdentityStorageError } from '../run-identity/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../run-history/index.js';
-import { handleTesterTurn } from '../tester-validation/index.js';
+import { handleTesterTurn, validateTesterTurnControl } from '../tester-validation/index.js';
 import { routeAfterProjectChecks } from '../validation-routing/index.js';
 import { recordWorkflowAttempt, transitionWorkflow } from '../workflow-transitions/index.js';
 
@@ -51,6 +60,24 @@ export interface RunWorkflowOutcome {
 
 function errorMessage(error: { readonly message: string }): string {
   return error.message;
+}
+
+function roleControlValidator(
+  role: WorkflowRole,
+): (control: Schema.Json) => { readonly ok: boolean; readonly problem: string } {
+  switch (role) {
+    case 'architect':
+      return validateArchitectPlanControl;
+    case 'coder':
+      return validateCoderTurnControl;
+    case 'tester':
+      return validateTesterTurnControl;
+    case 'reviewer':
+      return (control) => {
+        const decoded = decodeReviewerTurnControl(control);
+        return decoded.ok ? { ok: true, problem: '' } : { ok: false, problem: decoded.problem };
+      };
+  }
 }
 
 function stagesOf(history: VerifiedRunHistory): ReadonlyArray<WorkflowState> {
@@ -229,7 +256,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       timeoutMs: configuration.timeouts.commandMs,
       maxOutputBytes: configuration.artifacts.maxRoleHandoffBytes,
     });
-    return yield* startGovernedRoleTurn({
+    const governedTurn = {
       runDirectory,
       runId,
       role,
@@ -241,7 +268,12 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       deadline,
       pollMs: configuration.timeouts.pollMs,
       turnTimeoutMs: configuration.timeouts.roleMs,
-    }).pipe(Effect.provide(hostLayer));
+      controlRepair: {
+        maxRepairs: configuration.limits.maxControlRepairsPerAttempt,
+        validate: roleControlValidator(role),
+      },
+    };
+    return yield* startGovernedRoleTurn(governedTurn).pipe(Effect.provide(hostLayer));
   });
 
   const recordControlRepair = Effect.fn('advanceRun.recordControlRepair')(function* (

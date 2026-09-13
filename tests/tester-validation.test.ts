@@ -8,7 +8,10 @@ import { join } from 'node:path';
 
 import { RunGit } from '../src/application/git-provisioning/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../src/application/run-history/index.js';
-import { handleTesterTurn } from '../src/application/tester-validation/index.js';
+import {
+  handleTesterTurn,
+  validateTesterTurnControl,
+} from '../src/application/tester-validation/index.js';
 import { RunHistoryLive } from '../src/platform/run-history.js';
 import { RUN_ID, seedVerifyingRun } from './fixtures/checks-runtime-run.js';
 
@@ -81,6 +84,18 @@ function handle(runDirectory: string, control: Schema.Json, retriesRemaining = 1
     retryReason: 'the test requested another observation',
   }).pipe(Effect.provide(Live));
 }
+
+describe('Tester control validation', () => {
+  it('accepts observation outcomes and names the envelope error otherwise', () => {
+    expect(validateTesterTurnControl({ schemaVersion: 1, outcome: 'observed' })).toEqual({
+      ok: true,
+      problem: '',
+    });
+    const invalid = validateTesterTurnControl({ schemaVersion: 1, outcome: 'passed' });
+    expect(invalid.ok).toBe(false);
+    expect(invalid.problem.length).toBeGreaterThan(0);
+  });
+});
 
 describe('Tester observations settle without pass/fail verdicts', () => {
   it.effect('observed settles the stage to reviewing without involving Coder', () =>
