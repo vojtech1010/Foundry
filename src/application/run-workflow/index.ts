@@ -3,8 +3,9 @@ import { dirname, join } from 'node:path';
 
 import { decodeReviewerTurnControl } from '../../domain/reviewer-outcomes.js';
 import { REQUEST_NORMALIZED_FILENAME } from '../../domain/run-identity.js';
+import { describeRunCleanupReport } from '../../domain/run-cleanup.js';
 import { decodeTesterTurnControl } from '../../domain/tester-outcomes.js';
-import { isActiveWorkflowState } from '../../domain/workflow.js';
+import { isActiveWorkflowState, isTerminalWorkflowState } from '../../domain/workflow.js';
 import {
   admitArchitectPlan,
   resumeArchitectPlan,
@@ -25,10 +26,15 @@ import { handleReviewerTurn } from '../reviewer-outcomes/index.js';
 import { RoleHostLauncher } from '../role-conversations/index.js';
 import { describePublicationReadiness } from '../readiness/index.js';
 import { RunIdentityStore, RunIdentityStorageError } from '../run-identity/index.js';
+import { disposeRunResources } from '../run-cleanup/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../run-history/index.js';
 import { handleTesterTurn, validateTesterTurnControl } from '../tester-validation/index.js';
 import { routeAfterProjectChecks } from '../validation-routing/index.js';
-import { recordWorkflowAttempt, transitionWorkflow } from '../workflow-transitions/index.js';
+import {
+  recordCleanupProgress,
+  recordWorkflowAttempt,
+  transitionWorkflow,
+} from '../workflow-transitions/index.js';
 
 import type { ProjectConfiguration } from '../../domain/project-configuration.js';
 import type { RoleHostControl, RoleHostSessionState } from '../../domain/role-host.js';
@@ -696,21 +702,49 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     );
   });
 
-  const completed = yield* body.pipe(
-    Effect.ensuring(disposeRuntime().pipe(Effect.ignore)),
-    Effect.result,
-  );
-  const summary = Result.isSuccess(completed)
-    ? completed.success
-    : yield* blockOnFailure(errorMessage(completed.failure));
+  const disposeOwnedResources = Effect.fn('advanceRun.disposeOwnedResources')(function* (
+    summary: RunWorkflowOutcome,
+  ) {
+    if (!isTerminalWorkflowState(summary.workflowState)) {
+      return;
+    }
+    const runtime = yield* Ref.get(runtimeRef);
+    const disposal = yield* disposeRunResources({
+      runDirectory,
+      runId,
+      configuration,
+      runtime,
+    });
+    if (disposal === null) {
+      return;
+    }
+    yield* Ref.set(runtimeRef, null);
+    yield* recordCleanupProgress({
+      runDirectory,
+      runId,
+      outcome: disposal.outcome,
+      detail: describeRunCleanupReport(disposal.resources),
+    }).pipe(Effect.ignore);
+  });
 
-  /**
-   * A completed or no-change run owns exactly one canonical handoff. The write
-   * is idempotent: it reconciles from verified history, so an already-settled
-   * run (including `resume`) rewrites identical bytes or repairs a missing
-   * report. A run that is not terminally successful has no handoff and this is
-   * a no-op.
-   */
-  yield* reconcileHandoff({ runDirectory, runId });
-  return summary;
+  const finalize = Effect.gen(function* () {
+    const completed = yield* body.pipe(Effect.result);
+    const summary = Result.isSuccess(completed)
+      ? completed.success
+      : yield* blockOnFailure(errorMessage(completed.failure));
+
+    yield* disposeOwnedResources(summary);
+
+    /**
+     * A completed or no-change run owns exactly one canonical handoff. The write
+     * is idempotent: it reconciles from verified history, so an already-settled
+     * run (including `resume`) rewrites identical bytes or repairs a missing
+     * report. A run that is not terminally successful has no handoff and this is
+     * a no-op.
+     */
+    yield* reconcileHandoff({ runDirectory, runId });
+    return summary;
+  });
+
+  return yield* finalize.pipe(Effect.ensuring(disposeRuntime().pipe(Effect.ignore)));
 });
