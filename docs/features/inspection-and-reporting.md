@@ -181,10 +181,13 @@ output is a presentation of the same durable facts.
 ## Retention cleanup
 
 Status and inspection distinguish result completion from cleanup completion.
-Expose per-role and per-worker disposal status, pending/failed cleanup, retained
-resources, and uncertain ownership. Successful checks may contain non-blocking
-process-shutdown warnings; preserve them without claiming either failed
-acceptance or successful resource disposal solely from the command exit code.
+End-of-run disposal is automatic and records a cleanup-progress outcome naming
+each owned resource and its disposition, so a terminal result does not by itself
+prove that resource disposal succeeded. Expose per-role and per-worker disposal
+status, pending/failed cleanup, retained resources, and uncertain ownership.
+Successful checks may contain non-blocking process-shutdown warnings; preserve
+them without claiming either failed acceptance or successful resource disposal
+solely from the command exit code.
 
 List eligible terminal runs before deleting them, then confirm through the
 supported cleanup command. Cleanup validates state, event logs, workers,

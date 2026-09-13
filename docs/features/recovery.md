@@ -110,11 +110,15 @@ The supported surface is `resume --run-id <id> --abandon --reason <text>`.
 Abandonment is idempotent for the same run and reason; a different repeated
 reason is appended as a new audit note without rerunning cleanup.
 
-Result acceptance and resource disposal are separate outcomes. A completed run
-may still have pending/failed role shutdown, uncertain harness ownership, or a
-worktree-removal warning. Preserve its accepted result and report the cleanup
-problem; do not rerun implementation or assume cleanup succeeded from the
-terminal workflow state. Reconcile ownership before retrying resource cleanup.
+Result acceptance and resource disposal are separate outcomes. At the end of
+every terminal run Foundry automatically disposes the resources it owns — the
+application process, recorded role sessions, the run worktree, and any worker
+worktrees — and records a cleanup-progress outcome independently of the terminal
+workflow state. A completed run may still have pending/failed role shutdown,
+uncertain harness ownership, or a worktree-removal warning. Preserve its accepted
+result and report the cleanup problem; do not rerun implementation or assume
+cleanup succeeded from the terminal workflow state. Reconcile ownership before
+retrying resource cleanup.
 
 Disposing an application process, role session, or worker worktree does not by
 itself prove that a task branch was deleted. Preserve result access and durable
