@@ -8,6 +8,7 @@ import {
 } from '../../domain/reviewer-outcomes.js';
 import { RUN_HISTORY_FILENAME } from '../../domain/run-history.js';
 import { decodeTesterTurnControl } from '../../domain/tester-outcomes.js';
+import { isTerminalWorkflowState } from '../../domain/workflow.js';
 import { readVerifiedRunHistory } from '../run-history/index.js';
 import { readRunWorkflowState } from '../run-identity/index.js';
 
@@ -644,6 +645,7 @@ export function buildRunInspectReport(options: BuildRunInspectReportOptions): Ru
     resultCommit,
   });
   const publication = publicationSection(events, forward);
+  const cleanup = derived.cleanupProgress === null ? null : { ...derived.cleanupProgress };
   const journals = journalsOf(derived);
   const captures = capturesOf(derived);
   const state = derived.state;
@@ -724,6 +726,18 @@ export function buildRunInspectReport(options: BuildRunInspectReportOptions): Ru
             )
           : emptyNotProven('No publication checkpoint or transition is recorded.')
         : available('Publication transitions and checkpoints are listed in order.'),
+    cleanup:
+      cleanup !== null
+        ? available(
+            `Cleanup completion is recorded separately from result acceptance: ${cleanup.outcome}.`,
+          )
+        : state !== null && isTerminalWorkflowState(state)
+          ? unavailable(
+              'The run is terminal, but no cleanup-progress record exists, so cleanup completion is not distinguished from result completion.',
+            )
+          : emptyNotProven(
+              'No cleanup-progress record is recorded; absence is not proof that no result resources were disposed.',
+            ),
     journals:
       journals.length === 0
         ? emptyNotProven(
@@ -757,6 +771,7 @@ export function buildRunInspectReport(options: BuildRunInspectReportOptions): Ru
     corrections,
     decision,
     publication,
+    cleanup,
     journals,
     captures,
   };

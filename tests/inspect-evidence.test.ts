@@ -433,6 +433,13 @@ const COMPLETED_DRAFTS: ReadonlyArray<RunEventDraft> = [
       checkpoint: null,
     },
   },
+  {
+    type: 'cleanup-progress',
+    payload: {
+      outcome: 'succeeded',
+      detail: 'Disposed the runtime, role sessions, and run worktree.',
+    },
+  },
 ];
 
 const DECISION_NONCE = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
@@ -655,6 +662,11 @@ describe('inspect report projection', () => {
     expect(report.sections.reviewer.availability).toBe('available');
     expect(report.sections.checks.availability).toBe('available');
     expect(report.sections.journals.availability).toBe('empty-not-proven');
+    expect(report.cleanup).toMatchObject({
+      outcome: 'succeeded',
+      detail: 'Disposed the runtime, role sessions, and run worktree.',
+    });
+    expect(report.sections.cleanup.availability).toBe('available');
     expect(report.failures.attempts).toHaveLength(1);
     expect(report.corrections).toHaveLength(1);
     expect(report.corrections[0]?.route).toBe('correction-required');
@@ -668,6 +680,7 @@ describe('inspect report projection', () => {
     expect(report.sections.plan.availability).toBe('empty-not-proven');
     expect(report.sections.checks.availability).toBe('empty-not-proven');
     expect(report.sections.findings.availability).toBe('empty-not-proven');
+    expect(report.sections.cleanup.availability).toBe('empty-not-proven');
     expect(report.sections.plan.detail).toContain('not proof');
   });
 
@@ -711,6 +724,7 @@ describe('inspect report projection', () => {
     );
     expect(report.decision?.unresolvedFindings.map((finding) => finding.id)).toEqual(['FND-001']);
     expect(report.sections.decision.availability).toBe('available');
+    expect(report.sections.cleanup.availability).toBe('empty-not-proven');
   });
 
   it('enriches the decision with the optional publication records when present', () => {
@@ -821,6 +835,7 @@ describe('inspect through the cli envelope', () => {
         expect(envelope.data.sections.plan.availability).toBe('available');
         expect(envelope.data.plan?.criteria[0]?.id).toBe('AC-001');
         expect(envelope.data.captures.entries.some((entry) => entry.verified)).toBe(true);
+        expect(envelope.data.cleanup).toMatchObject({ outcome: 'succeeded' });
 
         const humanResult = yield* runCli([
           'inspect',
@@ -833,6 +848,8 @@ describe('inspect through the cli envelope', () => {
         expect(humanResult.stdout).toContain('command: inspect');
         expect(humanResult.stdout).toContain('data.sections.plan: available');
         expect(humanResult.stdout).toContain('data.sections.decision: empty-not-proven');
+        expect(humanResult.stdout).toContain('data.sections.cleanup: available');
+        expect(humanResult.stdout).toContain('data.cleanup.outcome: succeeded');
         expect(humanResult.stdout).toContain(`data.plan.criteria: AC-001 commit=${COMMIT_TWO}`);
         expect(humanResult.stdout).toContain('data.reviewer.outcome: approved');
         expect(humanResult.stdout.endsWith('\n')).toBe(true);
