@@ -124,12 +124,18 @@ Git, and provisioning evidence intact, records no accepted implementation, and
 does not enter verification with a fabricated commit. A Coder no-change claim
 remains provisional until verification and Reviewer accept it.
 
-Deterministic verification runs before required runtime preparation. When the
-plan does not require Tester, Foundry records an explicit skip with its reason
-and proceeds to Reviewer using the verification report. No Tester invocation or
-synthetic passed Tester artifact is needed. A skipped Tester is not a claim that
-live application behavior was exercised, and command-log filenames are not
-proof that a Tester session ran.
+Deterministic verification runs before required runtime preparation: Foundry
+holds runtime reset, build, start, and readiness until the commit-bound
+verification report exists and every required gate passed. A failed required
+check records its findings and routes to correction or blocked without bringing
+the application up. The `checks-passed-testing` route is accepted only when a
+`ready` runtime-lifecycle record for the same commit was recorded after the
+commit-bound verification event, so the run history orders verification, then
+runtime preparation, then Tester. When the plan does not require Tester, Foundry
+records an explicit skip with its reason and proceeds to Reviewer using the
+verification report. No Tester invocation or synthetic passed Tester artifact is
+needed. A skipped Tester is not a claim that live application behavior was
+exercised, and command-log filenames are not proof that a Tester session ran.
 
 ## Corrections
 

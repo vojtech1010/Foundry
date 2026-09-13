@@ -403,7 +403,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       });
     }
     const commit = implementation.commit ?? implementation.baseCommit;
-    yield* runProjectVerification({
+    const report = yield* runProjectVerification({
       runDirectory,
       runId,
       repositoryPath: worktree,
@@ -411,7 +411,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       commit,
       configuration,
     });
-    if (plan.runtimeValidationRequired) {
+    if (plan.runtimeValidationRequired && report.result === 'passed') {
       const prepared = yield* prepareAndHoldApplicationRuntime({
         runDirectory,
         runId,
