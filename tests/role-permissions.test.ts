@@ -114,7 +114,9 @@ function scriptedObserver(
       fingerprint: () => {
         const fingerprint = fingerprints[Math.min(index, fingerprints.length - 1)];
         index += 1;
-        return Effect.succeed(fingerprint ?? { projectStatus: '', worktreeStatus: null });
+        return Effect.succeed(
+          fingerprint ?? { projectStatus: '', worktreeStatus: null, ownedResources: '' },
+        );
       },
     }),
   );
@@ -218,8 +220,8 @@ describe('governed role turn', () => {
         yield* seedRunCreated(fixture.runDirectory);
         const host = fakeRoleHost();
         const observer = scriptedObserver([
-          { projectStatus: '', worktreeStatus: null },
-          { projectStatus: ' M src/foo.ts', worktreeStatus: null },
+          { projectStatus: '', worktreeStatus: null, ownedResources: '' },
+          { projectStatus: ' M src/foo.ts', worktreeStatus: null, ownedResources: '' },
         ]);
         const error = yield* startGovernedRoleTurn(
           governedOptions(fixture.runDirectory, 'reviewer'),
@@ -242,6 +244,38 @@ describe('governed role turn', () => {
   );
 
   it.effect(
+    'stops a read-only turn that mutates run-owned resources and records the violation',
+    () =>
+      Effect.gen(function* () {
+        const fixture = setupFixture();
+        try {
+          yield* seedRunCreated(fixture.runDirectory);
+          const host = fakeRoleHost();
+          const observer = scriptedObserver([
+            { projectStatus: '', worktreeStatus: null, ownedResources: 'scratch/capture|0' },
+            { projectStatus: '', worktreeStatus: null, ownedResources: 'scratch/capture|12' },
+          ]);
+          const error = yield* startGovernedRoleTurn(
+            governedOptions(fixture.runDirectory, 'architect'),
+          ).pipe(Effect.provide(Layer.mergeAll(RunHistoryLive, host.layer, observer)), Effect.flip);
+          expect(error).toBeInstanceOf(RolePermissionViolation);
+          if (error instanceof RolePermissionViolation) {
+            expect(error.reason).toBe('run-resource-mutation');
+          }
+          const history = yield* readVerifiedRunHistory({
+            runDirectory: fixture.runDirectory,
+            runId: RUN_ID,
+            createIfMissing: false,
+          }).pipe(Effect.provide(RunHistoryLive));
+          expect(history.derived.permissionViolations).toHaveLength(1);
+          expect(history.derived.permissionViolations[0]?.kind).toBe('run-resource-mutation');
+        } finally {
+          fixture.cleanup();
+        }
+      }),
+  );
+
+  it.effect(
     'runs the settled turn without mutation and records the derived working directory',
     () =>
       Effect.gen(function* () {
@@ -250,8 +284,8 @@ describe('governed role turn', () => {
           yield* seedRunCreated(fixture.runDirectory);
           const host = fakeRoleHost();
           const observer = scriptedObserver([
-            { projectStatus: '', worktreeStatus: null },
-            { projectStatus: '', worktreeStatus: null },
+            { projectStatus: '', worktreeStatus: null, ownedResources: '' },
+            { projectStatus: '', worktreeStatus: null, ownedResources: '' },
           ]);
           const result = yield* startGovernedRoleTurn(
             governedOptions(fixture.runDirectory, 'architect'),
@@ -277,7 +311,9 @@ describe('governed role turn', () => {
       try {
         yield* seedRunCreated(fixture.runDirectory);
         const host = fakeRoleHost();
-        const observer = scriptedObserver([{ projectStatus: '', worktreeStatus: null }]);
+        const observer = scriptedObserver([
+          { projectStatus: '', worktreeStatus: null, ownedResources: '' },
+        ]);
         const error = yield* startGovernedRoleTurn(
           governedOptions(fixture.runDirectory, 'tester', { ...LOCATIONS, runtimeBaseUrl: null }),
         ).pipe(Effect.provide(Layer.mergeAll(RunHistoryLive, host.layer, observer)), Effect.flip);
@@ -304,7 +340,9 @@ describe('governed role turn', () => {
       try {
         yield* seedRunCreated(fixture.runDirectory);
         const host = fakeRoleHost();
-        const observer = scriptedObserver([{ projectStatus: '', worktreeStatus: null }]);
+        const observer = scriptedObserver([
+          { projectStatus: '', worktreeStatus: null, ownedResources: '' },
+        ]);
         const error = yield* startGovernedRoleTurn({
           ...governedOptions(fixture.runDirectory, 'architect'),
           environmentAllowlist: ['not-valid'],

@@ -9,6 +9,7 @@ import {
   evaluateRoleHostCapabilities,
   roleHostEventsAreOrdered,
 } from '../../domain/role-host.js';
+import { deriveRoleHostAccessScope } from '../../domain/role-permissions.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../run-history/index.js';
 
 import type { RunHistoryStorage } from '../run-history/index.js';
@@ -31,6 +32,7 @@ import type {
   RoleHostSubmitResponse,
 } from '../../domain/role-host.js';
 import type { CommandVector, ProjectConfiguration } from '../../domain/project-configuration.js';
+import type { RoleTurnLocations } from '../../domain/role-permissions.js';
 
 export class RoleHostOperationalError extends Schema.TaggedError<RoleHostOperationalError>()(
   'RoleHostOperationalError',
@@ -48,6 +50,7 @@ export const ROLE_CONVERSATION_FAILURE_REASONS = [
   'empty-narrative',
   'ambiguous-submission',
   'turn-timeout',
+  'permission-profile-unavailable',
 ] as const;
 
 export type RoleConversationFailureReason = (typeof ROLE_CONVERSATION_FAILURE_REASONS)[number];
@@ -178,14 +181,11 @@ export interface RoleTurnTarget {
 }
 
 export interface StartOrResumeRoleTurnOptions extends RoleTurnTarget {
+  readonly locations: RoleTurnLocations;
   readonly prompt: string;
   readonly deadline: string;
   readonly pollMs: number;
   readonly turnTimeoutMs: number;
-  readonly workingDirectory?: string;
-  readonly readRoots?: ReadonlyArray<string>;
-  readonly writeRoots?: ReadonlyArray<string>;
-  readonly networkAllowlist?: ReadonlyArray<string>;
 }
 
 export type StopRoleSessionOptions = RoleTurnTarget;
@@ -443,16 +443,25 @@ export const startOrResumeRoleTurn = Effect.fn('startOrResumeRoleTurn')(function
 
   let session: RoleHostSessionState;
   if (existing === null) {
+    const derived = deriveRoleHostAccessScope(options.role, options.locations);
+    if (!derived.ok) {
+      return yield* conversationFailure(
+        options.runId,
+        'permission-profile-unavailable',
+        `Run "${options.runId}" cannot derive an enforceable access scope for role "${options.role}": ${derived.problem.detail}`,
+      );
+    }
+    const scope = derived.scope;
     const created = yield* host.create({
       schemaVersion: ROLE_HOST_PROTOCOL_VERSION,
       runId: options.runId,
       role: options.role,
       attempt: options.attempt,
       generation: options.generation,
-      workingDirectory: options.workingDirectory,
-      readRoots: options.readRoots,
-      writeRoots: options.writeRoots,
-      networkAllowlist: options.networkAllowlist,
+      workingDirectory: scope.workingDirectory,
+      readRoots: [...scope.readRoots],
+      writeRoots: [...scope.writeRoots],
+      networkAllowlist: [...scope.networkAllowlist],
     });
     if (created.generation !== options.generation) {
       return yield* conversationFailure(
@@ -476,7 +485,7 @@ export const startOrResumeRoleTurn = Effect.fn('startOrResumeRoleTurn')(function
             ownershipToken: created.ownershipToken,
             sequence: created.sequence,
             runtimeIdentity: created.runtimeIdentity,
-            workingDirectory: options.workingDirectory ?? null,
+            workingDirectory: scope.workingDirectory,
           },
         } as const),
     });

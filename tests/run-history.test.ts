@@ -70,12 +70,6 @@ const RUN_CREATED: WorkflowTransitionRequest = {
 
 const PLAN_ACCEPTED: WorkflowTransitionRequest = {
   route: 'plan-accepted',
-  planRequiresImplementation: true,
-};
-
-const PLAN_NO_CHANGE: WorkflowTransitionRequest = {
-  route: 'plan-no-change',
-  noChangeCandidateAccepted: true,
 };
 
 const AppLive = Layer.mergeAll(RunHistoryLive, RunIdentityLive);
@@ -173,6 +167,37 @@ function createRun(runDirectory: string) {
       request: RUN_CREATED,
     });
   }).pipe(Effect.provide(AppLive));
+}
+
+function appendAcceptedPlan(
+  runDirectory: string,
+  outcome: 'plan_ready' | 'no_change_candidate' = 'plan_ready',
+) {
+  return appendRunEvent({
+    runDirectory,
+    runId: RUN_ID,
+    createIfMissing: false,
+    build: () =>
+      Effect.succeed({
+        type: 'plan-accepted',
+        payload: {
+          outcome,
+          criteria: [{ id: 'AC-001', text: 'the seeded criterion' }],
+          runtimeValidationRequired: false,
+          execution: {
+            mode: 'sequential' as const,
+            objectives: [
+              {
+                id: 'OBJ-001',
+                title: 'Implement the accepted plan',
+                affectedPaths: ['.'],
+                criterionIds: ['AC-001'],
+              },
+            ],
+          },
+        },
+      } as const),
+  }).pipe(Effect.provide(RunHistoryLive));
 }
 
 function verifyHistory(runDirectory: string) {
@@ -303,6 +328,7 @@ describe('append-only run history with live storage', () => {
       const fixture = setupFixture();
       try {
         yield* createRun(fixture.runDirectory);
+        yield* appendAcceptedPlan(fixture.runDirectory);
         yield* transitionWorkflow({
           runDirectory: fixture.runDirectory,
           runId: RUN_ID,
@@ -310,9 +336,9 @@ describe('append-only run history with live storage', () => {
         }).pipe(Effect.provide(AppLive));
 
         const events = readEvents(fixture.runDirectory);
-        expect(events.map((event) => event.revision)).toEqual([1, 2, 3, 4, 5, 6]);
+        expect(events.map((event) => event.revision)).toEqual([1, 2, 3, 4, 5, 6, 7]);
         expect(events[0]).toMatchObject({ previousEventHash: null });
-        expect(events[5]).toMatchObject({ previousEventHash: events[4]?.eventHash });
+        expect(events[6]).toMatchObject({ previousEventHash: events[5]?.eventHash });
         expect(verifyRunHistoryEvents(events, RUN_ID).ok).toBe(true);
 
         const witness = Schema.decodeUnknownSync(Schema.fromJsonString(RunHistoryWitnessSchema), {
@@ -321,8 +347,8 @@ describe('append-only run history with live storage', () => {
         expect(witness).toEqual({
           schemaVersion: 1,
           runId: RUN_ID,
-          revision: 6,
-          eventHash: events[5]?.eventHash,
+          revision: 7,
+          eventHash: events[6]?.eventHash,
         });
 
         const before = readFileSync(fixture.streamPath, 'utf8');
@@ -344,6 +370,7 @@ describe('append-only run history with live storage', () => {
       const fixture = setupFixture();
       try {
         yield* createRun(fixture.runDirectory);
+        yield* appendAcceptedPlan(fixture.runDirectory);
         yield* transitionWorkflow({
           runDirectory: fixture.runDirectory,
           runId: RUN_ID,
@@ -446,6 +473,7 @@ describe('collision handling and interrupted publication', () => {
       const fixture = setupFixture();
       try {
         yield* createRun(fixture.runDirectory);
+        yield* appendAcceptedPlan(fixture.runDirectory);
         const live = yield* RunHistoryStorage.pipe(Effect.provide(RunHistoryLive));
         const identity = yield* RunIdentityStore.pipe(Effect.provide(RunIdentityLive));
 
@@ -483,13 +511,13 @@ describe('collision handling and interrupted publication', () => {
         expect(report.workflowState).toBe('coding');
 
         const events = readEvents(fixture.runDirectory);
-        expect(events).toHaveLength(7);
-        expect(events.map((event) => event.revision)).toEqual([1, 2, 3, 4, 5, 6, 7]);
-        expect(events[5]).toMatchObject({
+        expect(events).toHaveLength(8);
+        expect(events.map((event) => event.revision)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+        expect(events[6]).toMatchObject({
           type: 'cleanup-progress',
           payload: { outcome: 'warning', detail: 'competing writer' },
         });
-        expect(events[6]).toMatchObject({
+        expect(events[7]).toMatchObject({
           type: 'workflow-transition',
           payload: { route: 'plan-accepted', from: 'planning', to: 'coding' },
         });
@@ -505,6 +533,7 @@ describe('collision handling and interrupted publication', () => {
       const fixture = setupFixture();
       try {
         yield* createRun(fixture.runDirectory);
+        yield* appendAcceptedPlan(fixture.runDirectory);
         const live = yield* RunHistoryStorage.pipe(Effect.provide(RunHistoryLive));
         const identity = yield* RunIdentityStore.pipe(Effect.provide(RunIdentityLive));
 
@@ -533,7 +562,7 @@ describe('collision handling and interrupted publication', () => {
         const refusal = yield* transitionWorkflow({
           runDirectory: fixture.runDirectory,
           runId: RUN_ID,
-          request: PLAN_NO_CHANGE,
+          request: PLAN_ACCEPTED,
         }).pipe(
           Effect.provideService(RunHistoryStorage, proxy),
           Effect.provideService(RunIdentityStore, identity),
@@ -544,11 +573,11 @@ describe('collision handling and interrupted publication', () => {
           throw new Error('Expected an IllegalWorkflowTransition.');
         }
         expect(refusal.from).toBe('coding');
-        expect(refusal.route).toBe('plan-no-change');
+        expect(refusal.route).toBe('plan-accepted');
 
         const events = readEvents(fixture.runDirectory);
-        expect(events).toHaveLength(6);
-        expect(events[5]).toMatchObject({
+        expect(events).toHaveLength(7);
+        expect(events[6]).toMatchObject({
           type: 'workflow-transition',
           payload: { route: 'plan-accepted', from: 'planning', to: 'coding' },
         });
@@ -728,6 +757,7 @@ describe('collision handling and interrupted publication', () => {
       const fixture = setupFixture();
       try {
         yield* createRun(fixture.runDirectory);
+        yield* appendAcceptedPlan(fixture.runDirectory);
         const live = yield* RunHistoryStorage.pipe(Effect.provide(RunHistoryLive));
 
         let injected = false;
@@ -753,7 +783,7 @@ describe('collision handling and interrupted publication', () => {
         }).pipe(Effect.provideService(RunHistoryStorage, racing));
 
         expect(progress.workflowState).toBe('coding');
-        expect(progress.revision).toBe(6);
+        expect(progress.revision).toBe(7);
         expect(progress.eventHash).not.toBeNull();
         const document = Schema.decodeUnknownSync(WorkflowProgressDocumentSchema, {
           onExcessProperty: 'error',
@@ -765,7 +795,7 @@ describe('collision handling and interrupted publication', () => {
           checkpoint: null,
           attempts: [],
         });
-        expect(readEvents(fixture.runDirectory)).toHaveLength(6);
+        expect(readEvents(fixture.runDirectory)).toHaveLength(7);
       } finally {
         fixture.cleanup();
       }

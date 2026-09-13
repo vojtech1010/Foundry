@@ -342,7 +342,11 @@ const ensurePlanningState = Effect.fn('recordRunIdentity.ensurePlanningState')(f
           });
         }
         const evaluation = evaluateWorkflowTransition(
-          { state: current.derived.state, checkpoint: current.derived.checkpoint },
+          {
+            state: current.derived.state,
+            checkpoint: current.derived.checkpoint,
+            plan: null,
+          },
           {
             route: 'run-created',
             provisioning: { source: true, lease: true, storage: true, worktree: true },

@@ -26,13 +26,17 @@ import type {
   WorkflowAttempt,
   WorkflowAttemptKind,
   WorkflowAttemptRequest,
+  WorkflowPlanFacts,
   WorkflowState,
   WorkflowTransitionEvaluation,
   WorkflowTransitionRequest,
   WorkflowTransitionRouteKind,
 } from '../../domain/workflow.js';
-import type { RunEventDraft } from '../../domain/run-history.js';
-import type { ImplementationAcceptedPayload } from '../../domain/run-history.js';
+import type {
+  ImplementationAcceptedPayload,
+  PlanAcceptedPayload,
+  RunEventDraft,
+} from '../../domain/run-history.js';
 import type {
   RunHistoryError,
   RunHistoryStorage,
@@ -294,6 +298,18 @@ const recordImplementationAcceptance = Effect.fn('recordImplementationAcceptance
   });
 });
 
+export function planFactsOf(plan: PlanAcceptedPayload | null): WorkflowPlanFacts | null {
+  if (plan === null) {
+    return null;
+  }
+  return {
+    accepted: true,
+    requiresImplementation: plan.outcome === 'plan_ready',
+    runtimeValidationRequired: plan.runtimeValidationRequired,
+    noChangeCandidate: plan.outcome === 'no_change_candidate',
+  };
+}
+
 export const transitionWorkflow = Effect.fn('transitionWorkflow')(function* (
   options: TransitionWorkflowOptions,
 ): Effect.fn.Return<
@@ -315,7 +331,11 @@ export const transitionWorkflow = Effect.fn('transitionWorkflow')(function* (
     });
     const derived = yield* deriveImplementationRequest(runId, options.request, history);
     const evaluation = evaluateWorkflowTransition(
-      { state: history.derived.state, checkpoint: history.derived.checkpoint },
+      {
+        state: history.derived.state,
+        checkpoint: history.derived.checkpoint,
+        plan: planFactsOf(history.derived.acceptedPlan),
+      },
       derived.request,
     );
     if (!evaluation.ok) {
@@ -355,7 +375,11 @@ export const transitionWorkflow = Effect.fn('transitionWorkflow')(function* (
           });
         }
         const evaluation = evaluateWorkflowTransition(
-          { state: history.derived.state, checkpoint: history.derived.checkpoint },
+          {
+            state: history.derived.state,
+            checkpoint: history.derived.checkpoint,
+            plan: planFactsOf(history.derived.acceptedPlan),
+          },
           request,
         );
         if (!evaluation.ok) {

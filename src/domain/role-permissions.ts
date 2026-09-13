@@ -42,6 +42,8 @@ export interface RoleHostAccessScope {
   readonly filesystem: ReadonlyArray<RoleHostFilesystemProfile>;
   readonly network: ReadonlyArray<RoleHostNetworkProfile>;
   readonly projectRoot: string;
+  readonly runDirectory: string;
+  readonly scratchDirectory: string;
   readonly worktree: string | null;
 }
 
@@ -138,6 +140,8 @@ export function deriveRoleHostAccessScope(
       filesystem: requirement.filesystem,
       network: requirement.network,
       projectRoot: locations.projectRoot,
+      runDirectory: locations.runDirectory,
+      scratchDirectory: scratch,
       worktree,
     },
   };

@@ -128,6 +128,13 @@ function baseTurnOptions(runDirectory: string): StartOrResumeRoleTurnOptions {
     role: 'coder',
     attempt: 1,
     generation: 1,
+    locations: {
+      projectRoot: '/target',
+      runDirectory,
+      scratchDirectory: `${runDirectory}/scratch/coder/1`,
+      worktree: '/target/.agent/worktrees/RUN-ROLE',
+      runtimeBaseUrl: null,
+    },
     prompt: 'Implement the requested slice.',
     deadline: '2026-09-13T00:00:00.000Z',
     pollMs: 0,
@@ -184,11 +191,13 @@ interface FakeRoleHost {
   readonly layer: Layer.Layer<RoleHost>;
   readonly calls: Array<RoleHostOperation>;
   readonly submitKeys: Array<string>;
+  readonly createRequests: Array<RoleHostCreateRequest>;
 }
 
 function fakeRoleHost(options: FakeRoleHostOptions): FakeRoleHost {
   const calls: Array<RoleHostOperation> = [];
   const submitKeys: Array<string> = [];
+  const createRequests: Array<RoleHostCreateRequest> = [];
   let observeIndex = 0;
   const layer = Layer.succeed(
     RoleHost,
@@ -197,8 +206,11 @@ function fakeRoleHost(options: FakeRoleHostOptions): FakeRoleHost {
         calls.push('capabilities');
         return Effect.succeed(CAPABLE_ROLE_HOST_CAPABILITIES);
       },
-      create: (): Effect.Effect<RoleHostCreateResponse, RoleHostOperationalError> => {
+      create: (
+        request: RoleHostCreateRequest,
+      ): Effect.Effect<RoleHostCreateResponse, RoleHostOperationalError> => {
         calls.push('create');
+        createRequests.push(request);
         return Effect.succeed({
           schemaVersion: ROLE_HOST_PROTOCOL_VERSION,
           sessionId: options.sessionId,
@@ -247,7 +259,7 @@ function fakeRoleHost(options: FakeRoleHostOptions): FakeRoleHost {
       },
     }),
   );
-  return { layer, calls, submitKeys };
+  return { layer, calls, submitKeys, createRequests };
 }
 
 const CREATE_REQUEST: RoleHostCreateRequest = {
@@ -1056,6 +1068,118 @@ describe('role conversation lifecycle', () => {
         expect(error).toBeInstanceOf(RoleConversationError);
         if (error instanceof RoleConversationError) {
           expect(error.reason).toBe('session-missing');
+        }
+        expect(fake.calls).toEqual([]);
+      } finally {
+        run.cleanup();
+      }
+    }),
+  );
+});
+
+describe('run-derived permission enforcement', () => {
+  it.effect('derives the coder roots from the run-owned worktree and denies network', () =>
+    Effect.gen(function* () {
+      const run = setupRun();
+      try {
+        yield* seedRunCreated(run.runDirectory);
+        const fake = fakeRoleHost({
+          sessionId: 'session-1',
+          ownershipToken: 'owner-1',
+          generation: 1,
+          initialSequence: 0,
+          observeResponses: [SETTLED_RESPONSE],
+        });
+        yield* startOrResumeRoleTurn(baseTurnOptions(run.runDirectory)).pipe(
+          Effect.provide(Layer.mergeAll(RunHistoryLive, fake.layer)),
+        );
+        const request = fake.createRequests.at(0);
+        expect(request?.workingDirectory).toBe('/target/.agent/worktrees/RUN-ROLE');
+        expect(request?.readRoots).toContain('/target/.agent/worktrees/RUN-ROLE');
+        expect(request?.writeRoots).toContain('/target/.agent/worktrees/RUN-ROLE');
+        expect(request?.networkAllowlist).toEqual([]);
+      } finally {
+        run.cleanup();
+      }
+    }),
+  );
+
+  it.effect('derives the tester origin and fails closed without one', () =>
+    Effect.gen(function* () {
+      const sourced = setupRun();
+      try {
+        yield* seedRunCreated(sourced.runDirectory);
+        const fake = fakeRoleHost({
+          sessionId: 'session-1',
+          ownershipToken: 'owner-1',
+          generation: 1,
+          initialSequence: 0,
+          observeResponses: [SETTLED_RESPONSE],
+        });
+        yield* startOrResumeRoleTurn({
+          ...baseTurnOptions(sourced.runDirectory),
+          role: 'tester',
+          locations: {
+            ...baseTurnOptions(sourced.runDirectory).locations,
+            runtimeBaseUrl: 'http://127.0.0.1:4200/health',
+          },
+        }).pipe(Effect.provide(Layer.mergeAll(RunHistoryLive, fake.layer)));
+        expect(fake.createRequests.at(0)?.networkAllowlist).toEqual(['http://127.0.0.1:4200']);
+      } finally {
+        sourced.cleanup();
+      }
+
+      const missing = setupRun();
+      try {
+        yield* seedRunCreated(missing.runDirectory);
+        const fake = fakeRoleHost({
+          sessionId: 'session-1',
+          ownershipToken: 'owner-1',
+          generation: 1,
+          initialSequence: 0,
+          observeResponses: [SETTLED_RESPONSE],
+        });
+        const error = yield* startOrResumeRoleTurn({
+          ...baseTurnOptions(missing.runDirectory),
+          role: 'tester',
+          locations: {
+            ...baseTurnOptions(missing.runDirectory).locations,
+            runtimeBaseUrl: null,
+          },
+        }).pipe(Effect.provide(Layer.mergeAll(RunHistoryLive, fake.layer)), Effect.flip);
+        expect(error).toBeInstanceOf(RoleConversationError);
+        if (error instanceof RoleConversationError) {
+          expect(error.reason).toBe('permission-profile-unavailable');
+        }
+        expect(fake.calls).toEqual([]);
+      } finally {
+        missing.cleanup();
+      }
+    }),
+  );
+
+  it.effect('refuses a coder turn without a run-owned worktree before calling the host', () =>
+    Effect.gen(function* () {
+      const run = setupRun();
+      try {
+        yield* seedRunCreated(run.runDirectory);
+        const fake = fakeRoleHost({
+          sessionId: 'session-1',
+          ownershipToken: 'owner-1',
+          generation: 1,
+          initialSequence: 0,
+          observeResponses: [SETTLED_RESPONSE],
+        });
+        const error = yield* startOrResumeRoleTurn({
+          ...baseTurnOptions(run.runDirectory),
+          locations: {
+            ...baseTurnOptions(run.runDirectory).locations,
+            worktree: null,
+          },
+        }).pipe(Effect.provide(Layer.mergeAll(RunHistoryLive, fake.layer)), Effect.flip);
+        expect(error).toBeInstanceOf(RoleConversationError);
+        if (error instanceof RoleConversationError) {
+          expect(error.reason).toBe('permission-profile-unavailable');
         }
         expect(fake.calls).toEqual([]);
       } finally {

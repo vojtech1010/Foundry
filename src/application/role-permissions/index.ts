@@ -65,6 +65,7 @@ export class RolePermissionObserveError extends Schema.TaggedError<RolePermissio
 export interface RoleTurnResourceFingerprint {
   readonly projectStatus: string;
   readonly worktreeStatus: string | null;
+  readonly ownedResources: string;
 }
 
 const OBSERVATION_REASONS: Readonly<
@@ -80,11 +81,11 @@ function isReadOnlyRole(role: RoleHostRole): boolean {
   return role !== 'coder' && role !== 'lead_coder';
 }
 
-function fingerprintsEqual(
+function projectStateChanged(
   left: RoleTurnResourceFingerprint,
   right: RoleTurnResourceFingerprint,
 ): boolean {
-  return left.projectStatus === right.projectStatus && left.worktreeStatus === right.worktreeStatus;
+  return left.projectStatus !== right.projectStatus || left.worktreeStatus !== right.worktreeStatus;
 }
 
 export interface RecordRolePermissionViolationOptions {
@@ -195,16 +196,13 @@ export const startGovernedRoleTurn = Effect.fn('startGovernedRoleTurn')(function
       deadline: options.deadline,
       pollMs: options.pollMs,
       turnTimeoutMs: options.turnTimeoutMs,
-      workingDirectory: scope.workingDirectory,
-      readRoots: [...scope.readRoots],
-      writeRoots: [...scope.writeRoots],
-      networkAllowlist: [...scope.networkAllowlist],
+      locations: options.locations,
     }),
   );
 
   if (readOnly && before !== null) {
     const after = yield* observer.fingerprint(scope);
-    if (!fingerprintsEqual(before, after)) {
+    if (projectStateChanged(before, after)) {
       const detail = `Role "${options.role}" turn for run "${options.runId}" changed the project or worktree state while read-only.`;
       yield* recordRolePermissionViolation({
         runDirectory: options.runDirectory,
@@ -217,6 +215,23 @@ export const startGovernedRoleTurn = Effect.fn('startGovernedRoleTurn')(function
       return yield* new RolePermissionViolation({
         message: detail,
         reason: 'project-mutation',
+        role: options.role,
+        runId: options.runId,
+      });
+    }
+    if (before.ownedResources !== after.ownedResources) {
+      const detail = `Role "${options.role}" turn for run "${options.runId}" changed run-owned resources while read-only.`;
+      yield* recordRolePermissionViolation({
+        runDirectory: options.runDirectory,
+        runId: options.runId,
+        role: options.role,
+        attempt: options.attempt,
+        kind: 'run-resource-mutation',
+        detail,
+      });
+      return yield* new RolePermissionViolation({
+        message: detail,
+        reason: 'run-resource-mutation',
         role: options.role,
         runId: options.runId,
       });

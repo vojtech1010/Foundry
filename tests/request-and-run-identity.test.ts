@@ -30,6 +30,7 @@ import {
   RunHistoryIntegrityError,
   RunHistoryStorage,
   RunHistoryStorageError,
+  appendRunEvent,
 } from '../src/application/run-history/index.js';
 import {
   RUN_HISTORY_FILENAME,
@@ -246,6 +247,39 @@ const SyntheticRunGit = Layer.succeed(
 );
 
 const TransitionLayer = Layer.mergeAll(LiveFilesAndStore, SyntheticRunGit);
+
+function appendAcceptedPlan(
+  runDirectory: string,
+  runId: string,
+  outcome: 'plan_ready' | 'no_change_candidate' = 'plan_ready',
+  runtimeValidationRequired = false,
+) {
+  return appendRunEvent({
+    runDirectory,
+    runId,
+    createIfMissing: false,
+    build: () =>
+      Effect.succeed({
+        type: 'plan-accepted',
+        payload: {
+          outcome,
+          criteria: [{ id: 'AC-001', text: 'the seeded criterion' }],
+          runtimeValidationRequired,
+          execution: {
+            mode: 'sequential' as const,
+            objectives: [
+              {
+                id: 'OBJ-001',
+                title: 'Implement the accepted plan',
+                affectedPaths: ['.'],
+                criterionIds: ['AC-001'],
+              },
+            ],
+          },
+        },
+      } as const),
+  }).pipe(Effect.provide(LiveFilesAndStore));
+}
 
 function dieService(message: string) {
   return Effect.die(new Error(message));
@@ -834,16 +868,17 @@ describe('workflow state through run storage', () => {
         });
         expect(verifyRunHistoryEvents(events, 'RUN-READ').ok).toBe(true);
 
+        yield* appendAcceptedPlan(recorded.runDirectory, 'RUN-READ');
         yield* transitionWorkflow({
           runDirectory: recorded.runDirectory,
           runId: 'RUN-READ',
-          request: { route: 'plan-accepted', planRequiresImplementation: true },
+          request: { route: 'plan-accepted' },
         }).pipe(Effect.provide(LiveFilesAndStore));
         const coding = yield* readWithLive({
           configPath: fixture.configPath,
           runId: 'RUN-READ',
         });
-        expect(coding).toMatchObject({ runId: 'RUN-READ', workflowState: 'coding', revision: 6 });
+        expect(coding).toMatchObject({ runId: 'RUN-READ', workflowState: 'coding', revision: 7 });
 
         writeState(fixture, 'RUN-READ', 'completed');
         const rebuilt = yield* readWithLive({
@@ -863,7 +898,7 @@ describe('workflow state through run storage', () => {
           checkpoint: null,
           attempts: [],
         });
-        expect(readHistoryEvents(recorded.runDirectory)).toHaveLength(6);
+        expect(readHistoryEvents(recorded.runDirectory)).toHaveLength(7);
       } finally {
         fixture.cleanup();
       }
@@ -881,10 +916,11 @@ describe('workflow state through run storage', () => {
           taskId: 'TASK-1',
           runId: 'RUN-PROGRESS',
         });
+        yield* appendAcceptedPlan(recorded.runDirectory, 'RUN-PROGRESS');
         const transitioned = yield* transitionWorkflow({
           runDirectory: recorded.runDirectory,
           runId: 'RUN-PROGRESS',
-          request: { route: 'plan-accepted', planRequiresImplementation: true },
+          request: { route: 'plan-accepted' },
         }).pipe(Effect.provide(LiveFilesAndStore));
         expect(transitioned.workflowState).toBe('coding');
 
@@ -988,10 +1024,11 @@ describe('workflow state through run storage', () => {
           taskId: 'TASK-1',
           runId: 'RUN-BROKEN',
         });
+        yield* appendAcceptedPlan(recorded.runDirectory, 'RUN-BROKEN');
         yield* transitionWorkflow({
           runDirectory: recorded.runDirectory,
           runId: 'RUN-BROKEN',
-          request: { route: 'plan-accepted', planRequiresImplementation: true },
+          request: { route: 'plan-accepted' },
         }).pipe(Effect.provide(LiveFilesAndStore));
 
         const streamPath = join(recorded.runDirectory, RUN_HISTORY_FILENAME);
@@ -1044,7 +1081,8 @@ describe('derived report reconciliation', () => {
             runId: 'RUN-CLEANUP',
             request,
           }).pipe(Effect.provide(TransitionLayer));
-        yield* transition({ route: 'plan-accepted', planRequiresImplementation: true });
+        yield* appendAcceptedPlan(recorded.runDirectory, 'RUN-CLEANUP');
+        yield* transition({ route: 'plan-accepted' });
         yield* transition({
           route: 'implementation-ready',
           branchClean: true,
@@ -1054,7 +1092,6 @@ describe('derived report reconciliation', () => {
         yield* transition({
           route: 'checks-passed-reviewing',
           checksPassed: true,
-          testerRequired: false,
           correctionBudgetExhausted: false,
           reviewableCommit: 'abc123',
         });
@@ -1437,7 +1474,8 @@ describe('status command through the cli envelope', () => {
           });
 
         yield* expectStatus('planning');
-        yield* transition({ route: 'plan-accepted', planRequiresImplementation: true });
+        yield* appendAcceptedPlan(fixture.runDirectory('RUN-STATUS'), 'RUN-STATUS');
+        yield* transition({ route: 'plan-accepted' });
         yield* expectStatus('coding');
         yield* transition({
           route: 'implementation-ready',
@@ -1448,7 +1486,6 @@ describe('status command through the cli envelope', () => {
         yield* transition({
           route: 'checks-passed-reviewing',
           checksPassed: true,
-          testerRequired: false,
           correctionBudgetExhausted: false,
           reviewableCommit: 'abc123',
         });

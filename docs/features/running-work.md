@@ -102,10 +102,18 @@ assigns stable criterion and objective IDs. Sequential execution is the safe
 default whenever parallel metadata is absent or cannot prove independence.
 
 The accepted criteria, runtime-validation decision, and compiled objectives are
-recorded durably, so resume does not reinterpret the narrative. A missing or
+recorded durably, so resume does not reinterpret the narrative. Workflow
+routing reads that durable envelope: `plan-accepted` and `plan-no-change` advance
+only from an accepted plan, and the Tester stage is chosen from the recorded
+runtime-validation decision rather than a caller-supplied boolean. A missing or
 invalid envelope consumes at most one same-session repair before the role retry
 budget, and an accepted implementation is a Git-derived commit persisted before
 verification routing rather than a Coder-declared identifier.
+
+A blocked Coder turn is not a result. Foundry leaves the recorded role-session,
+Git, and provisioning evidence intact, records no accepted implementation, and
+does not enter verification with a fabricated commit. A Coder no-change claim
+remains provisional until verification and Reviewer accept it.
 
 Deterministic verification runs before required runtime preparation. When the
 plan does not require Tester, Foundry records an explicit skip with its reason

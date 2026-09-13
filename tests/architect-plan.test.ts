@@ -7,10 +7,14 @@ import { join } from 'node:path';
 import {
   ArchitectPlanRejected,
   acceptArchitectPlan,
+  admitArchitectPlan,
 } from '../src/application/architect-plan/index.js';
 import { RunGit } from '../src/application/git-provisioning/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../src/application/run-history/index.js';
-import { transitionWorkflow } from '../src/application/workflow-transitions/index.js';
+import {
+  IllegalWorkflowTransition,
+  transitionWorkflow,
+} from '../src/application/workflow-transitions/index.js';
 import { RunHistoryLive } from '../src/platform/run-history.js';
 import { RunIdentityLive } from '../src/platform/run-identity.js';
 import {
@@ -23,6 +27,7 @@ import {
 } from '../src/domain/architect-plan.js';
 
 import type { ArchitectPlanControl } from '../src/domain/architect-plan.js';
+import type { ImplementationObservation } from '../src/application/git-provisioning/index.js';
 
 const RUN_ID = 'RUN-PLAN';
 
@@ -125,7 +130,7 @@ function seedPlanning(fixture: Fixture) {
   }).pipe(Effect.provide(observingGit()), Effect.provide(LiveStore));
 }
 
-function observingGit() {
+function observingGit(observation?: ImplementationObservation) {
   const unused = (name: string) => Effect.die(new Error(`plan tests must not call RunGit.${name}`));
   return Layer.succeed(
     RunGit,
@@ -137,10 +142,20 @@ function observingGit() {
       createBranch: () => unused('createBranch'),
       readWorktree: () => unused('readWorktree'),
       createWorktree: () => unused('createWorktree'),
-      observeImplementation: () => unused('observeImplementation'),
+      observeImplementation: () =>
+        observation === undefined ? unused('observeImplementation') : Effect.succeed(observation),
     }),
   );
 }
+
+const CLEAN_IMPLEMENTATION: ImplementationObservation = {
+  workspaceExists: true,
+  currentBranch: TASK_BRANCH,
+  headCommit: 'abcdefabcdefabcdefabcdefabcdefabcdefabcd',
+  clean: true,
+  baseIsAncestor: true,
+  changedFiles: ['src/implementation.ts'],
+};
 
 function readPlan(runDirectory: string) {
   return readVerifiedRunHistory({
@@ -406,6 +421,129 @@ describe('architect plan acceptance', () => {
         }).pipe(Effect.provide(LiveStore));
         expect(result.outcome).toBe('blocked');
         expect(yield* readPlan(fixture.runDirectory)).toBeNull();
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+});
+
+describe('architect plan routing', () => {
+  it.effect('admits a ready plan and lets the durable envelope control Tester routing', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* seedPlanning(fixture);
+        const admission = yield* admitArchitectPlan({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          control: {
+            schemaVersion: 1,
+            outcome: 'plan_ready',
+            acceptanceCriteria: ['a'],
+            runtimeValidation: 'required',
+            execution: 'sequential',
+          },
+          controlRepairsRemaining: 1,
+          retriesRemaining: 1,
+        }).pipe(Effect.provide(observingGit(CLEAN_IMPLEMENTATION)), Effect.provide(LiveStore));
+        expect(admission.outcome).toBe('admitted');
+        if (admission.outcome === 'admitted') {
+          expect(admission.transition.workflowState).toBe('coding');
+        }
+
+        yield* transitionWorkflow({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          request: {
+            route: 'implementation-ready',
+            branchClean: true,
+            candidateCommit: null,
+            noChangeCandidateValidated: false,
+          },
+        }).pipe(Effect.provide(observingGit(CLEAN_IMPLEMENTATION)), Effect.provide(LiveStore));
+
+        const testing = yield* transitionWorkflow({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          request: { route: 'checks-passed-testing', checksPassed: true },
+        }).pipe(Effect.provide(observingGit(CLEAN_IMPLEMENTATION)), Effect.provide(LiveStore));
+        expect(testing.workflowState).toBe('testing');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('refuses plan routing without a durable accepted envelope', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* seedPlanning(fixture);
+        const error = yield* transitionWorkflow({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          request: { route: 'plan-accepted' },
+        }).pipe(Effect.provide(observingGit()), Effect.provide(LiveStore), Effect.flip);
+        expect(error).toBeInstanceOf(IllegalWorkflowTransition);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('sends a plan that does not require runtime validation straight to Reviewer', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* seedPlanning(fixture);
+        yield* admitArchitectPlan({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          control: {
+            schemaVersion: 1,
+            outcome: 'plan_ready',
+            acceptanceCriteria: ['a'],
+            runtimeValidation: 'not_required',
+            execution: 'sequential',
+          },
+          controlRepairsRemaining: 1,
+          retriesRemaining: 1,
+        }).pipe(Effect.provide(observingGit(CLEAN_IMPLEMENTATION)), Effect.provide(LiveStore));
+
+        yield* transitionWorkflow({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          request: {
+            route: 'implementation-ready',
+            branchClean: true,
+            candidateCommit: null,
+            noChangeCandidateValidated: false,
+          },
+        }).pipe(Effect.provide(observingGit(CLEAN_IMPLEMENTATION)), Effect.provide(LiveStore));
+
+        const testing = yield* transitionWorkflow({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          request: { route: 'checks-passed-testing', checksPassed: true },
+        }).pipe(
+          Effect.provide(observingGit(CLEAN_IMPLEMENTATION)),
+          Effect.provide(LiveStore),
+          Effect.flip,
+        );
+        expect(testing).toBeInstanceOf(IllegalWorkflowTransition);
+
+        const reviewing = yield* transitionWorkflow({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          request: {
+            route: 'checks-passed-reviewing',
+            checksPassed: true,
+            correctionBudgetExhausted: false,
+            reviewableCommit: 'abc123',
+          },
+        }).pipe(Effect.provide(observingGit(CLEAN_IMPLEMENTATION)), Effect.provide(LiveStore));
+        expect(reviewing.workflowState).toBe('reviewing');
       } finally {
         fixture.cleanup();
       }

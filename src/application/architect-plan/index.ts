@@ -8,14 +8,19 @@ import {
   planRuntimeValidationRequired,
 } from '../../domain/architect-plan.js';
 import { appendRunEvent } from '../run-history/index.js';
-import { recordWorkflowAttempt } from '../workflow-transitions/index.js';
+import { transitionWorkflow, recordWorkflowAttempt } from '../workflow-transitions/index.js';
 
 import type { AcceptanceCriterion, CompiledExecutionPlan } from '../../domain/architect-plan.js';
 import type { PlanAcceptedPayload } from '../../domain/run-history.js';
 
 import type { RunHistoryError, RunHistoryStorage } from '../run-history/index.js';
+import type {
+  IllegalWorkflowTransition,
+  WorkflowTransitionReport,
+} from '../workflow-transitions/index.js';
 import type { IllegalWorkflowAttempt } from '../workflow-transitions/index.js';
 import type { RunStateUnavailable } from '../run-identity/index.js';
+import type { RunWorkspaceBlocked, RunGit } from '../git-provisioning/index.js';
 
 export class ArchitectPlanRejected extends Schema.TaggedError<ArchitectPlanRejected>()(
   'ArchitectPlanRejected',
@@ -162,4 +167,61 @@ export const acceptArchitectPlan = Effect.fn('acceptArchitectPlan')(function* (
   });
 
   return { outcome: 'accepted', plan, planEvent };
+});
+
+export type ArchitectPlanAdmission =
+  | {
+      readonly outcome: 'admitted';
+      readonly plan: AcceptedArchitectPlan;
+      readonly transition: WorkflowTransitionReport;
+    }
+  | { readonly outcome: 'blocked' }
+  | { readonly outcome: 'repair-required'; readonly problem: string }
+  | { readonly outcome: 'retry-required'; readonly problem: string };
+
+export type AdmitArchitectPlanOptions = Pick<
+  AcceptArchitectPlanOptions,
+  'runDirectory' | 'runId' | 'control' | 'controlRepairsRemaining' | 'retriesRemaining'
+>;
+
+/**
+ * The live seam for Architect output: accepts and persists the control
+ * envelope through `acceptArchitectPlan`, then routes the workflow using the
+ * durable accepted plan rather than a caller-supplied implementation flag. A
+ * blocked, repaired, or retried envelope records nothing beyond its evidence.
+ */
+export const admitArchitectPlan = Effect.fn('admitArchitectPlan')(function* (
+  options: AdmitArchitectPlanOptions,
+): Effect.fn.Return<
+  ArchitectPlanAdmission,
+  | ArchitectPlanRejected
+  | IllegalWorkflowTransition
+  | IllegalWorkflowAttempt
+  | RunStateUnavailable
+  | RunWorkspaceBlocked
+  | RunHistoryError,
+  RunHistoryStorage | RunGit
+> {
+  const acceptance = yield* acceptArchitectPlan({
+    ...options,
+    repairReason: 'The Architect control envelope must be repaired in the same session.',
+    retryReason: 'The Architect control envelope was rejected.',
+  });
+  if (acceptance.outcome === 'blocked') {
+    return { outcome: 'blocked' };
+  }
+  if (acceptance.outcome === 'repair-required') {
+    return { outcome: 'repair-required', problem: acceptance.problem };
+  }
+  if (acceptance.outcome === 'retry-required') {
+    return { outcome: 'retry-required', problem: acceptance.problem };
+  }
+  const transition = yield* transitionWorkflow({
+    runDirectory: options.runDirectory,
+    runId: options.runId,
+    request: acceptance.plan.requiresImplementation
+      ? { route: 'plan-accepted' }
+      : { route: 'plan-no-change' },
+  });
+  return { outcome: 'admitted', plan: acceptance.plan, transition };
 });

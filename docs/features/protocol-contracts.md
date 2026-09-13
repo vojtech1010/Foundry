@@ -162,8 +162,9 @@ The adapter receives absolute roots and a fixed capability profile:
 | Tester             | read-only evidence snapshot  | owned capture scratch only      | prepared read-only runtime only |
 | Reviewer           | read-only evidence snapshot  | owned scratch only              | none                            |
 
-Foundry derives those roots from run-owned locations instead of accepting
-caller-chosen permissions, and refuses to start a turn when a required bound is
+The enforced role turn derives those roots from run-owned locations rather than
+accepting caller-chosen permissions, so a caller cannot widen a role's access by
+supplying its own roots. It refuses to start a turn when a required bound is
 unavailable: a Coder without a run-owned worktree or a Tester without the
 prepared application origin fails closed. An invalid environment-variable name
 is rejected before the host is launched.
@@ -173,8 +174,10 @@ junctions, case-folding, and alternate Windows path forms. `doctor` rejects a
 live adapter that cannot attest support for resumable sessions and the required
 capability profiles. Foundry compares Git and owned-resource state before and
 after every read-only turn as an additional detection layer, but detection does
-not replace host enforcement. A detected mutation is recorded and stops that
-attempt.
+not replace host enforcement. A changed project or worktree records a
+`project-mutation` violation; changed run-owned scratch or run-directory
+resources record a `run-resource-mutation` violation. Either violation stops
+that attempt and is never treated as a successful result.
 
 Agent-exposed network access is denied for Architect, Coder, Lead Coder, and
 Reviewer. Tester receives only the origin derived from `runtimeProfile.baseUrl`.
