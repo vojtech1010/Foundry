@@ -1,16 +1,49 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 import { Effect, Layer } from 'effect';
 
-import { ProfileCheckError, ProjectCommandProcess } from '../application/profile-check/index.js';
+import {
+  ProjectCommandError,
+  ProjectCommandProcess,
+} from '../application/project-commands/index.js';
 
 import type {
   ProjectCommandResult,
   RunProjectCommandOptions,
-} from '../application/profile-check/index.js';
+} from '../application/project-commands/index.js';
 
 function boundCause(cause: unknown): string {
   return String(cause).replaceAll(/\s+/gu, ' ').trim().slice(0, 500);
+}
+
+function terminateProcessTree(child: ReturnType<typeof spawn>): void {
+  const pid = child.pid;
+  if (pid === undefined) {
+    child.kill('SIGKILL');
+    return;
+  }
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    return;
+  }
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    child.kill('SIGKILL');
+  }
+}
+
+function waitForTreeStopped(child: ReturnType<typeof spawn>): Effect.Effect<void> {
+  return Effect.callback<void>((resume) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resume(Effect.void);
+      return;
+    }
+    child.once('exit', () => {
+      resume(Effect.void);
+    });
+    terminateProcessTree(child);
+  });
 }
 
 type ProcessOutputChunk = Buffer | string;
@@ -22,8 +55,8 @@ function waitForClose(
   stderrRef: { readonly append: (chunk: ProcessOutputChunk) => void },
   readStdout: () => string,
   readStderr: () => string,
-): Effect.Effect<ProjectCommandResult, ProfileCheckError> {
-  return Effect.callback<ProjectCommandResult, ProfileCheckError>((resume) => {
+): Effect.Effect<ProjectCommandResult, ProjectCommandError> {
+  return Effect.callback<ProjectCommandResult, ProjectCommandError>((resume) => {
     child.stdout?.on('data', (chunk: ProcessOutputChunk) => {
       stdoutRef.append(chunk);
     });
@@ -33,7 +66,7 @@ function waitForClose(
     child.on('error', (cause: unknown) => {
       resume(
         Effect.fail(
-          new ProfileCheckError({
+          new ProjectCommandError({
             message: `Cannot start project command "${executable}": ${boundCause(cause)}.`,
           }),
         ),
@@ -43,7 +76,7 @@ function waitForClose(
       if (signal !== null) {
         resume(
           Effect.fail(
-            new ProfileCheckError({
+            new ProjectCommandError({
               message: `Project command "${executable}" terminated with signal ${signal}.`,
             }),
           ),
@@ -57,30 +90,30 @@ function waitForClose(
 
 const runCommand = (
   options: RunProjectCommandOptions,
-): Effect.Effect<ProjectCommandResult, ProfileCheckError> =>
+): Effect.Effect<ProjectCommandResult, ProjectCommandError> =>
   Effect.scoped(
     Effect.gen(function* () {
       const [executable, ...args] = options.command;
       if (executable === undefined) {
-        return yield* new ProfileCheckError({
+        return yield* new ProjectCommandError({
           message: 'Project command is empty.',
         });
       }
       const target = executable;
       const child = yield* Effect.acquireRelease(
         Effect.try({
-          try: () => spawn(target, [...args], { cwd: options.cwd, shell: false }),
+          try: () =>
+            spawn(target, [...args], {
+              cwd: options.cwd,
+              shell: false,
+              detached: process.platform !== 'win32',
+            }),
           catch: (cause) =>
-            new ProfileCheckError({
+            new ProjectCommandError({
               message: `Cannot start project command "${target}": ${boundCause(cause)}.`,
             }),
         }),
-        (spawned) =>
-          Effect.sync(() => {
-            if (spawned.exitCode === null && spawned.signalCode === null) {
-              spawned.kill();
-            }
-          }),
+        (spawned) => waitForTreeStopped(spawned),
       );
       let stdout = '';
       let stderr = '';

@@ -401,8 +401,12 @@ identity and runtime provenance, the pre-submit baseline with prompt hash,
 generation and idempotency key, the submission-started checkpoint, observed
 progress with any settled narrative and control envelope, and the stop
 disposition, the accepted plan with its labelled acceptance criteria and
-compiled execution objectives, every recorded role permission violation, and
-each Git-derived accepted implementation commit with its changed files. A
+compiled execution objectives, every recorded role permission violation, each
+Git-derived accepted implementation commit with its changed files, each
+commit-bound `verification-completed` report with its ordered command
+executions, an explicit `tester-skipped` record or a `validation-limitation`
+for a required-but-unusable runtime stage, and each `runtime-lifecycle`
+record for prepared, stopped, and cleaned-up owned application processes. A
 same-directory
 `events.witness.json` records the last accepted revision and hash as an
 independently durable append-integrity floor: a missing witness, a stream

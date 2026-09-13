@@ -20,6 +20,7 @@ import type { PublicCommandError, PublicCommandReport } from '../application/pub
 import type { RunGit } from '../application/git-provisioning/index.js';
 import type { GuidanceGit, GuidanceSnapshotStore } from '../application/guidance/index.js';
 import type { ProjectCommandProcess } from '../application/profile-check/index.js';
+import type { ProjectEvidenceStore } from '../application/project-commands/index.js';
 import type { RunHistoryStorage } from '../application/run-history/index.js';
 import type {
   RepositoryHostIdentity,
@@ -822,6 +823,7 @@ export const runCli = Effect.fn('runCli')(function* (
   | ReadinessFiles
   | ReadinessGit
   | ProjectCommandProcess
+  | ProjectEvidenceStore
   | RunIdentityStore
   | RunHistoryStorage
   | RepositoryLeaseStore

@@ -5,6 +5,7 @@ import { interruptExitCodeFor } from '../domain/public-commands.js';
 import { ProjectCommandProcessLive } from '../platform/commands.js';
 import { RunGitLive } from '../platform/git-provisioning.js';
 import { GuidanceLive } from '../platform/guidance.js';
+import { ProjectCommandsPlatformLive } from '../platform/project-commands.js';
 import { ReadinessLive } from '../platform/readiness.js';
 import { RepositoryLeaseLive } from '../platform/repository-lease.js';
 import { RoleHostLauncherLive } from '../platform/role-host.js';
@@ -23,6 +24,7 @@ const program = runCli(process.argv.slice(2)).pipe(
     Layer.mergeAll(
       ReadinessLive,
       ProjectCommandProcessLive,
+      ProjectCommandsPlatformLive,
       RunIdentityLive,
       RunHistoryLive,
       RepositoryLeaseLive,

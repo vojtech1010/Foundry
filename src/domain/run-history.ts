@@ -11,6 +11,8 @@ import {
   RoleHostNarrativeSchema,
   RoleHostRuntimeIdentitySchema,
 } from './role-host.js';
+import { ProjectVerificationReportSchema } from './project-verification.js';
+import { RuntimeLifecycleRecordSchema } from './project-runtime.js';
 import { GitCommitId } from './run-locations.js';
 import { Identifier, Sha256Hex } from './run-identity.js';
 import {
@@ -24,6 +26,8 @@ import {
   isActiveWorkflowState,
 } from './workflow.js';
 
+import type { ProjectVerificationReport, VerificationExecution } from './project-verification.js';
+import type { RuntimeLifecycleRecord } from './project-runtime.js';
 import type { RoleHostSessionState } from './role-host.js';
 import type { WorkflowAttempt, WorkflowState } from './workflow.js';
 
@@ -53,6 +57,10 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'plan-accepted',
   'role-permission-violation',
   'implementation-accepted',
+  'verification-completed',
+  'tester-skipped',
+  'validation-limitation',
+  'runtime-lifecycle',
 ] as const;
 
 export type RunHistoryEventType = (typeof RUN_HISTORY_EVENT_TYPES)[number];
@@ -250,6 +258,28 @@ export const ImplementationAcceptedPayloadSchema = Schema.Struct({
 
 export type ImplementationAcceptedPayload = (typeof ImplementationAcceptedPayloadSchema)['Type'];
 
+export const VerificationCompletedPayloadSchema = ProjectVerificationReportSchema;
+
+export type VerificationCompletedPayload = ProjectVerificationReport;
+
+export const TesterSkippedPayloadSchema = Schema.Struct({
+  reason: Schema.NonEmptyString,
+  verificationCommit: Schema.NonEmptyString,
+});
+
+export type TesterSkippedPayload = (typeof TesterSkippedPayloadSchema)['Type'];
+
+export const ValidationLimitationPayloadSchema = Schema.Struct({
+  reason: Schema.NonEmptyString,
+  commit: Schema.NonEmptyString,
+});
+
+export type ValidationLimitationPayload = (typeof ValidationLimitationPayloadSchema)['Type'];
+
+export const RuntimeLifecyclePayloadSchema = RuntimeLifecycleRecordSchema;
+
+export type RuntimeLifecyclePayload = RuntimeLifecycleRecord;
+
 const RunEventEnvelopeFields = {
   schemaVersion: Schema.Literal(RUN_HISTORY_SCHEMA_VERSION),
   runId: Identifier,
@@ -350,6 +380,30 @@ export const ImplementationAcceptedEventSchema = Schema.Struct({
   payload: ImplementationAcceptedPayloadSchema,
 });
 
+export const VerificationCompletedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('verification-completed'),
+  payload: VerificationCompletedPayloadSchema,
+});
+
+export const TesterSkippedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('tester-skipped'),
+  payload: TesterSkippedPayloadSchema,
+});
+
+export const ValidationLimitationEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('validation-limitation'),
+  payload: ValidationLimitationPayloadSchema,
+});
+
+export const RuntimeLifecycleEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('runtime-lifecycle'),
+  payload: RuntimeLifecyclePayloadSchema,
+});
+
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
@@ -366,6 +420,10 @@ export const RunEventSchema = Schema.Union([
   PlanAcceptedEventSchema,
   RolePermissionViolationEventSchema,
   ImplementationAcceptedEventSchema,
+  VerificationCompletedEventSchema,
+  TesterSkippedEventSchema,
+  ValidationLimitationEventSchema,
+  RuntimeLifecycleEventSchema,
 ]);
 
 export type RunEvent = (typeof RunEventSchema)['Type'];
@@ -406,7 +464,14 @@ export type RunEventDraft =
   | {
       readonly type: 'implementation-accepted';
       readonly payload: ImplementationAcceptedPayload;
-    };
+    }
+  | {
+      readonly type: 'verification-completed';
+      readonly payload: VerificationCompletedPayload;
+    }
+  | { readonly type: 'tester-skipped'; readonly payload: TesterSkippedPayload }
+  | { readonly type: 'validation-limitation'; readonly payload: ValidationLimitationPayload }
+  | { readonly type: 'runtime-lifecycle'; readonly payload: RuntimeLifecyclePayload };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
 
@@ -430,6 +495,10 @@ export interface RunHistoryDerivedState {
   readonly acceptedPlan: PlanAcceptedPayload | null;
   readonly implementation: ImplementationAcceptedPayload | null;
   readonly permissionViolations: ReadonlyArray<RolePermissionViolationPayload>;
+  readonly verifications: ReadonlyArray<VerificationCompletedPayload>;
+  readonly testerSkips: ReadonlyArray<TesterSkippedPayload>;
+  readonly validationLimitations: ReadonlyArray<ValidationLimitationPayload>;
+  readonly runtimeLifecycles: ReadonlyArray<RuntimeLifecyclePayload>;
 }
 
 export type RunHistoryVerification =
@@ -457,6 +526,60 @@ const CHECKPOINTED_TRANSITION_ROUTES: ReadonlySet<string> = new Set([
   'publication-unavailable',
   'publication-unresolved',
 ]);
+
+function canonicalVerificationExecution(execution: VerificationExecution) {
+  return {
+    kind: execution.kind,
+    name: execution.name,
+    executable: execution.executable,
+    arguments: [...execution.arguments],
+    expectedExitCode: execution.expectedExitCode,
+    actualExitCode: execution.actualExitCode,
+    timedOut: execution.timedOut,
+    durationMs: execution.durationMs,
+    log: {
+      path: execution.log.path,
+      sha256: execution.log.sha256,
+      byteLength: execution.log.byteLength,
+      retainedByteLength: execution.log.retainedByteLength,
+      truncated: execution.log.truncated,
+      redactionCount: execution.log.redactionCount,
+    },
+  };
+}
+
+function canonicalVerificationReport(report: VerificationCompletedPayload) {
+  return {
+    attempt: report.attempt,
+    repository: report.repository,
+    commit: report.commit,
+    profileHash: report.profileHash,
+    commandMs: report.commandMs,
+    executions: report.executions.map(canonicalVerificationExecution),
+    result: report.result,
+  };
+}
+
+function canonicalRuntimeRecord(record: RuntimeLifecyclePayload) {
+  return {
+    repository: record.repository,
+    commit: record.commit,
+    baseUrl: record.baseUrl,
+    runtimeKind: record.runtimeKind,
+    startedAt: record.startedAt,
+    readyAt: record.readyAt,
+    stoppedAt: record.stoppedAt,
+    outcome: record.outcome,
+    cleanup: record.cleanup,
+    dataPreserved: record.dataPreserved,
+    stages: record.stages.map((stage) => ({
+      name: stage.name,
+      outcome: stage.outcome,
+      durationMs: stage.durationMs,
+      detail: stage.detail,
+    })),
+  };
+}
 
 function canonicalEventText(event: UnsignedRunEvent): string {
   switch (event.type) {
@@ -730,6 +853,56 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'verification-completed':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: canonicalVerificationReport(event.payload),
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'tester-skipped':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          reason: event.payload.reason,
+          verificationCommit: event.payload.verificationCommit,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'runtime-lifecycle':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: canonicalRuntimeRecord(event.payload),
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'validation-limitation':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          commit: event.payload.commit,
+          reason: event.payload.reason,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
   }
 }
 
@@ -789,6 +962,14 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'role-permission-violation', payload: event.payload };
     case 'implementation-accepted':
       return { ...envelope, type: 'implementation-accepted', payload: event.payload };
+    case 'verification-completed':
+      return { ...envelope, type: 'verification-completed', payload: event.payload };
+    case 'tester-skipped':
+      return { ...envelope, type: 'tester-skipped', payload: event.payload };
+    case 'validation-limitation':
+      return { ...envelope, type: 'validation-limitation', payload: event.payload };
+    case 'runtime-lifecycle':
+      return { ...envelope, type: 'runtime-lifecycle', payload: event.payload };
   }
 }
 
@@ -853,9 +1034,16 @@ export function verifyRunHistoryEvents(
   const attempts: Array<WorkflowAttempt> = [];
   const roleSessions = new Map<string, RoleHostSessionState>();
   const permissionViolations: Array<RolePermissionViolationPayload> = [];
+  const verifications: Array<VerificationCompletedPayload> = [];
+  const testerSkips: Array<TesterSkippedPayload> = [];
+  const validationLimitations: Array<ValidationLimitationPayload> = [];
+  const runtimeLifecycles: Array<RuntimeLifecyclePayload> = [];
   let acceptedPlan: PlanAcceptedPayload | null = null;
   let implementation: ImplementationAcceptedPayload | null = null;
   let previousHash: string | null = null;
+
+  const currentResultCommit = (): string | null =>
+    implementation === null ? null : (implementation.commit ?? implementation.baseCommit);
 
   for (const [index, event] of events.entries()) {
     const label = `event ${index + 1}`;
@@ -1273,6 +1461,110 @@ export function verifyRunHistoryEvents(
         implementation = event.payload;
         break;
       }
+      case 'verification-completed': {
+        if (state !== 'verifying') {
+          return {
+            ok: false,
+            problem: `${label} records a verification report outside the verifying stage`,
+          };
+        }
+        const resultCommit = currentResultCommit();
+        if (resultCommit === null) {
+          return {
+            ok: false,
+            problem: `${label} records a verification report without an accepted implementation`,
+          };
+        }
+        if (event.payload.commit !== resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} records a verification report for a different commit`,
+          };
+        }
+        if (event.payload.executions.length < 1) {
+          return {
+            ok: false,
+            problem: `${label} records a verification report without executions`,
+          };
+        }
+        verifications.push(event.payload);
+        break;
+      }
+      case 'tester-skipped': {
+        if (state !== 'verifying') {
+          return {
+            ok: false,
+            problem: `${label} records a Tester skip outside the verifying stage`,
+          };
+        }
+        if (acceptedPlan === null || acceptedPlan.runtimeValidationRequired) {
+          return {
+            ok: false,
+            problem: `${label} records a Tester skip for a plan that requires runtime validation`,
+          };
+        }
+        const resultCommit = currentResultCommit();
+        if (resultCommit === null || event.payload.verificationCommit !== resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} records a Tester skip without a commit-bound verification report`,
+          };
+        }
+        if (!verifications.some((report) => report.commit === resultCommit)) {
+          return {
+            ok: false,
+            problem: `${label} records a Tester skip before the commit-bound verification report`,
+          };
+        }
+        testerSkips.push(event.payload);
+        break;
+      }
+      case 'validation-limitation': {
+        if (state !== 'verifying' && state !== 'testing') {
+          return {
+            ok: false,
+            problem: `${label} records a validation limitation outside validation routing`,
+          };
+        }
+        if (acceptedPlan === null || !acceptedPlan.runtimeValidationRequired) {
+          return {
+            ok: false,
+            problem: `${label} records a validation limitation when the plan does not require it`,
+          };
+        }
+        const resultCommit = currentResultCommit();
+        if (resultCommit === null || event.payload.commit !== resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} records a validation limitation for a different commit`,
+          };
+        }
+        validationLimitations.push(event.payload);
+        break;
+      }
+      case 'runtime-lifecycle': {
+        if (state !== 'verifying' && state !== 'testing') {
+          return {
+            ok: false,
+            problem: `${label} records a runtime lifecycle outside runtime preparation`,
+          };
+        }
+        if (acceptedPlan === null || !acceptedPlan.runtimeValidationRequired) {
+          return {
+            ok: false,
+            problem: `${label} records a runtime lifecycle when the plan does not require it`,
+          };
+        }
+        const resultCommit = currentResultCommit();
+        if (resultCommit === null || event.payload.commit !== resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} records a runtime lifecycle for a different commit`,
+          };
+        }
+        runtimeLifecycles.push(event.payload);
+        break;
+      }
     }
     previousHash = event.eventHash;
   }
@@ -1292,6 +1584,10 @@ export function verifyRunHistoryEvents(
       acceptedPlan,
       implementation,
       permissionViolations,
+      verifications,
+      testerSkips,
+      validationLimitations,
+      runtimeLifecycles,
     },
   };
 }

@@ -13,6 +13,10 @@ import {
   checkProjectProfile,
 } from '../src/application/profile-check/index.js';
 import {
+  ProjectCommandError,
+  ProjectEvidenceStore,
+} from '../src/application/project-commands/index.js';
+import {
   ReadinessError,
   ReadinessFiles,
   ReadinessGit,
@@ -22,6 +26,7 @@ import { RunHistoryStorage } from '../src/application/run-history/index.js';
 import { RunIdentityStore } from '../src/application/run-identity/index.js';
 import { EXIT_CODES } from '../src/domain/public-commands.js';
 import { ProjectCommandProcessLive } from '../src/platform/commands.js';
+import { ProjectEvidenceStoreLive } from '../src/platform/project-commands.js';
 import { ReadinessFilesLive, ReadinessGitLive } from '../src/platform/readiness.js';
 import { capableRoleHostLauncher } from './fixtures/role-host/role-host-launcher.js';
 
@@ -135,7 +140,7 @@ interface MutableGitState {
 
 type ProcessScript = (
   state: MutableGitState,
-) => Effect.Effect<ProjectCommandResult, ProfileCheckError>;
+) => Effect.Effect<ProjectCommandResult, ProjectCommandError>;
 
 const succeedScript = (mutate?: (state: MutableGitState) => void): ProcessScript => {
   return (state) =>
@@ -166,6 +171,7 @@ interface BuiltProfileWorld {
     | ReadinessFiles
     | ReadinessGit
     | ProjectCommandProcess
+    | ProjectEvidenceStore
     | RunIdentityStore
     | RunHistoryStorage
     | RoleHostLauncher
@@ -251,11 +257,17 @@ function buildProfileWorld(options: {
           scriptIndex += 1;
           if (script === undefined) {
             return Effect.fail(
-              new ProfileCheckError({ message: 'Unexpected project command started.' }),
+              new ProjectCommandError({ message: 'Unexpected project command started.' }),
             );
           }
           return script(gitState);
         },
+      }),
+    ),
+    Layer.succeed(
+      ProjectEvidenceStore,
+      ProjectEvidenceStore.of({
+        write: (_options) => Effect.void,
       }),
     ),
     Layer.succeed(
@@ -453,7 +465,7 @@ describe('profile-check with fake services', () => {
         scripts: [
           (_state) =>
             Effect.fail(
-              new ProfileCheckError({
+              new ProjectCommandError({
                 message: 'Cannot start project command "bootstrap-tool": spawn ENOENT.',
               }),
             ),
@@ -685,6 +697,7 @@ const integrationLayer = Layer.mergeAll(
   ReadinessFilesLive,
   ReadinessGitLive,
   ProjectCommandProcessLive,
+  ProjectEvidenceStoreLive,
 );
 
 const literalArgvCommand = (marker: string): ReadonlyArray<string> => [
