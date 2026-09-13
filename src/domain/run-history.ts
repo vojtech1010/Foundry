@@ -92,6 +92,8 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'evidence-bound',
   'decision-applied',
   'publication-reconciled',
+  'integration-declared',
+  'integration-completed',
 ] as const;
 
 export type RunHistoryEventType = (typeof RUN_HISTORY_EVENT_TYPES)[number];
@@ -489,6 +491,34 @@ export const PublicationReconciledPayloadSchema = Schema.Struct({
 
 export type PublicationReconciledPayload = (typeof PublicationReconciledPayloadSchema)['Type'];
 
+/**
+ * The accepted integration plan recorded before Lead Coder starts: the complete
+ * objective set, the Git-derived commit accepted for each objective, and the
+ * declared application order. Arrival order cannot silently redefine the plan
+ * because the declared order is fixed here, not inferred from worker settling.
+ */
+export const IntegrationDeclaredPayloadSchema = Schema.Struct({
+  objectiveIds: Schema.Array(Schema.NonEmptyString),
+  commits: Schema.Array(GitCommitId),
+  declaredOrder: Schema.Array(Schema.NonEmptyString),
+});
+
+export type IntegrationDeclaredPayload = (typeof IntegrationDeclaredPayloadSchema)['Type'];
+
+/**
+ * The verified outcome of Lead Coder integration: the single aggregate commit
+ * that contains every accepted contribution, the actual Git contribution
+ * application order, and the reason when that order deviates from the declared
+ * order. The aggregate commit is the only candidate result.
+ */
+export const IntegrationCompletedPayloadSchema = Schema.Struct({
+  aggregateCommit: GitCommitId,
+  actualOrder: Schema.Array(Schema.NonEmptyString),
+  deviationReason: Schema.NullOr(Schema.NonEmptyString),
+});
+
+export type IntegrationCompletedPayload = (typeof IntegrationCompletedPayloadSchema)['Type'];
+
 const RunEventEnvelopeFields = {
   schemaVersion: Schema.Literal(RUN_HISTORY_SCHEMA_VERSION),
   runId: Identifier,
@@ -679,6 +709,18 @@ export const PublicationReconciledEventSchema = Schema.Struct({
   payload: PublicationReconciledPayloadSchema,
 });
 
+export const IntegrationDeclaredEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('integration-declared'),
+  payload: IntegrationDeclaredPayloadSchema,
+});
+
+export const IntegrationCompletedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('integration-completed'),
+  payload: IntegrationCompletedPayloadSchema,
+});
+
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
@@ -710,6 +752,8 @@ export const RunEventSchema = Schema.Union([
   EvidenceBoundEventSchema,
   DecisionAppliedEventSchema,
   PublicationReconciledEventSchema,
+  IntegrationDeclaredEventSchema,
+  IntegrationCompletedEventSchema,
 ]);
 
 export type RunEvent = (typeof RunEventSchema)['Type'];
@@ -780,6 +824,14 @@ export type RunEventDraft =
   | {
       readonly type: 'publication-reconciled';
       readonly payload: PublicationReconciledPayload;
+    }
+  | {
+      readonly type: 'integration-declared';
+      readonly payload: IntegrationDeclaredPayload;
+    }
+  | {
+      readonly type: 'integration-completed';
+      readonly payload: IntegrationCompletedPayload;
     };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
@@ -814,6 +866,8 @@ export interface RunHistoryDerivedState {
   readonly evidenceInvalidations: ReadonlyArray<EvidenceInvalidatedPayload>;
   readonly evidenceBindings: ReadonlyArray<EvidenceBoundPayload>;
   readonly decisionApplieds: ReadonlyArray<DecisionAppliedPayload>;
+  readonly integrationDeclared?: IntegrationDeclaredPayload | null;
+  readonly integrationCompleted?: IntegrationCompletedPayload | null;
 }
 
 export type RunHistoryVerification =
@@ -1446,6 +1500,36 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'integration-declared':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          commits: event.payload.commits,
+          declaredOrder: event.payload.declaredOrder,
+          objectiveIds: event.payload.objectiveIds,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'integration-completed':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          actualOrder: event.payload.actualOrder,
+          aggregateCommit: event.payload.aggregateCommit,
+          deviationReason: event.payload.deviationReason,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
   }
 }
 
@@ -1535,6 +1619,10 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'decision-applied', payload: event.payload };
     case 'publication-reconciled':
       return { ...envelope, type: 'publication-reconciled', payload: event.payload };
+    case 'integration-declared':
+      return { ...envelope, type: 'integration-declared', payload: event.payload };
+    case 'integration-completed':
+      return { ...envelope, type: 'integration-completed', payload: event.payload };
   }
 }
 
@@ -1645,6 +1733,8 @@ export function verifyRunHistoryEvents(
   const evidenceBindings: Array<EvidenceBoundPayload> = [];
   const decisionApplieds: Array<DecisionAppliedPayload> = [];
   const openedDecisionIds = new Set<string>();
+  let integrationDeclared: IntegrationDeclaredPayload | null = null;
+  let integrationCompleted: IntegrationCompletedPayload | null = null;
   const retiredRevisions = new Set<number>();
   const findings: Array<FindingRecord> = [];
   let acceptedPlan: PlanAcceptedPayload | null = null;
@@ -2702,6 +2792,102 @@ export function verifyRunHistoryEvents(
         }
         break;
       }
+      case 'integration-declared': {
+        if (state !== 'coding' && state !== 'correcting') {
+          return {
+            ok: false,
+            problem: `${label} records an integration declaration outside the coding stage`,
+          };
+        }
+        if (integrationDeclared !== null) {
+          return { ok: false, problem: `${label} records a second integration declaration` };
+        }
+        const declared = event.payload;
+        if (declared.objectiveIds.length < 2) {
+          return {
+            ok: false,
+            problem: `${label} declares integration for fewer than two objectives`,
+          };
+        }
+        if (
+          declared.commits.length !== declared.objectiveIds.length ||
+          declared.declaredOrder.length !== declared.objectiveIds.length
+        ) {
+          return {
+            ok: false,
+            problem: `${label} declares an integration set with mismatched lengths`,
+          };
+        }
+        const declaredObjectives = new Set(declared.objectiveIds);
+        if (declaredObjectives.size !== declared.objectiveIds.length) {
+          return { ok: false, problem: `${label} declares duplicate objective ids` };
+        }
+        if (
+          new Set(declared.declaredOrder).size !== declared.declaredOrder.length ||
+          !declared.declaredOrder.every((objectiveId) => declaredObjectives.has(objectiveId))
+        ) {
+          return {
+            ok: false,
+            problem: `${label} declares an integration order that is not a permutation of the objective set`,
+          };
+        }
+        for (const [index, objectiveId] of declared.objectiveIds.entries()) {
+          const commit = declared.commits[index];
+          const settled = objectiveWorkers.some(
+            (worker) =>
+              worker.objectiveId === objectiveId &&
+              worker.phase === 'settled' &&
+              worker.commit !== null &&
+              worker.commit === commit,
+          );
+          if (!settled) {
+            return {
+              ok: false,
+              problem: `${label} declares objective "${objectiveId}" without a matching settled worker commit`,
+            };
+          }
+        }
+        integrationDeclared = declared;
+        break;
+      }
+      case 'integration-completed': {
+        if (integrationDeclared === null) {
+          return {
+            ok: false,
+            problem: `${label} completes integration without a declaration`,
+          };
+        }
+        if (integrationCompleted !== null) {
+          return { ok: false, problem: `${label} records a second integration completion` };
+        }
+        if (state !== 'verifying') {
+          return {
+            ok: false,
+            problem: `${label} completes integration outside the verifying stage`,
+          };
+        }
+        const completion = event.payload;
+        const declaredObjectives = new Set(integrationDeclared.objectiveIds);
+        if (
+          completion.actualOrder.length !== integrationDeclared.objectiveIds.length ||
+          new Set(completion.actualOrder).size !== completion.actualOrder.length ||
+          !completion.actualOrder.every((objectiveId) => declaredObjectives.has(objectiveId))
+        ) {
+          return {
+            ok: false,
+            problem: `${label} records an actual order that is not a permutation of the declared objective set`,
+          };
+        }
+        const resultCommit = currentResultCommit();
+        if (resultCommit === null || completion.aggregateCommit !== resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} completes integration for a commit other than the current result head`,
+          };
+        }
+        integrationCompleted = completion;
+        break;
+      }
     }
     previousHash = event.eventHash;
   }
@@ -2746,6 +2932,8 @@ export function verifyRunHistoryEvents(
       evidenceInvalidations,
       evidenceBindings,
       decisionApplieds,
+      integrationDeclared,
+      integrationCompleted,
     },
   };
 }

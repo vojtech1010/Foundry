@@ -205,6 +205,18 @@ function eventDetail(event: RunEvent): string {
       return boundedDetail(
         `publication reconciled (${event.payload.agreement}): ${event.payload.detail}`,
       );
+    case 'integration-declared':
+      return boundedDetail(
+        `integration declared for ${event.payload.objectiveIds.length} objective(s) in order ${event.payload.declaredOrder.join(', ')}`,
+      );
+    case 'integration-completed':
+      return boundedDetail(
+        `integration completed at ${event.payload.aggregateCommit}${
+          event.payload.deviationReason === null
+            ? ''
+            : ` (order deviation: ${event.payload.deviationReason})`
+        }`,
+      );
   }
 }
 
