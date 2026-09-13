@@ -14,6 +14,14 @@ import type {
   IllegalWorkflowTransition,
 } from '../workflow-transitions/index.js';
 
+export function validateTesterTurnControl(control: Schema.Json): {
+  readonly ok: boolean;
+  readonly problem: string;
+} {
+  const decoded = decodeTesterTurnControl(control);
+  return decoded.ok ? { ok: true, problem: '' } : { ok: false, problem: decoded.problem };
+}
+
 export type TesterTurnDisposition =
   | { readonly kind: 'observed' }
   | { readonly kind: 'retry-required' }

@@ -4,7 +4,11 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { CoderTurnRejected, handleCoderTurn } from '../src/application/coder-result/index.js';
+import {
+  CoderTurnRejected,
+  handleCoderTurn,
+  validateCoderTurnControl,
+} from '../src/application/coder-result/index.js';
 import { RunGit } from '../src/application/git-provisioning/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../src/application/run-history/index.js';
 import { transitionWorkflow } from '../src/application/workflow-transitions/index.js';
@@ -70,6 +74,30 @@ function gitLayer(observation: ImplementationObservation): Layer.Layer<RunGit> {
 }
 
 const GIT = gitLayer(CLEAN);
+
+function gitLayerSequence(
+  observations: ReadonlyArray<ImplementationObservation>,
+): Layer.Layer<RunGit> {
+  let index = 0;
+  return Layer.succeed(
+    RunGit,
+    RunGit.of({
+      inspectRepository: () => Effect.die(new Error('unused')),
+      fetchSource: () => Effect.die(new Error('unused')),
+      commitExists: () => Effect.die(new Error('unused')),
+      readBranch: () => Effect.die(new Error('unused')),
+      createBranch: () => Effect.die(new Error('unused')),
+      readWorktree: () => Effect.die(new Error('unused')),
+      createWorktree: () => Effect.die(new Error('unused')),
+      observeImplementation: () =>
+        Effect.sync(() => {
+          const observation = observations[Math.min(index, observations.length - 1)]!;
+          index += 1;
+          return observation;
+        }),
+    }),
+  );
+}
 
 function seedCoding(fixture: Fixture) {
   return Effect.gen(function* () {
@@ -181,6 +209,18 @@ function readHistory(fixture: Fixture) {
   }).pipe(Effect.provide(RunHistoryLive));
 }
 
+describe('coder turn control validation', () => {
+  it('accepts the closed outcomes and names the envelope error otherwise', () => {
+    expect(validateCoderTurnControl({ schemaVersion: 1, outcome: 'implemented' })).toEqual({
+      ok: true,
+      problem: '',
+    });
+    const invalid = validateCoderTurnControl({ schemaVersion: 1, outcome: 'maybe' });
+    expect(invalid.ok).toBe(false);
+    expect(invalid.problem.length).toBeGreaterThan(0);
+  });
+});
+
 describe('blocked coder turn', () => {
   it.effect('preserves evidence without recording a result or transitioning', () =>
     Effect.gen(function* () {
@@ -221,6 +261,53 @@ describe('blocked coder turn', () => {
         const history = yield* readHistory(fixture);
         expect(history.derived.state).toBe('coding');
         expect(history.derived.implementation).toBeNull();
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('requires a new commit for a correction while retaining the earlier result', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* seedCoding(fixture);
+        const firstCommit = '1'.repeat(40);
+        const secondCommit = '2'.repeat(40);
+        const git = gitLayerSequence([
+          { ...CLEAN, headCommit: firstCommit, changedFiles: ['src/first.ts'] },
+          { ...CLEAN, headCommit: secondCommit, changedFiles: ['src/fix.ts'] },
+        ]);
+
+        yield* handleCoderTurn({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          control: { schemaVersion: 1, outcome: 'implemented' },
+        }).pipe(Effect.provide(git), Effect.provide(LiveStore));
+
+        yield* transitionWorkflow({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          request: {
+            route: 'correction-required',
+            findingsBacked: true,
+            correctionRoundsRemaining: 1,
+          },
+        }).pipe(Effect.provide(git), Effect.provide(LiveStore));
+
+        yield* handleCoderTurn({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          control: { schemaVersion: 1, outcome: 'implemented' },
+        }).pipe(Effect.provide(git), Effect.provide(LiveStore));
+
+        const history = yield* readHistory(fixture);
+        expect(history.derived.state).toBe('verifying');
+        expect(history.derived.implementation?.commit).toBe(secondCommit);
+        const acceptedCommits = history.events
+          .filter((event) => event.type === 'implementation-accepted')
+          .map((event) => event.payload.commit);
+        expect(acceptedCommits).toEqual([firstCommit, secondCommit]);
       } finally {
         fixture.cleanup();
       }
