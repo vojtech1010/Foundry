@@ -96,6 +96,16 @@ With no valid command it continues waiting; it never infers a decision from
 ordinary comments, approvals, closure, merge, reactions, labels, or branch
 activity.
 
+**Implemented:** A resume of a `publish_failed` run reconciles the checkpoint
+journal with GitHub before leaving the state: it re-pushes the exact task branch
+only when the push is not journaled, reuses or creates the one exact draft pair,
+appends only the missing checkpoints in stage order, and records a
+`publication-reconciled` event only after the exact draft URL is durable. An
+irreconcilable ambiguity stays `publish_failed` with its evidence preserved, and
+the reconciling adapter never creates a run, branch, or second pull request. A
+resume of a published run with no valid decision command reports that the run is
+still waiting.
+
 ## Abandonment and cleanup
 
 A nonterminal run may be explicitly abandoned with a required reason. This

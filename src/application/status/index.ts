@@ -201,6 +201,10 @@ function eventDetail(event: RunEvent): string {
       return boundedDetail(
         `decision ${event.payload.decisionId} applied ${event.payload.action} (${event.payload.optionId}) by ${event.payload.author}`,
       );
+    case 'publication-reconciled':
+      return boundedDetail(
+        `publication reconciled (${event.payload.agreement}): ${event.payload.detail}`,
+      );
   }
 }
 
