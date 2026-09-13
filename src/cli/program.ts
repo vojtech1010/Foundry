@@ -13,6 +13,7 @@ import {
 } from '../domain/public-commands.js';
 import { PUBLICATION_CAPABILITIES } from '../domain/readiness.js';
 import { RunInspectReportSchema } from '../domain/inspection.js';
+import { CleanupListReportSchema, CleanupRunReportSchema } from '../domain/retention-cleanup.js';
 import { Identifier } from '../domain/run-identity.js';
 import {
   CLEANUP_OUTCOMES,
@@ -398,6 +399,10 @@ const RunStatusReportData = Schema.Struct({
 
 const InspectReportData = RunInspectReportSchema;
 
+const CleanupListReportData = CleanupListReportSchema;
+
+const CleanupRunReportData = CleanupRunReportSchema;
+
 const ReportData = Schema.Union([
   StubReportData,
   DoctorReportData,
@@ -407,6 +412,8 @@ const ReportData = Schema.Union([
   RecordedRunReportData,
   RunStatusReportData,
   InspectReportData,
+  CleanupListReportData,
+  CleanupRunReportData,
 ]);
 
 const SuccessEnvelope = Schema.Struct({
@@ -896,6 +903,27 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
       }
     } else if ('sections' in data) {
       lines.push(...renderInspectHuman(data));
+    } else if ('runs' in data) {
+      lines.push(`data.retentionDays: ${data.retentionDays}`, `data.guidance: ${data.guidance}`);
+      for (const run of data.runs) {
+        lines.push(
+          `data.runs: ${run.runId} state=${run.workflowState} terminalAt=${run.terminalAt} ageMs=${run.ageMs} ownership=${run.ownership} taskBranch=${run.taskBranch ?? 'none'} cleanup=${run.cleanupOutcome ?? 'none'} taskId=${run.taskId ?? 'none'}`,
+        );
+      }
+    } else if ('checks' in data) {
+      lines.push(
+        `data.runId: ${data.runId}`,
+        `data.outcome: ${data.outcome}`,
+        `data.message: ${data.message}`,
+        `data.preserved.taskBranch: ${data.preserved.taskBranch ?? 'none'}`,
+        `data.preserved.handoffPath: ${data.preserved.handoffPath}`,
+      );
+      for (const check of data.checks) {
+        lines.push(`data.checks: ${check.check} ok=${check.ok} ${check.detail}`);
+      }
+      for (const resource of data.resources) {
+        lines.push(`data.resources: ${resource.kind} ${resource.name} ${resource.disposition}`);
+      }
     } else if ('workflowState' in data) {
       lines.push(
         `data.runId: ${data.runId}`,
@@ -987,6 +1015,8 @@ function failureKindFor(error: PublicCommandError): ReportFailureKind {
     case 'GuidanceSnapshotInvalid':
     case 'GuidanceStorageError':
       return 'failed';
+    case 'RetentionCleanupError':
+      return error.kind;
     default:
       return INVALID_INVOCATION_KIND;
   }
@@ -1055,6 +1085,7 @@ function toDomainInvocation(
         return {
           command: 'cleanup',
           runId: invocation.runId,
+          confirm: invocation.confirm,
           config: invocation.config,
           cwd,
         };
@@ -1195,6 +1226,25 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
   }
   if ('sections' in report) {
     return Schema.decodeUnknownSync(InspectReportData)(report);
+  }
+  if ('runs' in report) {
+    return {
+      schemaVersion: report.schemaVersion,
+      retentionDays: report.retentionDays,
+      runs: report.runs.map((run) => ({ ...run })),
+      guidance: report.guidance,
+    };
+  }
+  if ('checks' in report) {
+    return {
+      schemaVersion: report.schemaVersion,
+      runId: report.runId,
+      outcome: report.outcome,
+      checks: report.checks.map((check) => ({ ...check })),
+      resources: report.resources.map((resource) => ({ ...resource })),
+      preserved: { ...report.preserved },
+      message: report.message,
+    };
   }
   if ('workflowState' in report) {
     return {

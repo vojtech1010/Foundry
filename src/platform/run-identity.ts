@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 
 import { Effect, Layer } from 'effect';
 
@@ -110,6 +110,22 @@ const removeDirectory = Effect.fn('runIdentity.removeDirectory')(function* (
   });
 });
 
+const listRuns = Effect.fn('runIdentity.listRuns')(function* (
+  runsRoot: string,
+): Effect.fn.Return<ReadonlyArray<string>, RunIdentityStorageError> {
+  const entries = yield* Effect.try({
+    try: () => readdirSync(runsRoot, { withFileTypes: true }),
+    catch: () => undefined,
+  }).pipe(Effect.orElseSucceed(() => undefined));
+  if (entries === undefined) {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+});
+
 export const RunIdentityLive: Layer.Layer<RunIdentityStore> = Layer.succeed(
   RunIdentityStore,
   RunIdentityStore.of({
@@ -119,5 +135,6 @@ export const RunIdentityLive: Layer.Layer<RunIdentityStore> = Layer.succeed(
     createRunDirectoryExclusive,
     writeFileBytes,
     removeDirectory,
+    listRuns,
   }),
 );
