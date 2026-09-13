@@ -11,6 +11,7 @@ import { PRODUCT_NAME } from '../domain/workflow.js';
 import { checkProjectProfile } from './profile-check/index.js';
 import { checkReadiness } from './readiness/index.js';
 import { previewRunLocations } from './preview-run-locations/index.js';
+import { readRunInspect } from './inspect/index.js';
 import { advanceRun, RunWorkflowError } from './run-workflow/index.js';
 import {
   InvalidRunRequest,
@@ -61,6 +62,7 @@ import type {
   RunProvenance,
 } from './run-identity/index.js';
 import type { RunStatusReport } from './status/index.js';
+import type { RunInspectError, RunInspectReport } from './inspect/index.js';
 import type { RepositoryHostIdentity, RepositoryLeaseStore } from './repository-lease/index.js';
 import type { RoleHostCapabilityError, RoleHostLauncher } from './role-conversations/index.js';
 import type { RoleTurnResourceObserver } from './role-permissions/index.js';
@@ -91,6 +93,7 @@ export type PublicCommandReport =
   | ProfileCheckReport
   | RecordedRunIdentityReport
   | RunStatusReport
+  | RunInspectReport
   | RunWorkflowReport;
 
 export type PublicCommandError =
@@ -102,6 +105,7 @@ export type PublicCommandError =
   | RunWorkspaceBlocked
   | RoleHostCapabilityError
   | RunWorkflowError
+  | RunInspectError
   | RunHistoryIntegrityError
   | RunHistoryStorageError
   | RunHistoryConflict;
@@ -282,6 +286,15 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       return stubReport(invocation);
     }
     return yield* readRunStatus({ configArg, cwd, runId });
+  }
+  if (invocation.command === 'inspect') {
+    const configArg = invocation.config;
+    const cwd = invocation.cwd;
+    const runId = invocation.runId;
+    if (configArg === undefined || cwd === undefined || runId === undefined) {
+      return stubReport(invocation);
+    }
+    return yield* readRunInspect({ configArg, cwd, runId });
   }
   if (invocation.command === 'doctor') {
     const configArg = invocation.config;

@@ -12,6 +12,7 @@ import {
   isPublicCommand,
 } from '../domain/public-commands.js';
 import { PUBLICATION_CAPABILITIES } from '../domain/readiness.js';
+import { RunInspectReportSchema } from '../domain/inspection.js';
 import { Identifier } from '../domain/run-identity.js';
 import {
   CLEANUP_OUTCOMES,
@@ -22,6 +23,7 @@ import {
 import type { PublicCommand, PublicCommandInvocation } from '../domain/public-commands.js';
 import type { ReportFailureKind } from '../domain/public-commands.js';
 import type { PublicCommandError, PublicCommandReport } from '../application/public-commands.js';
+import type { RunInspectReport } from '../application/inspect/index.js';
 import type { RunGit } from '../application/git-provisioning/index.js';
 import type { GuidanceGit, GuidanceSnapshotStore } from '../application/guidance/index.js';
 import type { ProjectCommandProcess } from '../application/profile-check/index.js';
@@ -387,6 +389,8 @@ const RunStatusReportData = Schema.Struct({
   eventHash: Schema.NullOr(Schema.String),
 });
 
+const InspectReportData = RunInspectReportSchema;
+
 const ReportData = Schema.Union([
   StubReportData,
   DoctorReportData,
@@ -395,6 +399,7 @@ const ReportData = Schema.Union([
   RunWorkflowReportData,
   RecordedRunReportData,
   RunStatusReportData,
+  InspectReportData,
 ]);
 
 const SuccessEnvelope = Schema.Struct({
@@ -587,6 +592,211 @@ function renderProvenanceLines(
   ];
 }
 
+function renderInspectHuman(data: RunInspectReport): ReadonlyArray<string> {
+  const lines: Array<string> = [
+    `data.runId: ${data.runId}`,
+    `data.workflowState: ${data.workflowState ?? 'none'}`,
+    `data.revision: ${data.revision}`,
+    `data.eventHash: ${data.eventHash ?? 'none'}`,
+    `data.historyPath: ${data.historyPath}`,
+  ];
+
+  const pushSection = (name: string, entry: { availability: string; detail: string }): void => {
+    lines.push(
+      `data.sections.${name}: ${entry.availability}`,
+      `data.sections.${name}.detail: ${entry.detail}`,
+    );
+  };
+  pushSection('plan', data.sections.plan);
+  pushSection('implementation', data.sections.implementation);
+  pushSection('checks', data.sections.checks);
+  pushSection('tester', data.sections.tester);
+  pushSection('reviewer', data.sections.reviewer);
+  pushSection('failures', data.sections.failures);
+  pushSection('findings', data.sections.findings);
+  pushSection('corrections', data.sections.corrections);
+  pushSection('decision', data.sections.decision);
+  pushSection('publication', data.sections.publication);
+  pushSection('cleanup', data.sections.cleanup);
+  pushSection('journals', data.sections.journals);
+  pushSection('captures', data.sections.captures);
+
+  if (data.plan === null) {
+    lines.push('data.plan: none');
+  } else {
+    lines.push(
+      `data.plan.outcome: ${data.plan.outcome}`,
+      `data.plan.runtimeValidationRequired: ${data.plan.runtimeValidationRequired}`,
+      `data.plan.executionMode: ${data.plan.executionMode}`,
+    );
+    for (const objective of data.plan.objectives) {
+      lines.push(
+        `data.plan.objectives: ${objective.id} criteria=${objective.criterionIds.join(',')} paths=${objective.affectedPaths.join(',')} title=${objective.title}`,
+      );
+    }
+    for (const criterion of data.plan.criteria) {
+      lines.push(
+        `data.plan.criteria: ${criterion.id} commit=${criterion.resultCommit ?? 'none'} checks=${criterion.checks.join(',')} reviewer=${criterion.reviewerOutcome ?? 'none'} objectives=${criterion.objectiveIds.join(',')}`,
+      );
+    }
+  }
+
+  if (data.implementation === null) {
+    lines.push('data.implementation: none');
+  } else {
+    lines.push(
+      `data.implementation.taskBranch: ${data.implementation.taskBranch}`,
+      `data.implementation.baseCommit: ${data.implementation.baseCommit}`,
+      `data.implementation.commit: ${data.implementation.commit ?? 'none'}`,
+      `data.implementation.noChangeCandidate: ${data.implementation.noChangeCandidate}`,
+      `data.implementation.changedFiles: ${data.implementation.changedFiles.join(',')}`,
+    );
+  }
+
+  for (const report of data.checks) {
+    lines.push(
+      `data.checks: attempt=${report.attempt} commit=${report.commit} result=${report.result} profileHash=${report.profileHash} commandMs=${report.commandMs}`,
+    );
+    for (const execution of report.executions) {
+      lines.push(
+        `data.checks.executions: ${execution.name} kind=${execution.kind} passed=${execution.passed} exit=${execution.actualExitCode ?? 'none'} command=${execution.command} log=${execution.logPath} sha256=${execution.logSha256}`,
+      );
+    }
+  }
+
+  lines.push(
+    `data.tester.required: ${data.tester.required}`,
+    `data.tester.status: ${data.tester.status}`,
+    `data.tester.detail: ${data.tester.detail}`,
+    `data.tester.commit: ${data.tester.commit ?? 'none'}`,
+    `data.tester.narrative: ${data.tester.narrative ?? 'none'}`,
+  );
+  for (const limitation of data.tester.limitations) {
+    lines.push(`data.tester.limitations: ${limitation.commit} ${limitation.reason}`);
+  }
+  for (const skip of data.tester.skips) {
+    lines.push(`data.tester.skips: ${skip.verificationCommit} ${skip.reason}`);
+  }
+  for (const runtime of data.tester.runtimes) {
+    lines.push(
+      `data.tester.runtimes: ${runtime.commit} outcome=${runtime.outcome} cleanup=${runtime.cleanup} dataPreserved=${runtime.dataPreserved}`,
+    );
+  }
+
+  if (data.reviewer === null) {
+    lines.push('data.reviewer: none');
+  } else {
+    lines.push(
+      `data.reviewer.outcome: ${data.reviewer.outcome ?? 'none'}`,
+      `data.reviewer.attempt: ${data.reviewer.attempt}`,
+      `data.reviewer.model: ${data.reviewer.model}`,
+      `data.reviewer.narrative: ${data.reviewer.narrative}`,
+    );
+  }
+
+  for (const attempt of data.failures.attempts) {
+    lines.push(
+      `data.failures.attempts: ${attempt.sequence} ${attempt.kind} ${attempt.role} ${attempt.state} ${attempt.reason}`,
+    );
+  }
+  for (const rejection of data.failures.controlRejections) {
+    lines.push(
+      `data.failures.controlRejections: ${rejection.sessionId} resolved=${rejection.resolved} ${rejection.problem}`,
+    );
+  }
+  for (const violation of data.failures.permissionViolations) {
+    lines.push(
+      `data.failures.permissionViolations: ${violation.role} attempt=${violation.attempt} kind=${violation.kind} ${violation.detail}`,
+    );
+  }
+
+  for (const finding of data.findings) {
+    lines.push(
+      `data.findings: ${finding.id} severity=${finding.severity} blocking=${finding.blocking} commit=${finding.commit} ${finding.description}`,
+    );
+  }
+
+  for (const correction of data.corrections) {
+    lines.push(
+      `data.corrections: ${correction.route} ${correction.from ?? 'none'}->${correction.to} at=${correction.at}`,
+    );
+  }
+
+  if (data.decision === null) {
+    lines.push('data.decision: none');
+  } else {
+    lines.push(
+      `data.decision.decisionId: ${data.decision.decisionId ?? 'none'}`,
+      `data.decision.question: ${data.decision.question}`,
+      `data.decision.recommendation: ${data.decision.recommendation ?? 'none'}`,
+      `data.decision.sourceCommit: ${data.decision.sourceCommit ?? 'none'}`,
+      `data.decision.resultCommit: ${data.decision.resultCommit ?? 'none'}`,
+      `data.decision.draftPrUrl: ${data.decision.draftPrUrl ?? 'none'}`,
+      `data.decision.publicationStage: ${data.decision.publicationStage ?? 'none'}`,
+      `data.decision.commandsExact: ${data.decision.commandsExact}`,
+      `data.decision.commentAccepted: ${data.decision.commentAccepted}`,
+      `data.decision.commentAcceptedKnown: ${data.decision.commentAcceptedKnown}`,
+    );
+    for (const option of data.decision.options) {
+      lines.push(`data.decision.options: ${option.id} action=${option.action} ${option.label}`);
+    }
+    for (const command of data.decision.commands) {
+      lines.push(`data.decision.commands: ${command.optionId} ${command.command}`);
+    }
+    for (const finding of data.decision.unresolvedFindings) {
+      lines.push(
+        `data.decision.unresolvedFindings: ${finding.id} severity=${finding.severity} commit=${finding.commit} ${finding.description}`,
+      );
+    }
+    for (const limitation of data.decision.unresolvedLimitations) {
+      lines.push(`data.decision.unresolvedLimitations: ${limitation.commit} ${limitation.reason}`);
+    }
+  }
+
+  lines.push(
+    `data.publication.state: ${data.publication.state ?? 'none'}`,
+    `data.publication.draftPrUrl: ${data.publication.draftPrUrl ?? 'none'}`,
+  );
+  for (const transition of data.publication.transitions) {
+    lines.push(
+      `data.publication.transitions: ${transition.route} ${transition.from ?? 'none'}->${transition.to} at=${transition.at}`,
+    );
+  }
+  for (const checkpoint of data.publication.checkpoints) {
+    lines.push(
+      `data.publication.checkpoints: ${checkpoint.stage} decisionId=${checkpoint.decisionId ?? 'none'} draftPrUrl=${checkpoint.draftPrUrl ?? 'none'} ${checkpoint.detail}`,
+    );
+  }
+
+  if (data.cleanup === null) {
+    lines.push('data.cleanup: none');
+  } else {
+    lines.push(
+      `data.cleanup.outcome: ${data.cleanup.outcome}`,
+      `data.cleanup.detail: ${data.cleanup.detail}`,
+    );
+  }
+
+  for (const journal of data.journals) {
+    lines.push(
+      `data.journals: ${journal.kind} session=${journal.sessionId} role=${journal.role ?? 'none'} generation=${journal.generation ?? 'none'} ${journal.detail}`,
+    );
+  }
+
+  for (const capture of data.captures.entries) {
+    lines.push(
+      `data.captures: ${capture.source} verified=${capture.verified} hash=${capture.contentHash ?? 'none'} bytes=${capture.byteLength ?? 'none'} ${capture.label}`,
+    );
+  }
+  for (const duplicate of data.captures.duplicates) {
+    lines.push(
+      `data.captures.duplicates: ${duplicate.contentHash} labels=${duplicate.labels.join('|')}`,
+    );
+  }
+
+  return lines;
+}
+
 function renderHuman(envelope: ReportEnvelopeValue): string {
   const lines = [
     `schemaVersion: ${envelope.schemaVersion}`,
@@ -670,6 +880,8 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
           `data.testerSkipped: ${data.testerSkipped}`,
         );
       }
+    } else if ('sections' in data) {
+      lines.push(...renderInspectHuman(data));
     } else if ('workflowState' in data) {
       lines.push(
         `data.runId: ${data.runId}`,
@@ -955,6 +1167,9 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       provenance: { ...report.provenance },
       request,
     };
+  }
+  if ('sections' in report) {
+    return Schema.decodeUnknownSync(InspectReportData)(report);
   }
   if ('workflowState' in report) {
     return {

@@ -62,7 +62,29 @@ Resume/recovery is not delivered yet.
 `inspect` identifies accepted plan, implementation, verification, Tester, and
 Reviewer artifacts; failed attempts; validation errors; findings; correction
 history; decision escalation; publication state; and incomplete journal
-diagnostics.
+diagnostics. It is a pure read over one verified history snapshot and never
+appends events, advances work, or pauses an active run.
+
+The report links every accepted criterion to the objectives that cover it, the
+Git-derived result commit, the verification executions bound to that commit, and
+the Reviewer outcome, so a reader can trace one criterion end to end. Separate
+sections summarize the accepted plan, the commit-bound implementation, every
+verification report per commit (command, exit code, bounded hashed log
+reference), Tester observations/limitations/skips, the Reviewer outcome and
+narrative, rejected attempts and control rejections, permission violations,
+findings, correction transitions, publication checkpoints, end-of-run cleanup
+completion (kept distinct from result acceptance), and incomplete or uncertain
+journal records (an unstarted submission, an observation that never settled, or
+an unresolved control repair).
+
+Every section carries an availability flag. `empty-not-proven` means no records
+were found and the empty list is not proof that nothing happened;
+`unavailable` means records were expected but the summary could not be
+produced. Evidence references are listed as `verified` only when they carry a
+content hash: a hashed verification log or tracked-mutation diff is verified
+content, while a finding label without a hash is unverified content. Identical
+content hashes under different labels are reported as duplicate captures, so a
+filename or caption is never treated as proof of content.
 
 The canonical handoff is:
 
@@ -99,15 +121,16 @@ review, not a mandatory screenshot or named-variant gate.
 
 ## Human-decision report
 
-When state is `human_decision_required`, inspection must expose:
-
-- the exact question and options;
-- Reviewer recommendation;
-- unresolved findings and limitations;
-- source/result commits;
-- draft PR URL and publication checkpoint; and
-- the exact authenticated option commands and whether a decision comment has
-  been accepted.
+When state is `human_decision_required`, inspection exposes the exact question
+and labeled options, the Reviewer recommendation, unresolved blocking findings
+and retained limitations, the source and result commits, the draft PR URL and
+publication checkpoint, and the exact authenticated option commands. It also
+reports whether a decision comment has been accepted. The question, options, and
+recommendation come from the settled Reviewer decision envelope; the draft URL,
+decision identity, and accepted-comment flag are read from the recorded
+decision-publication events when they exist. Before those records exist the
+fields stay null or placeholders and the decision section says so, rather than
+inferring a decision from prose or file presence.
 
 Normal approved runs have no human decision and no Foundry-created PR.
 
@@ -159,10 +182,13 @@ output is a presentation of the same durable facts.
 ## Retention cleanup
 
 Status and inspection distinguish result completion from cleanup completion.
-Expose per-role and per-worker disposal status, pending/failed cleanup, retained
-resources, and uncertain ownership. Successful checks may contain non-blocking
-process-shutdown warnings; preserve them without claiming either failed
-acceptance or successful resource disposal solely from the command exit code.
+End-of-run disposal is automatic and records a cleanup-progress outcome naming
+each owned resource and its disposition, so a terminal result does not by itself
+prove that resource disposal succeeded. Expose per-role and per-worker disposal
+status, pending/failed cleanup, retained resources, and uncertain ownership.
+Successful checks may contain non-blocking process-shutdown warnings; preserve
+them without claiming either failed acceptance or successful resource disposal
+solely from the command exit code.
 
 List eligible terminal runs before deleting them, then confirm through the
 supported cleanup command. Cleanup validates state, event logs, workers,

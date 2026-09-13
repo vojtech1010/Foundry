@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import { Schema } from 'effect';
 
+import {
+  DecisionOpenedPayloadSchema,
+  PUBLICATION_CHECKPOINT_STAGES,
+  PublicationCheckpointPayloadSchema,
+} from './decision-publication.js';
 import { FindingRecordSchema } from './findings.js';
 import { GuidanceSnapshotFileSchema } from './guidance.js';
 import {
@@ -27,6 +32,11 @@ import {
   isActiveWorkflowState,
 } from './workflow.js';
 
+import type {
+  DecisionOpenedPayload,
+  PublicationCheckpointPayload,
+  PublicationCheckpointStage,
+} from './decision-publication.js';
 import type { FindingRecord } from './findings.js';
 import type { ProjectVerificationReport, VerificationExecution } from './project-verification.js';
 import type { RuntimeLifecycleRecord } from './project-runtime.js';
@@ -72,6 +82,11 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'tester-skipped',
   'validation-limitation',
   'runtime-lifecycle',
+  'decision-opened',
+  'publication-checkpoint',
+  'objective-worker',
+  'evidence-invalidated',
+  'evidence-bound',
 ] as const;
 
 export type RunHistoryEventType = (typeof RUN_HISTORY_EVENT_TYPES)[number];
@@ -370,6 +385,60 @@ export const RuntimeLifecyclePayloadSchema = RuntimeLifecycleRecordSchema;
 
 export type RuntimeLifecyclePayload = RuntimeLifecycleRecord;
 
+export const OBJECTIVE_WORKER_PHASES = ['created', 'settled', 'disposed'] as const;
+
+export type ObjectiveWorkerPhase = (typeof OBJECTIVE_WORKER_PHASES)[number];
+
+/**
+ * Durable worker-record lifecycle for one parallel objective. `created` records
+ * the worker session identity for one attempt, `settled` binds the attempt to
+ * the Git-derived commit it produced (or `null` when no commit was produced),
+ * and `disposed` closes the objective's worker record. A worker commit is
+ * evidence for integration, never a run result by itself.
+ */
+export const ObjectiveWorkerPayloadSchema = Schema.Struct({
+  phase: Schema.Literals(OBJECTIVE_WORKER_PHASES),
+  objectiveId: Schema.NonEmptyString,
+  sessionId: Schema.NonEmptyString,
+  attempt: PositiveCount,
+  generation: PositiveCount,
+  commit: Schema.NullOr(GitCommitId),
+});
+
+export type ObjectiveWorkerPayload = (typeof ObjectiveWorkerPayloadSchema)['Type'];
+
+/**
+ * Retirement of evidence that was valid for an earlier accepted result head.
+ * A new accepted head makes prior commit-bound checks and Tester observations
+ * unable to approve it; the event names the retired kind, its commit, and the
+ * exact history revision being retired so the retirement stays auditable.
+ */
+export const EVIDENCE_RETIRED_KINDS = ['verification', 'tester-observation'] as const;
+
+export type EvidenceRetiredKind = (typeof EVIDENCE_RETIRED_KINDS)[number];
+
+export const EvidenceInvalidatedPayloadSchema = Schema.Struct({
+  retiredKinds: Schema.Literals(EVIDENCE_RETIRED_KINDS),
+  reason: Schema.NonEmptyString,
+  retiredCommit: Schema.NonEmptyString,
+  retiredRevision: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+});
+
+export type EvidenceInvalidatedPayload = (typeof EvidenceInvalidatedPayloadSchema)['Type'];
+
+/**
+ * Commit binding for a settled Tester observation. Reviewer runtime evidence is
+ * counted only when an observation is bound to the current result head, so an
+ * observation of a previous commit can never approve a corrected result.
+ */
+export const EvidenceBoundPayloadSchema = Schema.Struct({
+  kind: Schema.Literal('tester-observation'),
+  sessionId: Schema.NonEmptyString,
+  commit: Schema.NonEmptyString,
+});
+
+export type EvidenceBoundPayload = (typeof EvidenceBoundPayloadSchema)['Type'];
+
 const RunEventEnvelopeFields = {
   schemaVersion: Schema.Literal(RUN_HISTORY_SCHEMA_VERSION),
   runId: Identifier,
@@ -518,6 +587,36 @@ export const RuntimeLifecycleEventSchema = Schema.Struct({
   payload: RuntimeLifecyclePayloadSchema,
 });
 
+export const DecisionOpenedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('decision-opened'),
+  payload: DecisionOpenedPayloadSchema,
+});
+
+export const PublicationCheckpointEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('publication-checkpoint'),
+  payload: PublicationCheckpointPayloadSchema,
+});
+
+export const ObjectiveWorkerEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('objective-worker'),
+  payload: ObjectiveWorkerPayloadSchema,
+});
+
+export const EvidenceInvalidatedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('evidence-invalidated'),
+  payload: EvidenceInvalidatedPayloadSchema,
+});
+
+export const EvidenceBoundEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('evidence-bound'),
+  payload: EvidenceBoundPayloadSchema,
+});
+
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
@@ -542,6 +641,11 @@ export const RunEventSchema = Schema.Union([
   TesterSkippedEventSchema,
   ValidationLimitationEventSchema,
   RuntimeLifecycleEventSchema,
+  DecisionOpenedEventSchema,
+  PublicationCheckpointEventSchema,
+  ObjectiveWorkerEventSchema,
+  EvidenceInvalidatedEventSchema,
+  EvidenceBoundEventSchema,
 ]);
 
 export type RunEvent = (typeof RunEventSchema)['Type'];
@@ -599,7 +703,15 @@ export type RunEventDraft =
     }
   | { readonly type: 'tester-skipped'; readonly payload: TesterSkippedPayload }
   | { readonly type: 'validation-limitation'; readonly payload: ValidationLimitationPayload }
-  | { readonly type: 'runtime-lifecycle'; readonly payload: RuntimeLifecyclePayload };
+  | { readonly type: 'runtime-lifecycle'; readonly payload: RuntimeLifecyclePayload }
+  | { readonly type: 'decision-opened'; readonly payload: DecisionOpenedPayload }
+  | { readonly type: 'publication-checkpoint'; readonly payload: PublicationCheckpointPayload }
+  | { readonly type: 'objective-worker'; readonly payload: ObjectiveWorkerPayload }
+  | {
+      readonly type: 'evidence-invalidated';
+      readonly payload: EvidenceInvalidatedPayload;
+    }
+  | { readonly type: 'evidence-bound'; readonly payload: EvidenceBoundPayload };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
 
@@ -629,6 +741,9 @@ export interface RunHistoryDerivedState {
   readonly testerSkips: ReadonlyArray<TesterSkippedPayload>;
   readonly validationLimitations: ReadonlyArray<ValidationLimitationPayload>;
   readonly runtimeLifecycles: ReadonlyArray<RuntimeLifecyclePayload>;
+  readonly objectiveWorkers?: ReadonlyArray<ObjectiveWorkerPayload>;
+  readonly evidenceInvalidations: ReadonlyArray<EvidenceInvalidatedPayload>;
+  readonly evidenceBindings: ReadonlyArray<EvidenceBoundPayload>;
 }
 
 export type RunHistoryVerification =
@@ -1141,6 +1256,93 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'decision-opened':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          decisionId: event.payload.decisionId,
+          nonce: event.payload.nonce,
+          options: event.payload.options.map((option) => ({
+            action: option.action,
+            id: option.id,
+            label: option.label,
+          })),
+          question: event.payload.question,
+          recommendation: event.payload.recommendation,
+          resultCommit: event.payload.resultCommit,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'publication-checkpoint':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          decisionId: event.payload.decisionId,
+          detail: event.payload.detail,
+          draftPrUrl: event.payload.draftPrUrl,
+          stage: event.payload.stage,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'objective-worker':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          attempt: event.payload.attempt,
+          commit: event.payload.commit,
+          generation: event.payload.generation,
+          objectiveId: event.payload.objectiveId,
+          phase: event.payload.phase,
+          sessionId: event.payload.sessionId,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'evidence-invalidated':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          reason: event.payload.reason,
+          retiredCommit: event.payload.retiredCommit,
+          retiredKinds: event.payload.retiredKinds,
+          retiredRevision: event.payload.retiredRevision,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'evidence-bound':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          commit: event.payload.commit,
+          kind: event.payload.kind,
+          sessionId: event.payload.sessionId,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
   }
 }
 
@@ -1216,6 +1418,16 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'validation-limitation', payload: event.payload };
     case 'runtime-lifecycle':
       return { ...envelope, type: 'runtime-lifecycle', payload: event.payload };
+    case 'decision-opened':
+      return { ...envelope, type: 'decision-opened', payload: event.payload };
+    case 'publication-checkpoint':
+      return { ...envelope, type: 'publication-checkpoint', payload: event.payload };
+    case 'objective-worker':
+      return { ...envelope, type: 'objective-worker', payload: event.payload };
+    case 'evidence-invalidated':
+      return { ...envelope, type: 'evidence-invalidated', payload: event.payload };
+    case 'evidence-bound':
+      return { ...envelope, type: 'evidence-bound', payload: event.payload };
   }
 }
 
@@ -1321,10 +1533,16 @@ export function verifyRunHistoryEvents(
   const testerSkips: Array<TesterSkippedPayload> = [];
   const validationLimitations: Array<ValidationLimitationPayload> = [];
   const runtimeLifecycles: Array<RuntimeLifecyclePayload> = [];
+  const objectiveWorkers: Array<ObjectiveWorkerPayload> = [];
+  const evidenceInvalidations: Array<EvidenceInvalidatedPayload> = [];
+  const evidenceBindings: Array<EvidenceBoundPayload> = [];
+  const retiredRevisions = new Set<number>();
   const findings: Array<FindingRecord> = [];
   let acceptedPlan: PlanAcceptedPayload | null = null;
   let implementation: ImplementationAcceptedPayload | null = null;
   let previousHash: string | null = null;
+  let decisionOpened: DecisionOpenedPayload | null = null;
+  let lastPublicationCheckpoint: PublicationCheckpointStage | null = null;
 
   const currentResultCommit = (): string | null =>
     implementation === null ? null : (implementation.commit ?? implementation.baseCommit);
@@ -2118,6 +2336,197 @@ export function verifyRunHistoryEvents(
         runtimeLifecycles.push(event.payload);
         break;
       }
+      case 'decision-opened': {
+        if (state !== 'publishing') {
+          return {
+            ok: false,
+            problem: `${label} records an opened decision outside the publishing stage`,
+          };
+        }
+        if (decisionOpened !== null) {
+          return { ok: false, problem: `${label} opens a second decision for this run` };
+        }
+        const resultCommit = currentResultCommit();
+        if (resultCommit === null || event.payload.resultCommit !== resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} opens a decision for a commit other than the current result head`,
+          };
+        }
+        if (event.payload.options.length < 2) {
+          return {
+            ok: false,
+            problem: `${label} records a decision with fewer than two labelled options`,
+          };
+        }
+        decisionOpened = event.payload;
+        break;
+      }
+      case 'publication-checkpoint': {
+        if (state !== 'publishing') {
+          return {
+            ok: false,
+            problem: `${label} records a publication checkpoint outside the publishing stage`,
+          };
+        }
+        if (decisionOpened === null || event.payload.decisionId !== decisionOpened.decisionId) {
+          return {
+            ok: false,
+            problem: `${label} records a publication checkpoint for an unopened decision`,
+          };
+        }
+        const stageIndex = PUBLICATION_CHECKPOINT_STAGES.indexOf(event.payload.stage);
+        const previousIndex =
+          lastPublicationCheckpoint === null
+            ? -1
+            : PUBLICATION_CHECKPOINT_STAGES.indexOf(lastPublicationCheckpoint);
+        if (stageIndex <= previousIndex) {
+          return {
+            ok: false,
+            problem: `${label} records an out-of-order publication checkpoint`,
+          };
+        }
+        if (event.payload.stage !== 'url-recorded' && event.payload.draftPrUrl !== null) {
+          return {
+            ok: false,
+            problem: `${label} records a draft PR URL before the url-recorded checkpoint`,
+          };
+        }
+        lastPublicationCheckpoint = event.payload.stage;
+        break;
+      }
+      case 'objective-worker': {
+        if (state !== 'coding' && state !== 'correcting') {
+          return {
+            ok: false,
+            problem: `${label} records an objective worker outside the coding stage`,
+          };
+        }
+        const { objectiveId, attempt, phase } = event.payload;
+        const created = objectiveWorkers.some(
+          (worker) =>
+            worker.objectiveId === objectiveId &&
+            worker.attempt === attempt &&
+            worker.phase === 'created',
+        );
+        const settled = objectiveWorkers.some(
+          (worker) =>
+            worker.objectiveId === objectiveId &&
+            worker.attempt === attempt &&
+            worker.phase === 'settled',
+        );
+        const disposed = objectiveWorkers.some(
+          (worker) => worker.objectiveId === objectiveId && worker.phase === 'disposed',
+        );
+        if (phase === 'created') {
+          if (created) {
+            return {
+              ok: false,
+              problem: `${label} re-creates objective worker "${objectiveId}" attempt ${attempt}`,
+            };
+          }
+          if (disposed) {
+            return {
+              ok: false,
+              problem: `${label} creates objective worker "${objectiveId}" after its disposal`,
+            };
+          }
+        } else if (phase === 'settled') {
+          if (!created) {
+            return {
+              ok: false,
+              problem: `${label} settles objective worker "${objectiveId}" attempt ${attempt} without a recorded creation`,
+            };
+          }
+          if (settled) {
+            return {
+              ok: false,
+              problem: `${label} settles objective worker "${objectiveId}" attempt ${attempt} twice`,
+            };
+          }
+        } else {
+          if (!created) {
+            return {
+              ok: false,
+              problem: `${label} disposes objective worker "${objectiveId}" before its creation`,
+            };
+          }
+          if (disposed) {
+            return {
+              ok: false,
+              problem: `${label} disposes objective worker "${objectiveId}" twice`,
+            };
+          }
+        }
+        objectiveWorkers.push(event.payload);
+        break;
+      }
+      case 'evidence-invalidated': {
+        const { retiredKinds, retiredCommit, retiredRevision } = event.payload;
+        if (retiredRevision > events.length) {
+          return {
+            ok: false,
+            problem: `${label} retires the future revision ${retiredRevision}`,
+          };
+        }
+        const retired = events[retiredRevision - 1];
+        if (retired === undefined) {
+          return {
+            ok: false,
+            problem: `${label} retires a revision that is not in the history`,
+          };
+        }
+        if (retiredKinds === 'verification') {
+          if (
+            retired.type !== 'verification-completed' ||
+            retired.payload.commit !== retiredCommit
+          ) {
+            return {
+              ok: false,
+              problem: `${label} retires a revision that is not the named verification`,
+            };
+          }
+        } else if (retired.type !== 'evidence-bound' || retired.payload.commit !== retiredCommit) {
+          return {
+            ok: false,
+            problem: `${label} retires a revision that is not the named Tester observation`,
+          };
+        }
+        const resultCommit = currentResultCommit();
+        if (resultCommit !== null && retiredCommit === resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} retires evidence bound to the current result head`,
+          };
+        }
+        if (retiredRevisions.has(retiredRevision)) {
+          return {
+            ok: false,
+            problem: `${label} retires a revision that was already retired`,
+          };
+        }
+        retiredRevisions.add(retiredRevision);
+        evidenceInvalidations.push(event.payload);
+        break;
+      }
+      case 'evidence-bound': {
+        const session = roleSessions.get(event.payload.sessionId);
+        if (session === undefined || session.state.role !== 'tester') {
+          return {
+            ok: false,
+            problem: `${label} binds a Tester observation to an unknown Tester session "${event.payload.sessionId}"`,
+          };
+        }
+        const resultCommit = currentResultCommit();
+        if (resultCommit === null || event.payload.commit !== resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} binds a Tester observation to a commit other than the current result head`,
+          };
+        }
+        evidenceBindings.push(event.payload);
+        break;
+      }
     }
     previousHash = event.eventHash;
   }
@@ -2158,6 +2567,9 @@ export function verifyRunHistoryEvents(
       testerSkips,
       validationLimitations,
       runtimeLifecycles,
+      objectiveWorkers,
+      evidenceInvalidations,
+      evidenceBindings,
     },
   };
 }

@@ -59,6 +59,8 @@ commit and no PR.
 
 ## When Foundry creates a PR
 
+Supported: the `publishing` workflow stage performs this transaction.
+
 Foundry creates or reuses a draft GitHub PR only when Reviewer returns
 `human_decision_required` for a reviewable implementation commit.
 
@@ -116,8 +118,11 @@ The PR must not imply approval, completion, or merge readiness.
 | Remote is not eligible GitHub | `blocked`                 | Decision cannot be published through the required channel        |
 
 Because PR creation has remote side effects, publication uses a durable
-transaction journal. Recovery resumes from the recorded checkpoint and never
-infers success from a branch or arbitrary PR alone.
+transaction journal. The journal records the checkpoints `pre-push`,
+`pushed`, `pull-request-located`, `pull-request-created`, and `url-recorded`;
+only `url-recorded` carries the authoritative draft PR URL, so recovery resumes
+from the recorded checkpoint and never infers success from a branch or
+arbitrary PR alone.
 
 Publication uses the GitHub HTTPS API with `GITHUB_TOKEN` supplied from the
 process environment. The required repository permissions are Metadata read,

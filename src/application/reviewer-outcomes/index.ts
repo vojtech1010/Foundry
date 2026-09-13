@@ -3,9 +3,12 @@ import { Effect } from 'effect';
 import type { Schema } from 'effect';
 
 import { decodeReviewerTurnControl } from '../../domain/reviewer-outcomes.js';
+import { headEvidenceFacts } from '../evidence-invalidation/index.js';
 import { recordReviewerCorrectionFinding } from '../findings/index.js';
+import { readVerifiedRunHistory } from '../run-history/index.js';
 import { transitionWorkflow } from '../workflow-transitions/index.js';
 
+import type { HeadEvidenceFacts } from '../evidence-invalidation/index.js';
 import type { RunGit, RunWorkspaceBlocked } from '../git-provisioning/index.js';
 import type { RunHistoryError, RunHistoryStorage } from '../run-history/index.js';
 import type { RunStateUnavailable } from '../run-identity/index.js';
@@ -48,6 +51,19 @@ export interface HandleReviewerTurnOptions {
   readonly blockedReason: string;
 }
 
+/**
+ * Required runtime evidence must be bound to the current accepted head. Runs
+ * that already record observation bindings can only count a current-head
+ * binding; histories written before binding existed stay readable because they
+ * cannot hold mixed-commit evidence.
+ */
+function runtimeEvidenceBoundToHead(facts: HeadEvidenceFacts): boolean {
+  if (!facts.anyTesterObservationBinding) {
+    return true;
+  }
+  return facts.testerObservationBoundToHead && facts.runtimeReadyForHead;
+}
+
 function approvalProblem(assessment: ReviewerEvidenceAssessment): string | null {
   if (!assessment.evidenceCommitMatches) {
     return 'Reviewer approval requires current evidence bound to the approved commit.';
@@ -87,7 +103,18 @@ export const handleReviewerTurn = Effect.fn('handleReviewerTurn')(function* (
   if (!decoded.ok) {
     return { kind: 'control-invalid', problem: decoded.problem };
   }
-  const assessment = options.assessment;
+  const headEvidence = headEvidenceFacts(
+    yield* readVerifiedRunHistory({
+      runDirectory: options.runDirectory,
+      runId: options.runId,
+      createIfMissing: false,
+    }),
+  );
+  const assessment: ReviewerEvidenceAssessment = {
+    ...options.assessment,
+    runtimeEvidencePresent:
+      options.assessment.runtimeEvidencePresent && runtimeEvidenceBoundToHead(headEvidence),
+  };
 
   switch (decoded.control.outcome) {
     case 'approved': {

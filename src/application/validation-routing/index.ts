@@ -9,7 +9,7 @@ import type { RunHistoryError, RunHistoryStorage } from '../run-history/index.js
 import type { IllegalWorkflowTransition } from '../workflow-transitions/index.js';
 import type { RunStateUnavailable } from '../run-identity/index.js';
 import type { FindingRecord } from '../../domain/findings.js';
-import type { VerificationCompletedPayload } from '../../domain/run-history.js';
+import type { RunEvent, VerificationCompletedPayload } from '../../domain/run-history.js';
 
 export class ProjectValidationRoutingError extends Schema.TaggedError<ProjectValidationRoutingError>()(
   'ProjectValidationRoutingError',
@@ -42,6 +42,32 @@ function latestVerificationFor(
     }
   }
   return latest;
+}
+
+function runtimeReadyRecordedAfterVerification(
+  events: ReadonlyArray<RunEvent>,
+  commit: string,
+): boolean {
+  let verificationIndex = -1;
+  for (const [index, event] of events.entries()) {
+    if (event.type === 'verification-completed' && event.payload.commit === commit) {
+      verificationIndex = index;
+    }
+  }
+  if (verificationIndex === -1) {
+    return false;
+  }
+  for (const [index, event] of events.entries()) {
+    if (
+      index > verificationIndex &&
+      event.type === 'runtime-lifecycle' &&
+      event.payload.commit === commit &&
+      event.payload.outcome === 'ready'
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 const recordFailedCheckFindings = Effect.fn('recordFailedCheckFindings')(function* (options: {
@@ -191,9 +217,7 @@ export const routeAfterProjectChecks = Effect.fn('routeAfterProjectChecks')(func
     return { route: 'reviewing', testerSkipped: true };
   }
 
-  const runtimeReady = derived.runtimeLifecycles.some(
-    (record) => record.commit === commit && record.outcome === 'ready',
-  );
+  const runtimeReady = runtimeReadyRecordedAfterVerification(history.events, commit);
   if (runtimeReady) {
     yield* transitionWorkflow({
       runDirectory: options.runDirectory,

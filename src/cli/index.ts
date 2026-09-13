@@ -4,6 +4,7 @@ import { Cause, Effect, Exit, Layer } from 'effect';
 import { interruptExitCodeFor } from '../domain/public-commands.js';
 import { ProjectCommandProcessLive } from '../platform/commands.js';
 import { RunGitLive } from '../platform/git-provisioning.js';
+import { GitHubPublicationLive } from '../platform/github-publication.js';
 import { GuidanceLive } from '../platform/guidance.js';
 import { ProjectCommandsPlatformLive } from '../platform/project-commands.js';
 import { ReadinessLive } from '../platform/readiness.js';
@@ -31,6 +32,7 @@ const program = runCli(process.argv.slice(2)).pipe(
       RoleHostLauncherLive,
       RoleTurnResourceObserverLive,
       RunGitLive,
+      GitHubPublicationLive,
       GuidanceLive,
     ),
   ),

@@ -179,6 +179,24 @@ function eventDetail(event: RunEvent): string {
       return boundedDetail(`validation limitation retained for ${event.payload.commit}`);
     case 'runtime-lifecycle':
       return boundedDetail(`runtime ${event.payload.outcome}`);
+    case 'decision-opened':
+      return boundedDetail(
+        `decision ${event.payload.decisionId} opened at ${event.payload.resultCommit}`,
+      );
+    case 'publication-checkpoint':
+      return boundedDetail(`publication ${event.payload.stage}: ${event.payload.detail}`);
+    case 'objective-worker':
+      return boundedDetail(
+        `objective ${event.payload.objectiveId} worker ${event.payload.phase}${
+          event.payload.commit === null ? '' : ` at ${event.payload.commit}`
+        }`,
+      );
+    case 'evidence-invalidated':
+      return boundedDetail(
+        `${event.payload.retiredKinds} evidence retired for ${event.payload.retiredCommit}`,
+      );
+    case 'evidence-bound':
+      return boundedDetail(`tester observation bound to ${event.payload.commit}`);
   }
 }
 

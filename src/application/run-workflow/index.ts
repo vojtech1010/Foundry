@@ -1,40 +1,55 @@
-import { DateTime, Duration, Effect, Ref, Result, Schema } from 'effect';
+import { DateTime, Duration, Effect, Layer, Option, Ref, Result, Schema } from 'effect';
 import { dirname, join } from 'node:path';
 
 import { decodeReviewerTurnControl } from '../../domain/reviewer-outcomes.js';
 import { REQUEST_NORMALIZED_FILENAME } from '../../domain/run-identity.js';
+import { describeRunCleanupReport } from '../../domain/run-cleanup.js';
 import { decodeTesterTurnControl } from '../../domain/tester-outcomes.js';
-import { isActiveWorkflowState } from '../../domain/workflow.js';
+import { isActiveWorkflowState, isTerminalWorkflowState } from '../../domain/workflow.js';
 import {
   admitArchitectPlan,
   resumeArchitectPlan,
   validateArchitectPlanControl,
 } from '../architect-plan/index.js';
 import {
+  CoderTurnControlSchema,
   CoderTurnRejected,
   handleCoderTurn,
   validateCoderTurnControl,
 } from '../coder-result/index.js';
+import { GitHubPublication, publishDecisionDraftPr } from '../decision-publication/index.js';
 import { bootstrapRoleGuidance } from '../guidance/index.js';
 import { reconcileHandoff } from '../handoff/index.js';
+import {
+  ParallelWorkersTurnError,
+  WorkerTurnRunner,
+  runObjectiveWorkers,
+} from '../parallel-workers/index.js';
 import { prepareAndHoldApplicationRuntime } from '../project-runtime/index.js';
 import { runProjectVerification } from '../project-verification/index.js';
 import { buildRolePacket } from '../role-packets/index.js';
 import { startGovernedRoleTurn } from '../role-permissions/index.js';
 import { handleReviewerTurn } from '../reviewer-outcomes/index.js';
-import { RoleHostLauncher } from '../role-conversations/index.js';
+import { RoleHostLauncher, stopRoleSession } from '../role-conversations/index.js';
 import { describePublicationReadiness } from '../readiness/index.js';
 import { RunIdentityStore, RunIdentityStorageError } from '../run-identity/index.js';
+import { disposeRunResources } from '../run-cleanup/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../run-history/index.js';
 import { handleTesterTurn, validateTesterTurnControl } from '../tester-validation/index.js';
 import { routeAfterProjectChecks } from '../validation-routing/index.js';
-import { recordWorkflowAttempt, transitionWorkflow } from '../workflow-transitions/index.js';
+import {
+  recordCleanupProgress,
+  recordWorkflowAttempt,
+  transitionWorkflow,
+} from '../workflow-transitions/index.js';
 
 import type { ProjectConfiguration } from '../../domain/project-configuration.js';
+import type { PlannedObjective } from '../../domain/architect-plan.js';
 import type { RoleHostControl, RoleHostSessionState } from '../../domain/role-host.js';
 import type { RoleTurnLocations } from '../../domain/role-permissions.js';
 import type { RunHistoryDerivedState } from '../../domain/run-history.js';
 import type { WorkflowRole, WorkflowState } from '../../domain/workflow.js';
+import type { WorkerTurnTarget } from '../parallel-workers/index.js';
 import type { HeldApplicationRuntime } from '../project-runtime/index.js';
 import type { VerifiedRunHistory } from '../run-history/index.js';
 
@@ -228,6 +243,8 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     attempt: number,
     prompt: string,
     runtimeBaseUrl: string | null,
+    coderWorktree: string | null = null,
+    stopAfterSettle = false,
   ) {
     const launcher = yield* RoleHostLauncher;
     const history = yield* readVerifiedRunHistory({
@@ -239,7 +256,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       (session) => session.role === role && session.attempt === attempt,
     );
     const generation = existing?.generation ?? attempt;
-    const worktree = history.derived.worktreeReady?.workspace ?? null;
+    const worktree = coderWorktree ?? history.derived.worktreeReady?.workspace ?? null;
     const locations: RoleTurnLocations = {
       projectRoot: configuration.targetRepository,
       runDirectory,
@@ -275,7 +292,15 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
         validate: roleControlValidator(role),
       },
     };
-    return yield* startGovernedRoleTurn(governedTurn).pipe(Effect.provide(hostLayer));
+    return yield* Effect.gen(function* () {
+      const settled = yield* startGovernedRoleTurn(governedTurn);
+      if (stopAfterSettle) {
+        yield* stopRoleSession({ runDirectory, runId, role, attempt, generation }).pipe(
+          Effect.ignore,
+        );
+      }
+      return settled;
+    }).pipe(Effect.provide(hostLayer));
   });
 
   /**
@@ -355,7 +380,128 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     }
   });
 
+  const performWorkerTurn = Effect.fn('advanceRun.performWorkerTurn')(function* (
+    target: WorkerTurnTarget,
+    basePrompt: string,
+    objectives: ReadonlyArray<PlannedObjective>,
+  ) {
+    const objective = objectives.find((candidate) => candidate.id === target.objectiveId);
+    const objectiveSection =
+      objective === undefined
+        ? ''
+        : `\n\n## Assigned parallel objective\n\n${objective.id}: ${objective.title}\nAffected paths: ${objective.affectedPaths.join(', ')}\nAcceptance criteria: ${objective.criterionIds.join(', ')}\n`;
+    const settled = yield* performRoleTurn(
+      'coder',
+      target.attempt,
+      `${basePrompt}${objectiveSection}`,
+      null,
+      target.workspace,
+      true,
+    );
+    const identity = {
+      sessionId: settled.session.sessionId,
+      attempt: target.attempt,
+      generation: settled.session.generation,
+    } as const;
+    if (!settled.controlValid) {
+      return {
+        kind: 'control-invalid',
+        ...identity,
+        problem: settled.controlProblem ?? 'invalid control envelope',
+      } as const;
+    }
+    const decoded = Schema.decodeUnknownResult(CoderTurnControlSchema)(settled.control);
+    if (Result.isFailure(decoded)) {
+      return { kind: 'control-invalid', ...identity, problem: decoded.failure.message } as const;
+    }
+    if (decoded.success.outcome === 'blocked') {
+      return {
+        kind: 'blocked',
+        ...identity,
+        problem: 'the objective Coder reported that the objective cannot be implemented',
+      } as const;
+    }
+    return { kind: 'settled', ...identity } as const;
+  });
+
+  /**
+   * Parallel plans run one Coder worker per accepted objective from the same
+   * frozen source, each in its own branch, worktree, and session. In this wave
+   * the coding stage ends blocked with a recoverable "awaiting integration"
+   * reason; Lead Coder integration is a later objective that replaces it.
+   */
+  const runParallelObjectives = Effect.fn('advanceRun.runParallelObjectives')(function* (
+    history: VerifiedRunHistory,
+    objectives: ReadonlyArray<PlannedObjective>,
+  ) {
+    const ready = history.derived.worktreeReady;
+    if (ready === null) {
+      return yield* new RunWorkflowError({
+        message: `Run "${runId}" cannot run parallel objectives without durable worktree readiness.`,
+        runId,
+        kind: 'blocked',
+      });
+    }
+    const basePrompt = yield* promptFor('coder', history);
+    const runnerLayer = Layer.effect(
+      WorkerTurnRunner,
+      Effect.sync(() =>
+        WorkerTurnRunner.of({
+          run: (target) =>
+            performWorkerTurn(target, basePrompt, objectives).pipe(
+              Effect.mapError(
+                (error) =>
+                  new ParallelWorkersTurnError({
+                    message: error.message,
+                    runId,
+                    objectiveId: target.objectiveId,
+                    reason: error._tag,
+                  }),
+              ),
+            ),
+        }),
+      ),
+    );
+    const report = yield* runObjectiveWorkers({
+      runDirectory,
+      runId,
+      repositoryRoot: configuration.targetRepository,
+      taskBranch: ready.taskBranch,
+      baseCommit: ready.baseCommit,
+      workspace: ready.workspace,
+      maxParallelCoders: configuration.limits.maxParallelCoders,
+      coderRetryBudget: configuration.retryBudgets.coder,
+      objectives,
+    }).pipe(Effect.provide(runnerLayer));
+    const failed = report.objectives.filter((outcome) => !outcome.settled);
+    const reason =
+      failed.length === 0
+        ? `Parallel objective workers settled (${report.objectives.length}/${report.objectives.length}) each with a verified commit; awaiting Lead Coder integration.`
+        : `Parallel objective workers settled with incomplete objectives: ${failed
+            .map(
+              (outcome) =>
+                `${outcome.objectiveId} (${outcome.attempts} attempt(s)${
+                  outcome.problem === null ? '' : `: ${outcome.problem}`
+                })`,
+            )
+            .join('; ')}; awaiting Lead Coder integration or recovery.`;
+    yield* transitionWorkflow({
+      runDirectory,
+      runId,
+      request: { route: 'block-run', recoverablePrerequisite: true, reason: reason.slice(0, 500) },
+    });
+  });
+
   const runCoder = Effect.fn('advanceRun.runCoder')(function* (history: VerifiedRunHistory) {
+    const plan = history.derived.acceptedPlan;
+    if (
+      plan !== null &&
+      plan.execution.mode === 'parallel' &&
+      plan.execution.objectives.length > 1
+    ) {
+      yield* runParallelObjectives(history, plan.execution.objectives);
+      return;
+    }
     const prompt = yield* promptFor('coder', history);
     const attempt = countSessions(history.derived, 'coder') + 1;
     const settled = yield* performRoleTurn('coder', attempt, prompt, null);
@@ -403,7 +549,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       });
     }
     const commit = implementation.commit ?? implementation.baseCommit;
-    yield* runProjectVerification({
+    const report = yield* runProjectVerification({
       runDirectory,
       runId,
       repositoryPath: worktree,
@@ -411,7 +557,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       commit,
       configuration,
     });
-    if (plan.runtimeValidationRequired) {
+    if (plan.runtimeValidationRequired && report.result === 'passed') {
       const prepared = yield* prepareAndHoldApplicationRuntime({
         runDirectory,
         runId,
@@ -591,6 +737,27 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     }
   });
 
+  /**
+   * Executes the publication transaction for a recorded human decision. The
+   * GitHub adapter is optional in the environment so a run without a wired
+   * adapter fails publication durably instead of silently guessing; the
+   * application function owns every checkpoint, push, and PR transition.
+   */
+  const runPublishing = Effect.fn('advanceRun.runPublishing')(function* () {
+    const github = yield* Effect.serviceOption(GitHubPublication);
+    if (Option.isNone(github)) {
+      yield* transitionWorkflow({
+        runDirectory,
+        runId,
+        request: { route: 'publication-unresolved', cannotReconcileSafely: true },
+      });
+      return;
+    }
+    yield* publishDecisionDraftPr({ runDirectory, runId, configuration }).pipe(
+      Effect.provideService(GitHubPublication, github.value),
+    );
+  });
+
   const runStage = Effect.fn('advanceRun.runStage')(function* (
     state: WorkflowState,
     history: VerifiedRunHistory,
@@ -611,6 +778,9 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
         return;
       case 'reviewing':
         yield* runReviewing(history);
+        return;
+      case 'publishing':
+        yield* runPublishing();
         return;
       default:
         return;
@@ -696,21 +866,49 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     );
   });
 
-  const completed = yield* body.pipe(
-    Effect.ensuring(disposeRuntime().pipe(Effect.ignore)),
-    Effect.result,
-  );
-  const summary = Result.isSuccess(completed)
-    ? completed.success
-    : yield* blockOnFailure(errorMessage(completed.failure));
+  const disposeOwnedResources = Effect.fn('advanceRun.disposeOwnedResources')(function* (
+    summary: RunWorkflowOutcome,
+  ) {
+    if (!isTerminalWorkflowState(summary.workflowState)) {
+      return;
+    }
+    const runtime = yield* Ref.get(runtimeRef);
+    const disposal = yield* disposeRunResources({
+      runDirectory,
+      runId,
+      configuration,
+      runtime,
+    });
+    if (disposal === null) {
+      return;
+    }
+    yield* Ref.set(runtimeRef, null);
+    yield* recordCleanupProgress({
+      runDirectory,
+      runId,
+      outcome: disposal.outcome,
+      detail: describeRunCleanupReport(disposal.resources),
+    }).pipe(Effect.ignore);
+  });
 
-  /**
-   * A completed or no-change run owns exactly one canonical handoff. The write
-   * is idempotent: it reconciles from verified history, so an already-settled
-   * run (including `resume`) rewrites identical bytes or repairs a missing
-   * report. A run that is not terminally successful has no handoff and this is
-   * a no-op.
-   */
-  yield* reconcileHandoff({ runDirectory, runId });
-  return summary;
+  const finalize = Effect.gen(function* () {
+    const completed = yield* body.pipe(Effect.result);
+    const summary = Result.isSuccess(completed)
+      ? completed.success
+      : yield* blockOnFailure(errorMessage(completed.failure));
+
+    yield* disposeOwnedResources(summary);
+
+    /**
+     * A completed or no-change run owns exactly one canonical handoff. The write
+     * is idempotent: it reconciles from verified history, so an already-settled
+     * run (including `resume`) rewrites identical bytes or repairs a missing
+     * report. A run that is not terminally successful has no handoff and this is
+     * a no-op.
+     */
+    yield* reconcileHandoff({ runDirectory, runId });
+    return summary;
+  });
+
+  return yield* finalize.pipe(Effect.ensuring(disposeRuntime().pipe(Effect.ignore)));
 });

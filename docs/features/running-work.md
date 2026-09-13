@@ -124,12 +124,18 @@ Git, and provisioning evidence intact, records no accepted implementation, and
 does not enter verification with a fabricated commit. A Coder no-change claim
 remains provisional until verification and Reviewer accept it.
 
-Deterministic verification runs before required runtime preparation. When the
-plan does not require Tester, Foundry records an explicit skip with its reason
-and proceeds to Reviewer using the verification report. No Tester invocation or
-synthetic passed Tester artifact is needed. A skipped Tester is not a claim that
-live application behavior was exercised, and command-log filenames are not
-proof that a Tester session ran.
+Deterministic verification runs before required runtime preparation: Foundry
+holds runtime reset, build, start, and readiness until the commit-bound
+verification report exists and every required gate passed. A failed required
+check records its findings and routes to correction or blocked without bringing
+the application up. The `checks-passed-testing` route is accepted only when a
+`ready` runtime-lifecycle record for the same commit was recorded after the
+commit-bound verification event, so the run history orders verification, then
+runtime preparation, then Tester. When the plan does not require Tester, Foundry
+records an explicit skip with its reason and proceeds to Reviewer using the
+verification report. No Tester invocation or synthetic passed Tester artifact is
+needed. A skipped Tester is not a claim that live application behavior was
+exercised, and command-log filenames are not proof that a Tester session ran.
 
 ## Corrections
 
@@ -138,9 +144,13 @@ and invalidates downstream evidence from earlier commits. Foundry reruns the
 required checks, Tester stage when applicable, and Reviewer.
 
 Any accepted result-head change invalidates earlier commit-bound checks and
-downstream observations, not just a change labeled as a correction. Record the
-invalidation reason and the new verification attempt; never mix evidence from
-two result commits into one approval.
+downstream observations, not just a change labeled as a correction. Foundry
+records the retirement (`evidence-invalidated`) with the reason and the exact
+revision being retired, then the new verification attempt runs against the new
+commit. Retired attempts remain visible in history and inspection; they are not
+deleted. A settled Tester observation is bound to its commit (`evidence-bound`),
+and Reviewer counts a required observation only for the current result head, so
+evidence from two result commits is never mixed into one approval.
 
 Correction and role retry budgets are distinct. Exhaustion does not silently
 approve the result. Reviewer may escalate the remaining decision to a draft PR
