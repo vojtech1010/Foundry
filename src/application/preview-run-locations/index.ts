@@ -5,7 +5,8 @@ import { TASK_ID_PLACEHOLDER } from '../../domain/project-configuration.js';
 import { RUN_STORAGE_DIRECTORY_NAME } from '../../domain/readiness.js';
 import {
   RUNS_DIRECTORY_NAME,
-  isLegalGitBranchName,
+  branchProtectionEvidenceForPublication,
+  preflightTaskBranch,
   renderTaskBranch,
   renderWorkspacePath,
 } from '../../domain/run-locations.js';
@@ -15,6 +16,7 @@ import { decodeProjectConfiguration } from '../project-configuration.js';
 import type { ReadinessError, ReadinessGit, ReadinessHost } from '../readiness/index.js';
 import type { RoleHostCapabilityError, RoleHostLauncher } from '../role-conversations/index.js';
 import type { CommandVector } from '../../domain/project-configuration.js';
+import type { BranchProtectionEvidence } from '../../domain/run-locations.js';
 
 export class PreviewLocationsError extends Schema.TaggedError<PreviewLocationsError>()(
   'PreviewLocationsError',
@@ -51,6 +53,7 @@ export interface PreviewRunLocationsOptions {
   readonly configArg: string;
   readonly cwd: string;
   readonly taskId: string;
+  readonly protection?: BranchProtectionEvidence;
 }
 
 function excerpt(output: string): string {
@@ -84,15 +87,20 @@ export const previewRunLocations = Effect.fn('previewRunLocations')(function* (
   );
 
   const branch = renderTaskBranch(configuration.taskBranchPolicy, options.taskId);
-  if (branch === configuration.sourceBranch) {
-    return yield* new PreviewLocationsError({
-      message: `Rendered task branch "${branch}" must not equal source branch "${configuration.sourceBranch}".`,
-    });
-  }
-  if (!isLegalGitBranchName(branch)) {
-    return yield* new PreviewLocationsError({
-      message: `Rendered task branch "${branch}" from policy "${configuration.taskBranchPolicy}" with task ID "${options.taskId}" is not a legal Git branch name. Placeholder is ${TASK_ID_PLACEHOLDER}.`,
-    });
+  const protection =
+    options.protection ??
+    branchProtectionEvidenceForPublication(configuration.decisionPublication !== null);
+  const preflight = preflightTaskBranch({
+    taskBranch: branch,
+    sourceBranch: configuration.sourceBranch,
+    protection,
+  });
+  if (preflight._tag === 'Rejected') {
+    const message =
+      preflight.rejection._tag === 'IllegalName'
+        ? `Rendered task branch "${branch}" from policy "${configuration.taskBranchPolicy}" with task ID "${options.taskId}" is not a legal Git branch name. Placeholder is ${TASK_ID_PLACEHOLDER}.`
+        : preflight.rejection.message;
+    return yield* new PreviewLocationsError({ message });
   }
 
   const workspace = renderWorkspacePath(configuration.targetRepository, options.taskId);

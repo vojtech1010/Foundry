@@ -5,8 +5,9 @@ import { dirname, join, resolve } from 'node:path';
 import { RUN_STORAGE_DIRECTORY_NAME } from '../../domain/readiness.js';
 import {
   RUNS_DIRECTORY_NAME,
-  isLegalGitBranchName,
+  branchProtectionEvidenceForPublication,
   isPathInside,
+  preflightTaskBranch,
   renderTaskBranch,
   renderWorkspacePath,
 } from '../../domain/run-locations.js';
@@ -66,6 +67,7 @@ import type {
   WorktreeReadyPayload,
 } from '../../domain/run-history.js';
 import type { ProjectConfiguration } from '../../domain/project-configuration.js';
+import type { BranchProtectionEvidence } from '../../domain/run-locations.js';
 import type { RequestIdentityDocument } from '../../domain/run-identity.js';
 import type { RunGit } from '../git-provisioning/index.js';
 import type {
@@ -176,6 +178,7 @@ export interface RecordRunIdentityOptions {
   readonly requestArg: string;
   readonly taskId: string;
   readonly runId: string;
+  readonly protection?: BranchProtectionEvidence;
 }
 
 export interface RunProgressReport {
@@ -458,15 +461,17 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   const normalizedPromptHash = sha256HexOfBytes(normalizedBytes);
 
   const taskBranch = renderTaskBranch(configuration.taskBranchPolicy, options.taskId);
-  if (taskBranch === configuration.sourceBranch) {
+  const protection =
+    options.protection ??
+    branchProtectionEvidenceForPublication(configuration.decisionPublication !== null);
+  const branchPreflight = preflightTaskBranch({
+    taskBranch,
+    sourceBranch: configuration.sourceBranch,
+    protection,
+  });
+  if (branchPreflight._tag === 'Rejected') {
     return yield* new InvalidRunRequest({
-      message: `Rendered task branch "${taskBranch}" must not equal source branch "${configuration.sourceBranch}".`,
-      runId,
-    });
-  }
-  if (!isLegalGitBranchName(taskBranch)) {
-    return yield* new InvalidRunRequest({
-      message: `Rendered task branch "${taskBranch}" is not a legal Git branch name.`,
+      message: branchPreflight.rejection.message,
       runId,
     });
   }

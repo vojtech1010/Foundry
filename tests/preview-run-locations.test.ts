@@ -71,7 +71,15 @@ const TASK_ID = 'example-change';
 
 function goldenDocument(
   targetRepository: string,
-  overrides?: { readonly taskBranchPolicy?: string },
+  overrides?: {
+    readonly taskBranchPolicy?: string;
+    readonly sourceBranch?: string;
+    readonly decisionPublication?: {
+      readonly remote: string;
+      readonly draft: true;
+      readonly maintainersCanModify: false;
+    } | null;
+  },
 ) {
   return {
     schemaVersion: 1,
@@ -439,6 +447,91 @@ describe('preview run locations with fake services', () => {
       const error = yield* preview.pipe(Effect.flip);
       expect(error).toBeInstanceOf(PreviewLocationsError);
       expect(error.message).toContain('is not a legal Git branch name');
+    }),
+  );
+
+  it.effect('fails closed when configured publication has no resolved protection evidence', () =>
+    Effect.gen(function* () {
+      const world = withTexts(
+        defaultWorld(),
+        new Map([
+          [
+            CONFIG_PATH,
+            JSON.stringify(
+              goldenDocument(TARGET, {
+                decisionPublication: { remote: 'origin', draft: true, maintainersCanModify: false },
+              }),
+            ),
+          ],
+        ]),
+      );
+      const built = buildWorld(world);
+      const error = yield* previewRunLocations({
+        configArg: CONFIG_ARG,
+        cwd: CONFIG_DIR,
+        taskId: TASK_ID,
+      }).pipe(Effect.provide(built.layer), Effect.flip);
+
+      expect(error).toBeInstanceOf(PreviewLocationsError);
+      expect(error.message).toContain('cannot be checked against GitHub protected branches');
+      expectReadOnlyGitCalls(built.gitCalls);
+    }),
+  );
+
+  it.effect('fails when the rendered branch collides with a GitHub protected branch', () =>
+    Effect.gen(function* () {
+      const world = withTexts(
+        defaultWorld(),
+        new Map([
+          [
+            CONFIG_PATH,
+            JSON.stringify(
+              goldenDocument(TARGET, {
+                decisionPublication: { remote: 'origin', draft: true, maintainersCanModify: false },
+              }),
+            ),
+          ],
+        ]),
+      );
+      const built = buildWorld(world);
+      const error = yield* previewRunLocations({
+        configArg: CONFIG_ARG,
+        cwd: CONFIG_DIR,
+        taskId: TASK_ID,
+        protection: { _tag: 'Known', protectedBranches: ['main', 'foundry/example-change'] },
+      }).pipe(Effect.provide(built.layer), Effect.flip);
+
+      expect(error).toBeInstanceOf(PreviewLocationsError);
+      expect(error.message).toContain('collides with a protected branch');
+      expectReadOnlyGitCalls(built.gitCalls);
+    }),
+  );
+
+  it.effect('accepts a protected-branch probe that does not name the rendered branch', () =>
+    Effect.gen(function* () {
+      const world = withTexts(
+        defaultWorld(),
+        new Map([
+          [
+            CONFIG_PATH,
+            JSON.stringify(
+              goldenDocument(TARGET, {
+                decisionPublication: { remote: 'origin', draft: true, maintainersCanModify: false },
+              }),
+            ),
+          ],
+        ]),
+      );
+      const built = buildWorld(world);
+      const report = yield* previewRunLocations({
+        configArg: CONFIG_ARG,
+        cwd: CONFIG_DIR,
+        taskId: TASK_ID,
+        protection: { _tag: 'Known', protectedBranches: ['main', 'release'] },
+      }).pipe(Effect.provide(built.layer));
+
+      expect(report.branch).toBe('foundry/example-change');
+      expectReadOnlyGitCalls(built.gitCalls);
     }),
   );
 
