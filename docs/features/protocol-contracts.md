@@ -253,10 +253,13 @@ The rendered task branch must be a valid Git ref and may not equal the
 configured source branch or any protected branch reported by GitHub.
 
 At run creation, Foundry fetches the configured remote and freezes the resolved
-remote-tracking source commit. It does not trust or update the local source
-branch. An existing task or worker branch is reusable only when its ownership
+fetched commit without updating remote-tracking refs or trusting or updating the
+local source branch. The task branch and run-owned worktree start at that frozen
+commit. An existing task or worker branch is reusable only when its ownership
 record belongs to the same run and its recorded head matches Git; otherwise the
-run blocks without moving or deleting it.
+run blocks without moving or deleting it. Until verified `worktree-ready`
+evidence exists, replay derives `blocked` rather than an active role state, and
+a stale or forged `planning` report is replaced from verified history.
 
 Normal forward movement of the remote source branch does not rewrite an active
 run. Foundry records that drift, and publication is allowed only while the
@@ -358,13 +361,14 @@ the canonical stream. The platform storage adapter must pass crash-injection
 tests for Linux and Windows. A stale writer receives a revision conflict and
 replays; it never overwrites newer events.
 
-The implemented slice records run creation, workflow transitions, retry or
-repair attempts, and cleanup progress. A same-directory `events.witness.json`
-records the last accepted revision and hash as an independently durable
-append-integrity floor: a missing witness, a stream without its terminal
-newline, or a revision, link, or payload discontinuity stops the run for human
-integrity investigation instead of repairing or truncating history, and the
-stream, witness, and reports stay untouched.
+The implemented slice records run creation, the `source-frozen` and
+`worktree-ready` provisioning checkpoints, workflow transitions, retry or
+repair attempts, and cleanup progress. A same-directory
+`events.witness.json` records the last accepted revision and hash as an
+independently durable append-integrity floor: a missing witness, a stream
+without its terminal newline, or a revision, link, or payload discontinuity
+stops the run for human integrity investigation instead of repairing or
+truncating history, and the stream, witness, and reports stay untouched.
 
 Whenever an existing run is opened or read, Foundry replays and verifies the
 complete stream and witness before reading any report, then rebuilds workflow

@@ -5,9 +5,9 @@ import { TASK_ID_PLACEHOLDER } from '../../domain/project-configuration.js';
 import { RUN_STORAGE_DIRECTORY_NAME } from '../../domain/readiness.js';
 import {
   RUNS_DIRECTORY_NAME,
-  WORKTREES_DIRECTORY_NAME,
   isLegalGitBranchName,
   renderTaskBranch,
+  renderWorkspacePath,
 } from '../../domain/run-locations.js';
 import { checkReadiness, ReadinessFiles } from '../readiness/index.js';
 import { decodeProjectConfiguration } from '../project-configuration.js';
@@ -94,12 +94,7 @@ export const previewRunLocations = Effect.fn('previewRunLocations')(function* (
     });
   }
 
-  const workspace = join(
-    configuration.targetRepository,
-    RUN_STORAGE_DIRECTORY_NAME,
-    WORKTREES_DIRECTORY_NAME,
-    options.taskId,
-  );
+  const workspace = renderWorkspacePath(configuration.targetRepository, options.taskId);
   const artifactsRoot = join(
     configuration.targetRepository,
     RUN_STORAGE_DIRECTORY_NAME,

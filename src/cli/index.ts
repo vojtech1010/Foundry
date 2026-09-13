@@ -3,6 +3,7 @@ import { Cause, Effect, Exit, Layer } from 'effect';
 
 import { interruptExitCodeFor } from '../domain/public-commands.js';
 import { ProjectCommandProcessLive } from '../platform/commands.js';
+import { RunGitLive } from '../platform/git-provisioning.js';
 import { ReadinessLive } from '../platform/readiness.js';
 import { RepositoryLeaseLive } from '../platform/repository-lease.js';
 import { RunHistoryLive } from '../platform/run-history.js';
@@ -22,6 +23,7 @@ const program = runCli(process.argv.slice(2)).pipe(
       RunIdentityLive,
       RunHistoryLive,
       RepositoryLeaseLive,
+      RunGitLive,
     ),
   ),
 );

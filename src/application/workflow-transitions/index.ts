@@ -11,8 +11,11 @@ import {
   isActiveWorkflowState,
   isTerminalWorkflowState,
 } from '../../domain/workflow.js';
+import { RunGit } from '../git-provisioning/index.js';
 import { RunStateUnavailable, reconcileRunReports } from '../run-identity/index.js';
 import { RunHistoryIntegrityError, appendRunEvent } from '../run-history/index.js';
+
+import type { RunWorkspaceBlocked } from '../git-provisioning/index.js';
 
 import type {
   CleanupOutcome,
@@ -25,7 +28,11 @@ import type {
   WorkflowTransitionRouteKind,
 } from '../../domain/workflow.js';
 import type { RunEventDraft } from '../../domain/run-history.js';
-import type { RunHistoryError, RunHistoryStorage } from '../run-history/index.js';
+import type {
+  RunHistoryError,
+  RunHistoryStorage,
+  VerifiedRunHistory,
+} from '../run-history/index.js';
 
 export class IllegalWorkflowTransition extends Schema.TaggedError<IllegalWorkflowTransition>()(
   'IllegalWorkflowTransition',
@@ -131,12 +138,121 @@ function attemptRefusal(
   });
 }
 
+function implementationRefusal(
+  runId: string,
+  from: WorkflowState | null,
+  reason: string,
+  missingFact: string | null,
+): IllegalWorkflowTransition {
+  return new IllegalWorkflowTransition({
+    message: `Cannot apply the "implementation-ready" route for run "${runId}": ${reason}`,
+    runId,
+    route: 'implementation-ready',
+    from,
+    to: 'verifying',
+    reason,
+    missingFact,
+  });
+}
+
+const deriveImplementationRequest = Effect.fn('deriveImplementationRequest')(function* (
+  runId: string,
+  request: Extract<WorkflowTransitionRequest, { readonly route: 'implementation-ready' }>,
+  history: VerifiedRunHistory,
+): Effect.fn.Return<
+  Extract<WorkflowTransitionRequest, { readonly route: 'implementation-ready' }>,
+  IllegalWorkflowTransition | RunWorkspaceBlocked,
+  RunGit
+> {
+  const ready = history.derived.worktreeReady;
+  if (ready === null) {
+    return yield* implementationRefusal(
+      runId,
+      history.derived.state,
+      'The "implementation-ready" route requires durable worktree readiness for this run.',
+      'durable worktree readiness',
+    );
+  }
+
+  const git = yield* RunGit;
+  const observed = yield* git.observeImplementation({
+    workspace: ready.workspace,
+    taskBranch: ready.taskBranch,
+    baseCommit: ready.baseCommit,
+    runId,
+  });
+  if (!observed.workspaceExists) {
+    return yield* implementationRefusal(
+      runId,
+      history.derived.state,
+      `The assigned worktree ${ready.workspace} does not exist.`,
+      'assigned worktree',
+    );
+  }
+  if (observed.currentBranch !== ready.taskBranch) {
+    return yield* implementationRefusal(
+      runId,
+      history.derived.state,
+      `The assigned worktree ${ready.workspace} is on ${observed.currentBranch ?? 'a detached HEAD'} instead of the assigned task branch "${ready.taskBranch}".`,
+      'assigned task branch at HEAD',
+    );
+  }
+  if (observed.headCommit === null) {
+    return yield* implementationRefusal(
+      runId,
+      history.derived.state,
+      `The assigned worktree ${ready.workspace} has no readable HEAD commit.`,
+      'real HEAD commit',
+    );
+  }
+  if (!observed.clean) {
+    return yield* implementationRefusal(
+      runId,
+      history.derived.state,
+      `The assigned worktree ${ready.workspace} has uncommitted tracked or untracked changes; only a commit on the assigned branch can be accepted.`,
+      'clean assigned worktree',
+    );
+  }
+  if (!observed.baseIsAncestor) {
+    return yield* implementationRefusal(
+      runId,
+      history.derived.state,
+      `HEAD ${observed.headCommit} is not descended from the frozen source commit ${ready.baseCommit}.`,
+      'descendance from the frozen source commit',
+    );
+  }
+  if (request.candidateCommit !== null && request.candidateCommit !== observed.headCommit) {
+    return yield* implementationRefusal(
+      runId,
+      history.derived.state,
+      `The supplied candidate commit does not match the current HEAD ${observed.headCommit}.`,
+      'candidate commit at the recorded head',
+    );
+  }
+
+  const candidateCommit = observed.headCommit === ready.baseCommit ? null : observed.headCommit;
+  if (candidateCommit === null && !request.noChangeCandidateValidated) {
+    return yield* implementationRefusal(
+      runId,
+      history.derived.state,
+      'The "implementation-ready" route requires a new Git-derived candidate commit or a validated no-change candidate.',
+      'Git-derived candidate commit or validated no-change candidate',
+    );
+  }
+  return {
+    route: 'implementation-ready',
+    branchClean: true,
+    candidateCommit,
+    noChangeCandidateValidated: request.noChangeCandidateValidated,
+  };
+});
+
 export const transitionWorkflow = Effect.fn('transitionWorkflow')(function* (
   options: TransitionWorkflowOptions,
 ): Effect.fn.Return<
   WorkflowTransitionReport,
-  IllegalWorkflowTransition | RunStateUnavailable | RunHistoryError,
-  RunHistoryStorage
+  IllegalWorkflowTransition | RunStateUnavailable | RunWorkspaceBlocked | RunHistoryError,
+  RunHistoryStorage | RunGit
 > {
   const runId = options.runId;
   if (!Schema.is(Identifier)(runId)) {
@@ -149,9 +265,22 @@ export const transitionWorkflow = Effect.fn('transitionWorkflow')(function* (
     createIfMissing: options.request.route === 'run-created',
     build: (history) =>
       Effect.gen(function* () {
+        if (options.request.route === 'run-created' && history.derived.worktreeReady === null) {
+          return yield* transitionRefusal(runId, 'run-created', history.derived.state, {
+            ok: false,
+            to: 'planning',
+            reason:
+              'Run creation to planning requires durable source and worktree provisioning checkpoints; they are not recorded.',
+            missingFact: 'durable source and worktree provisioning checkpoints',
+          });
+        }
+        const request =
+          options.request.route === 'implementation-ready'
+            ? yield* deriveImplementationRequest(runId, options.request, history)
+            : options.request;
         const evaluation = evaluateWorkflowTransition(
           { state: history.derived.state, checkpoint: history.derived.checkpoint },
-          options.request,
+          request,
         );
         if (!evaluation.ok) {
           return yield* transitionRefusal(

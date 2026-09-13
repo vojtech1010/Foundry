@@ -7,6 +7,7 @@ import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
+import { RunGit } from '../src/application/git-provisioning/index.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
 import { ReadinessGit, ReadinessHost } from '../src/application/readiness/index.js';
 import {
@@ -68,6 +69,7 @@ import {
   WorkflowStateSchema,
 } from '../src/domain/workflow.js';
 import { ReadinessFilesLive } from '../src/platform/readiness.js';
+import { RunGitLive } from '../src/platform/git-provisioning.js';
 import { RepositoryLeaseLive } from '../src/platform/repository-lease.js';
 import { RunHistoryLive } from '../src/platform/run-history.js';
 import { RunIdentityLive } from '../src/platform/run-identity.js';
@@ -160,18 +162,33 @@ function goldenDocument(targetRepository: string, maxRequestBytes = 262144) {
 interface Fixture {
   readonly base: string;
   readonly target: string;
+  readonly remote: string;
   readonly configPath: string;
   readonly requestPath: string;
   readonly runDirectory: (runId: string) => string;
   readonly cleanup: () => void;
 }
 
+function gitExec(cwd: string, args: ReadonlyArray<string>): string {
+  return execFileSync('git', [...args], { cwd, encoding: 'utf8' });
+}
+
 function setupFixture(options?: { readonly maxRequestBytes?: number }): Fixture {
   const base = mkdtempSync(join(tmpdir(), 'foundry-run-identity-'));
   const target = join(base, 'target');
+  const remote = join(base, 'remote.git');
   const home = join(base, 'home');
-  mkdirSync(target, { recursive: true });
   mkdirSync(home, { recursive: true });
+  execFileSync('git', ['init', '--bare', remote], { encoding: 'utf8' });
+  execFileSync('git', ['init', '-b', 'main', target], { encoding: 'utf8' });
+  gitExec(target, ['config', 'user.email', 'identity@example.com']);
+  gitExec(target, ['config', 'user.name', 'Foundry Identity']);
+  writeFileSync(join(target, '.gitignore'), '.agent\n');
+  writeFileSync(join(target, 'README.md'), '# target\n');
+  gitExec(target, ['add', '.gitignore', 'README.md']);
+  gitExec(target, ['commit', '-m', 'initial']);
+  gitExec(target, ['remote', 'add', 'origin', remote]);
+  gitExec(target, ['push', '-u', 'origin', 'main']);
   const configPath = join(home, 'foundry.config.json');
   writeFileSync(
     configPath,
@@ -181,6 +198,7 @@ function setupFixture(options?: { readonly maxRequestBytes?: number }): Fixture 
   return {
     base,
     target,
+    remote,
     configPath,
     requestPath,
     runDirectory: (runId: string) => join(target, '.agent', 'runs', runId),
@@ -196,6 +214,33 @@ const LiveFilesAndStore = Layer.mergeAll(
   RunHistoryLive,
   RepositoryLeaseLive,
 );
+
+function unusedRunGit(name: string) {
+  return Effect.die(new Error(`transition tests must not call RunGit.${name}`));
+}
+
+const SyntheticRunGit = Layer.succeed(
+  RunGit,
+  RunGit.of({
+    inspectRepository: () => unusedRunGit('inspectRepository'),
+    fetchSource: () => unusedRunGit('fetchSource'),
+    commitExists: () => unusedRunGit('commitExists'),
+    readBranch: () => unusedRunGit('readBranch'),
+    createBranch: () => unusedRunGit('createBranch'),
+    readWorktree: () => unusedRunGit('readWorktree'),
+    createWorktree: () => unusedRunGit('createWorktree'),
+    observeImplementation: (options) =>
+      Effect.succeed({
+        workspaceExists: true,
+        currentBranch: options.taskBranch,
+        headCommit: 'abc123',
+        clean: true,
+        baseIsAncestor: true,
+      }),
+  }),
+);
+
+const TransitionLayer = Layer.mergeAll(LiveFilesAndStore, SyntheticRunGit);
 
 function dieService(message: string) {
   return Effect.die(new Error(message));
@@ -228,6 +273,7 @@ const CliLayer = Layer.mergeAll(
   RunIdentityLive,
   RunHistoryLive,
   RepositoryLeaseLive,
+  RunGitLive,
 );
 
 function recordWithLive(options: {
@@ -242,7 +288,7 @@ function recordWithLive(options: {
     requestArg: options.requestPath,
     taskId: options.taskId,
     runId: options.runId,
-  }).pipe(Effect.provide(LiveFilesAndStore));
+  }).pipe(Effect.provide(Layer.mergeAll(LiveFilesAndStore, RunGitLive)));
 }
 
 function readWithLive(options: { readonly configPath: string; readonly runId: string }) {
@@ -602,11 +648,11 @@ describe('recordRunIdentity with live storage', () => {
         const sibling = yield* recordWithLive({
           configPath: fixture.configPath,
           requestPath: fixture.requestPath,
-          taskId: 'TASK-1',
+          taskId: 'TASK-2',
           runId: 'RUN-DUP-2',
         });
         expect(sibling.runId).toBe('RUN-DUP-2');
-        expect(sibling.taskId).toBe('TASK-1');
+        expect(sibling.taskId).toBe('TASK-2');
         expect(readFileSync(sibling.request.originalPath, 'utf8')).toBe('second ask\n');
         expect(readFileSync(first.request.originalPath, 'utf8')).toBe('first ask\n');
       } finally {
@@ -674,7 +720,7 @@ describe('workflow state through run storage', () => {
         expect(identityText).toContain(`"schemaVersion": ${REQUEST_IDENTITY_SCHEMA_VERSION}`);
 
         const events = readHistoryEvents(report.runDirectory);
-        expect(events).toHaveLength(1);
+        expect(events).toHaveLength(4);
       } finally {
         fixture.cleanup();
       }
@@ -739,15 +785,16 @@ describe('workflow state through run storage', () => {
           runId: 'RUN-READ',
           runDirectory: recorded.runDirectory,
           historyPath: join(recorded.runDirectory, RUN_HISTORY_FILENAME),
-          revision: 1,
+          revision: 4,
           workflowState: 'planning',
           checkpoint: null,
           attempts: [],
           cleanupProgress: null,
         });
+        expect(planning.provenance).not.toBeNull();
 
         const events = readHistoryEvents(recorded.runDirectory);
-        expect(events).toHaveLength(1);
+        expect(events).toHaveLength(4);
         const [genesis] = events;
         if (genesis === undefined) {
           throw new Error('Expected a genesis event.');
@@ -758,12 +805,23 @@ describe('workflow state through run storage', () => {
           payload: { taskId: 'TASK-1' },
           previousEventHash: null,
         });
-        expect(planning.eventHash).toBe(genesis.eventHash);
+        expect(events[1]).toMatchObject({ revision: 2, type: 'source-frozen' });
+        expect(events[2]).toMatchObject({ revision: 3, type: 'worktree-ready' });
+        const head = events[3];
+        if (head === undefined) {
+          throw new Error('Expected a workflow transition event.');
+        }
+        expect(head).toMatchObject({
+          revision: 4,
+          type: 'workflow-transition',
+          payload: { route: 'run-created', from: null, to: 'planning' },
+        });
+        expect(planning.eventHash).toBe(head.eventHash);
         expect(readHistoryWitness(recorded.runDirectory)).toEqual({
           schemaVersion: 1,
           runId: 'RUN-READ',
-          revision: 1,
-          eventHash: genesis.eventHash,
+          revision: 4,
+          eventHash: head.eventHash,
         });
         expect(verifyRunHistoryEvents(events, 'RUN-READ').ok).toBe(true);
 
@@ -776,7 +834,7 @@ describe('workflow state through run storage', () => {
           configPath: fixture.configPath,
           runId: 'RUN-READ',
         });
-        expect(coding).toMatchObject({ runId: 'RUN-READ', workflowState: 'coding', revision: 2 });
+        expect(coding).toMatchObject({ runId: 'RUN-READ', workflowState: 'coding', revision: 5 });
 
         writeState(fixture, 'RUN-READ', 'completed');
         const rebuilt = yield* readWithLive({
@@ -796,7 +854,7 @@ describe('workflow state through run storage', () => {
           checkpoint: null,
           attempts: [],
         });
-        expect(readHistoryEvents(recorded.runDirectory)).toHaveLength(2);
+        expect(readHistoryEvents(recorded.runDirectory)).toHaveLength(5);
       } finally {
         fixture.cleanup();
       }
@@ -856,7 +914,7 @@ describe('workflow state through run storage', () => {
         const readState = () => readWithLive({ configPath: fixture.configPath, runId: 'RUN-BAD' });
         const expectRebuiltPlanning = (report: RunProgressReport): void => {
           expect(report.workflowState).toBe('planning');
-          expect(report.revision).toBe(1);
+          expect(report.revision).toBe(4);
           expect(existsSync(statePath)).toBe(true);
           expect(
             Schema.decodeUnknownSync(WorkflowProgressDocumentSchema, {
@@ -976,7 +1034,7 @@ describe('derived report reconciliation', () => {
             runDirectory: recorded.runDirectory,
             runId: 'RUN-CLEANUP',
             request,
-          }).pipe(Effect.provide(LiveFilesAndStore));
+          }).pipe(Effect.provide(TransitionLayer));
         yield* transition({ route: 'plan-accepted', planRequiresImplementation: true });
         yield* transition({
           route: 'implementation-ready',
@@ -1124,7 +1182,31 @@ describe('run command through the cli envelope', () => {
         expect(data.taskId).toBe('TASK-CLI');
         expect(data.runDirectory).toBe(fixture.runDirectory('RUN-CLI-1'));
         expect(Object.keys(data).sort()).toEqual(
-          ['request', 'runDirectory', 'runId', 'taskId'].sort(),
+          ['provenance', 'request', 'runDirectory', 'runId', 'taskId'].sort(),
+        );
+        expect(Object.keys(data.provenance).sort()).toEqual(
+          [
+            'repositoryRoot',
+            'gitDirectory',
+            'remoteUrl',
+            'sourceRemote',
+            'sourceBranch',
+            'sourceCommit',
+            'taskBranch',
+            'workspace',
+            'headCommit',
+          ].sort(),
+        );
+        expect(data.provenance.sourceRemote).toBe('origin');
+        expect(data.provenance.sourceBranch).toBe('main');
+        expect(data.provenance.taskBranch).toBe('foundry/TASK-CLI');
+        expect(data.provenance.workspace).toBe(
+          join(fixture.target, '.agent', 'worktrees', 'TASK-CLI'),
+        );
+        expect(data.provenance.sourceCommit).toBe(
+          execFileSync('git', ['-C', fixture.remote, 'rev-parse', 'main'], {
+            encoding: 'utf8',
+          }).trim(),
         );
         expect(Object.keys(data.request).sort()).toEqual(
           [
@@ -1177,13 +1259,13 @@ describe('run command through the cli envelope', () => {
           '--request',
           fixture.requestPath,
           '--task-id',
-          'TASK-CLI',
+          'TASK-CLI-2',
           '--run-id',
           'RUN-CLI-HUMAN-2',
         ]);
         expect(humanResult.exitCode).toBe(EXIT_CODES.reported);
         expect(humanResult.stdout).toContain(`data.runId: RUN-CLI-HUMAN-2`);
-        expect(humanResult.stdout).toContain(`data.taskId: TASK-CLI`);
+        expect(humanResult.stdout).toContain(`data.taskId: TASK-CLI-2`);
         expect(humanResult.stdout).toContain(
           `data.request.originalContentHash: ${data.request.originalContentHash}`,
         );
@@ -1302,7 +1384,7 @@ describe('status command through the cli envelope', () => {
             runDirectory: fixture.runDirectory('RUN-STATUS'),
             runId: 'RUN-STATUS',
             request,
-          }).pipe(Effect.provide(LiveFilesAndStore));
+          }).pipe(Effect.provide(TransitionLayer));
 
         const expectStatus = (state: WorkflowState) =>
           Effect.gen(function* () {
@@ -1321,7 +1403,14 @@ describe('status command through the cli envelope', () => {
               throw new Error(`Expected a success envelope but received: ${jsonResult.stdout}`);
             }
             expect(envelope.command).toBe('status');
-            expect(envelope.data).toEqual({ runId: 'RUN-STATUS', workflowState: state });
+            expect(envelope.data.runId).toBe('RUN-STATUS');
+            expect(envelope.data.workflowState).toBe(state);
+            expect(envelope.data.provenance).toMatchObject({
+              sourceRemote: 'origin',
+              sourceBranch: 'main',
+              taskBranch: 'foundry/TASK-CLI',
+              workspace: join(fixture.target, '.agent', 'worktrees', 'TASK-CLI'),
+            });
 
             const humanResult = yield* run([
               'status',
@@ -1334,6 +1423,7 @@ describe('status command through the cli envelope', () => {
             expect(humanResult.stdout).toContain('command: status');
             expect(humanResult.stdout).toContain('data.runId: RUN-STATUS');
             expect(humanResult.stdout).toContain(`data.workflowState: ${state}`);
+            expect(humanResult.stdout).toContain('data.provenance.taskBranch: foundry/TASK-CLI');
             expect(humanResult.stdout.endsWith('\n')).toBe(true);
           });
 
@@ -1445,9 +1535,10 @@ describe('status command through the cli envelope', () => {
           throw new Error(`Expected a success envelope but received: ${missing.stdout}`);
         }
         expect(missingEnvelope.command).toBe('status');
-        expect(missingEnvelope.data).toEqual({
+        expect(missingEnvelope.data).toMatchObject({
           runId: 'RUN-NOSTATE',
           workflowState: 'planning',
+          provenance: { taskBranch: 'foundry/TASK-CLI' },
         });
         expect(existsSync(statePath)).toBe(true);
 
@@ -1466,9 +1557,10 @@ describe('status command through the cli envelope', () => {
         if (!invalidEnvelope.ok) {
           throw new Error(`Expected a success envelope but received: ${invalid.stdout}`);
         }
-        expect(invalidEnvelope.data).toEqual({
+        expect(invalidEnvelope.data).toMatchObject({
           runId: 'RUN-NOSTATE',
           workflowState: 'planning',
+          provenance: { taskBranch: 'foundry/TASK-CLI' },
         });
 
         writeState(fixture, 'RUN-NOSTATE', 'completed');
@@ -1486,9 +1578,10 @@ describe('status command through the cli envelope', () => {
         if (!staleEnvelope.ok) {
           throw new Error(`Expected a success envelope but received: ${stale.stdout}`);
         }
-        expect(staleEnvelope.data).toEqual({
+        expect(staleEnvelope.data).toMatchObject({
           runId: 'RUN-NOSTATE',
           workflowState: 'planning',
+          provenance: { taskBranch: 'foundry/TASK-CLI' },
         });
         expect(readFileSync(statePath, 'utf8')).toContain('"state": "planning"');
       } finally {

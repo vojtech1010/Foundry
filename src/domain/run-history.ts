@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 import { Schema } from 'effect';
 
+import { GitCommitId } from './run-locations.js';
 import { Identifier, Sha256Hex } from './run-identity.js';
 import {
   CLEANUP_OUTCOMES,
-  INITIAL_WORKFLOW_STATE,
   WORKFLOW_ATTEMPT_KINDS,
   WORKFLOW_ROLES,
   WORKFLOW_TRANSITION_ROUTE_KINDS,
@@ -28,6 +28,8 @@ export const RUN_HISTORY_LOCK_FILENAME = 'events.jsonl.lock' as const;
 
 export const RUN_HISTORY_EVENT_TYPES = [
   'run-created',
+  'source-frozen',
+  'worktree-ready',
   'workflow-transition',
   'workflow-attempt',
   'cleanup-progress',
@@ -48,6 +50,35 @@ export const RunCreatedPayloadSchema = Schema.Struct({
 });
 
 export type RunCreatedPayload = (typeof RunCreatedPayloadSchema)['Type'];
+
+export const RunRepositoryIdentitySchema = Schema.Struct({
+  repositoryRoot: Schema.NonEmptyString,
+  gitDirectory: Schema.NonEmptyString,
+  remoteUrl: Schema.NonEmptyString,
+});
+
+export type RunRepositoryIdentity = (typeof RunRepositoryIdentitySchema)['Type'];
+
+export const SourceFrozenPayloadSchema = Schema.Struct({
+  repository: RunRepositoryIdentitySchema,
+  sourceRemote: Schema.NonEmptyString,
+  sourceBranch: Schema.NonEmptyString,
+  sourceCommit: GitCommitId,
+  taskBranch: Schema.NonEmptyString,
+  workspace: Schema.NonEmptyString,
+  expectedHead: GitCommitId,
+});
+
+export type SourceFrozenPayload = (typeof SourceFrozenPayloadSchema)['Type'];
+
+export const WorktreeReadyPayloadSchema = Schema.Struct({
+  taskBranch: Schema.NonEmptyString,
+  workspace: Schema.NonEmptyString,
+  headCommit: GitCommitId,
+  baseCommit: GitCommitId,
+});
+
+export type WorktreeReadyPayload = (typeof WorktreeReadyPayloadSchema)['Type'];
 
 export const WorkflowTransitionPayloadSchema = Schema.Struct({
   route: Schema.Literals(WORKFLOW_TRANSITION_ROUTE_KINDS),
@@ -91,6 +122,18 @@ export const RunCreatedEventSchema = Schema.Struct({
   payload: RunCreatedPayloadSchema,
 });
 
+export const SourceFrozenEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('source-frozen'),
+  payload: SourceFrozenPayloadSchema,
+});
+
+export const WorktreeReadyEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('worktree-ready'),
+  payload: WorktreeReadyPayloadSchema,
+});
+
 export const WorkflowTransitionEventSchema = Schema.Struct({
   ...RunEventEnvelopeFields,
   type: Schema.Literal('workflow-transition'),
@@ -111,6 +154,8 @@ export const CleanupProgressEventSchema = Schema.Struct({
 
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
+  SourceFrozenEventSchema,
+  WorktreeReadyEventSchema,
   WorkflowTransitionEventSchema,
   WorkflowAttemptEventSchema,
   CleanupProgressEventSchema,
@@ -129,6 +174,8 @@ export type RunEventEnvelope = {
 
 export type RunEventDraft =
   | { readonly type: 'run-created'; readonly payload: RunCreatedPayload }
+  | { readonly type: 'source-frozen'; readonly payload: SourceFrozenPayload }
+  | { readonly type: 'worktree-ready'; readonly payload: WorktreeReadyPayload }
   | { readonly type: 'workflow-transition'; readonly payload: WorkflowTransitionPayload }
   | { readonly type: 'workflow-attempt'; readonly payload: WorkflowAttemptPayload }
   | { readonly type: 'cleanup-progress'; readonly payload: CleanupProgressPayload };
@@ -148,6 +195,8 @@ export interface RunHistoryDerivedState {
   readonly checkpoint: WorkflowState | null;
   readonly attempts: ReadonlyArray<WorkflowAttempt>;
   readonly cleanupProgress: CleanupProgressPayload | null;
+  readonly sourceFrozen: SourceFrozenPayload | null;
+  readonly worktreeReady: WorktreeReadyPayload | null;
 }
 
 export type RunHistoryVerification =
@@ -183,6 +232,45 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         eventId: event.eventId,
         occurredAt: event.occurredAt,
         payload: { taskId: event.payload.taskId },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'source-frozen':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          expectedHead: event.payload.expectedHead,
+          repository: {
+            gitDirectory: event.payload.repository.gitDirectory,
+            remoteUrl: event.payload.repository.remoteUrl,
+            repositoryRoot: event.payload.repository.repositoryRoot,
+          },
+          sourceBranch: event.payload.sourceBranch,
+          sourceCommit: event.payload.sourceCommit,
+          sourceRemote: event.payload.sourceRemote,
+          taskBranch: event.payload.taskBranch,
+          workspace: event.payload.workspace,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'worktree-ready':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          baseCommit: event.payload.baseCommit,
+          headCommit: event.payload.headCommit,
+          taskBranch: event.payload.taskBranch,
+          workspace: event.payload.workspace,
+        },
         previousEventHash: event.previousEventHash,
         revision: event.revision,
         runId: event.runId,
@@ -267,6 +355,10 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
   switch (event.type) {
     case 'run-created':
       return { ...envelope, type: 'run-created', payload: event.payload };
+    case 'source-frozen':
+      return { ...envelope, type: 'source-frozen', payload: event.payload };
+    case 'worktree-ready':
+      return { ...envelope, type: 'worktree-ready', payload: event.payload };
     case 'workflow-transition':
       return { ...envelope, type: 'workflow-transition', payload: event.payload };
     case 'workflow-attempt':
@@ -331,6 +423,8 @@ export function verifyRunHistoryEvents(
   let state: WorkflowState | null = null;
   let checkpoint: WorkflowState | null = null;
   let cleanupProgress: CleanupProgressPayload | null = null;
+  let sourceFrozen: SourceFrozenPayload | null = null;
+  let worktreeReady: WorktreeReadyPayload | null = null;
   const attempts: Array<WorkflowAttempt> = [];
   let previousHash: string | null = null;
 
@@ -353,20 +447,80 @@ export function verifyRunHistoryEvents(
       return { ok: false, problem: `${label} hash does not match its contents` };
     }
     if (index === 0 && event.type !== 'run-created') {
-      if (event.type !== 'workflow-transition' || event.payload.route !== 'run-created') {
-        return { ok: false, problem: 'history does not begin with run creation' };
-      }
+      return { ok: false, problem: 'history does not begin with run creation' };
     }
     switch (event.type) {
       case 'run-created': {
         if (index !== 0) {
           return { ok: false, problem: `run creation appears again at ${label}` };
         }
-        state = INITIAL_WORKFLOW_STATE;
+        state = null;
         checkpoint = null;
         break;
       }
+      case 'source-frozen': {
+        if (state !== null) {
+          return {
+            ok: false,
+            problem: `${label} records a source freeze after workflow work began`,
+          };
+        }
+        if (sourceFrozen !== null) {
+          return { ok: false, problem: `source freeze appears again at ${label}` };
+        }
+        if (event.payload.expectedHead !== event.payload.sourceCommit) {
+          return {
+            ok: false,
+            problem: `${label} records an expected head that differs from the frozen source commit`,
+          };
+        }
+        sourceFrozen = event.payload;
+        break;
+      }
+      case 'worktree-ready': {
+        if (state !== null) {
+          return {
+            ok: false,
+            problem: `${label} records worktree readiness after workflow work began`,
+          };
+        }
+        if (sourceFrozen === null) {
+          return {
+            ok: false,
+            problem: `${label} records worktree readiness before the source freeze`,
+          };
+        }
+        if (worktreeReady !== null) {
+          return { ok: false, problem: `worktree readiness appears again at ${label}` };
+        }
+        if (
+          event.payload.taskBranch !== sourceFrozen.taskBranch ||
+          event.payload.workspace !== sourceFrozen.workspace
+        ) {
+          return {
+            ok: false,
+            problem: `${label} records a worktree that differs from the frozen run identity`,
+          };
+        }
+        if (
+          event.payload.headCommit !== sourceFrozen.sourceCommit ||
+          event.payload.baseCommit !== sourceFrozen.sourceCommit
+        ) {
+          return {
+            ok: false,
+            problem: `${label} records a worktree head or base that differs from the frozen source commit`,
+          };
+        }
+        worktreeReady = event.payload;
+        break;
+      }
       case 'workflow-transition': {
+        if (event.payload.route === 'run-created' && worktreeReady === null) {
+          return {
+            ok: false,
+            problem: `${label} records run creation before durable worktree readiness`,
+          };
+        }
         const problem = verifyTransitionPayload(event.payload, state, checkpoint);
         if (problem !== null) {
           return { ok: false, problem: `${label}: ${problem}` };
@@ -409,6 +563,6 @@ export function verifyRunHistoryEvents(
   return {
     ok: true,
     head: { revision: events.length, eventHash: previousHash },
-    derived: { state, checkpoint, attempts, cleanupProgress },
+    derived: { state, checkpoint, attempts, cleanupProgress, sourceFrozen, worktreeReady },
   };
 }

@@ -3,13 +3,20 @@ import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 
 import { RUN_STORAGE_DIRECTORY_NAME } from '../../domain/readiness.js';
-import { RUNS_DIRECTORY_NAME } from '../../domain/run-locations.js';
+import {
+  RUNS_DIRECTORY_NAME,
+  isLegalGitBranchName,
+  isPathInside,
+  renderTaskBranch,
+  renderWorkspacePath,
+} from '../../domain/run-locations.js';
 import {
   Identifier,
   REQUEST_IDENTITY_FILENAME,
   REQUEST_IDENTITY_SCHEMA_VERSION,
   REQUEST_NORMALIZED_FILENAME,
   REQUEST_ORIGINAL_FILENAME,
+  RequestIdentityDocumentSchema,
   normalizeRequestPromptText,
 } from '../../domain/run-identity.js';
 import {
@@ -17,27 +24,41 @@ import {
   CLEANUP_PROGRESS_SCHEMA_VERSION,
   WORKFLOW_STATE_FILENAME,
   WORKFLOW_STATE_PROGRESS_SCHEMA_VERSION,
+  evaluateWorkflowTransition,
 } from '../../domain/workflow.js';
 import { RUN_HISTORY_FILENAME } from '../../domain/run-history.js';
 import { decodeProjectConfiguration } from '../project-configuration.js';
+import { RunWorkspaceBlocked, provisionRunWorkspace } from '../git-provisioning/index.js';
 import { ReadinessFiles } from '../readiness/index.js';
 import { withRepositoryLease } from '../repository-lease/index.js';
 import {
   RunHistoryConflict,
-  RunHistoryIntegrityError,
   RunHistoryStorage,
   appendRunEvent,
   readVerifiedRunHistory,
 } from '../run-history/index.js';
 
-import type { DerivedReportWrite, RunHistoryStorageError } from '../run-history/index.js';
+import type {
+  DerivedReportWrite,
+  RunHistoryError,
+  RunHistoryIntegrityError,
+  RunHistoryStorageError,
+} from '../run-history/index.js';
 import type {
   RepositoryHostIdentity,
   RepositoryLeaseError,
   RepositoryLeaseStore,
 } from '../repository-lease/index.js';
-import type { CleanupProgressPayload, RunEventDraft } from '../../domain/run-history.js';
+import type {
+  CleanupProgressPayload,
+  RunEventDraft,
+  RunHistoryDerivedState,
+  SourceFrozenPayload,
+  WorktreeReadyPayload,
+} from '../../domain/run-history.js';
 import type { ProjectConfiguration } from '../../domain/project-configuration.js';
+import type { RequestIdentityDocument } from '../../domain/run-identity.js';
+import type { RunGit } from '../git-provisioning/index.js';
 import type {
   CleanupProgressDocument,
   WorkflowAttempt,
@@ -78,6 +99,8 @@ export type RunIdentityError =
   | InvalidRunRequest
   | DuplicateRunId
   | RunIdentityStorageError
+  | RunWorkspaceBlocked
+  | RunHistoryError
   | RepositoryLeaseError;
 
 export interface RunStorageFileStatus {
@@ -116,11 +139,24 @@ export interface RecordedRequestFiles {
   readonly normalizedPromptHash: string;
 }
 
+export interface RunProvenance {
+  readonly repositoryRoot: string;
+  readonly gitDirectory: string;
+  readonly remoteUrl: string;
+  readonly sourceRemote: string;
+  readonly sourceBranch: string;
+  readonly sourceCommit: string;
+  readonly taskBranch: string;
+  readonly workspace: string;
+  readonly headCommit: string;
+}
+
 export interface RecordedRunIdentityReport {
   readonly runId: string;
   readonly taskId: string;
   readonly runDirectory: string;
   readonly request: RecordedRequestFiles;
+  readonly provenance: RunProvenance;
 }
 
 export interface RecordRunIdentityOptions {
@@ -141,6 +177,7 @@ export interface RunProgressReport {
   readonly checkpoint: WorkflowState | null;
   readonly attempts: ReadonlyArray<WorkflowAttempt>;
   readonly cleanupProgress: CleanupProgressPayload | null;
+  readonly provenance: RunProvenance | null;
 }
 
 export interface ReadRunWorkflowStateOptions {
@@ -206,6 +243,113 @@ const readRunConfiguration = Effect.fn('readRunConfiguration')(function* (
   );
 });
 
+function provenanceOf(frozen: SourceFrozenPayload, ready: WorktreeReadyPayload): RunProvenance {
+  return {
+    repositoryRoot: frozen.repository.repositoryRoot,
+    gitDirectory: frozen.repository.gitDirectory,
+    remoteUrl: frozen.repository.remoteUrl,
+    sourceRemote: frozen.sourceRemote,
+    sourceBranch: frozen.sourceBranch,
+    sourceCommit: frozen.sourceCommit,
+    taskBranch: frozen.taskBranch,
+    workspace: frozen.workspace,
+    headCommit: ready.headCommit,
+  };
+}
+
+function provenanceOfDerived(derived: RunHistoryDerivedState): RunProvenance | null {
+  const frozen = derived.sourceFrozen;
+  const ready = derived.worktreeReady;
+  if (frozen === null || ready === null) {
+    return null;
+  }
+  return provenanceOf(frozen, ready);
+}
+
+const readRetainedIdentity = Effect.fn('recordRunIdentity.readRetainedIdentity')(function* (
+  store: RunIdentityStore['Service'],
+  identityPath: string,
+  runId: string,
+): Effect.fn.Return<RequestIdentityDocument | null, RunIdentityStorageError> {
+  const status = yield* store.statPath(identityPath);
+  if (!status.exists || !status.isRegularFile) {
+    return null;
+  }
+  const bytes = yield* store.readFileBytes(identityPath);
+  const text = yield* Effect.try({
+    try: () => new TextDecoder('utf-8', { fatal: true }).decode(bytes),
+    catch: () =>
+      new RunIdentityStorageError({
+        message: `Retained run identity at ${identityPath} is not valid UTF-8.`,
+        runId,
+      }),
+  });
+  return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(RequestIdentityDocumentSchema), {
+    onExcessProperty: 'error',
+  })(text).pipe(
+    Effect.mapError(
+      () =>
+        new RunIdentityStorageError({
+          message: `Retained run identity at ${identityPath} is not a valid closed record.`,
+          runId,
+        }),
+    ),
+  );
+});
+
+const ensurePlanningState = Effect.fn('recordRunIdentity.ensurePlanningState')(function* (options: {
+  readonly runDirectory: string;
+  readonly runId: string;
+}): Effect.fn.Return<void, RunWorkspaceBlocked | RunHistoryError, RunHistoryStorage> {
+  const history = yield* readVerifiedRunHistory({
+    runDirectory: options.runDirectory,
+    runId: options.runId,
+    createIfMissing: false,
+  });
+  if (history.derived.state !== null) {
+    return;
+  }
+
+  yield* appendRunEvent({
+    runDirectory: options.runDirectory,
+    runId: options.runId,
+    createIfMissing: false,
+    build: (current) =>
+      Effect.gen(function* () {
+        if (current.derived.worktreeReady === null) {
+          return yield* new RunWorkspaceBlocked({
+            message: `Run "${options.runId}" cannot enter planning: durable source and worktree provisioning checkpoints are not recorded.`,
+            runId: options.runId,
+            problem: 'durable source and worktree provisioning checkpoints are missing',
+          });
+        }
+        const evaluation = evaluateWorkflowTransition(
+          { state: current.derived.state, checkpoint: current.derived.checkpoint },
+          {
+            route: 'run-created',
+            provisioning: { source: true, lease: true, storage: true, worktree: true },
+          },
+        );
+        if (!evaluation.ok) {
+          return yield* new RunWorkspaceBlocked({
+            message: `Run "${options.runId}" cannot enter planning: ${evaluation.reason}`,
+            runId: options.runId,
+            problem: evaluation.missingFact ?? 'workflow creation is not allowed',
+          });
+        }
+        return {
+          type: 'workflow-transition',
+          payload: {
+            route: 'run-created',
+            from: current.derived.state,
+            to: evaluation.to,
+            checkpoint: evaluation.checkpoint,
+          },
+        } satisfies RunEventDraft;
+      }),
+  });
+});
+
 export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   options: RecordRunIdentityOptions,
 ): Effect.fn.Return<
@@ -216,6 +360,7 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   | RunHistoryStorage
   | RepositoryLeaseStore
   | RepositoryHostIdentity
+  | RunGit
 > {
   const store = yield* RunIdentityStore;
   const runId = options.runId;
@@ -285,6 +430,27 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   const originalContentHash = sha256HexOfBytes(originalBytes);
   const normalizedPromptHash = sha256HexOfBytes(normalizedBytes);
 
+  const taskBranch = renderTaskBranch(configuration.taskBranchPolicy, options.taskId);
+  if (taskBranch === configuration.sourceBranch) {
+    return yield* new InvalidRunRequest({
+      message: `Rendered task branch "${taskBranch}" must not equal source branch "${configuration.sourceBranch}".`,
+      runId,
+    });
+  }
+  if (!isLegalGitBranchName(taskBranch)) {
+    return yield* new InvalidRunRequest({
+      message: `Rendered task branch "${taskBranch}" is not a legal Git branch name.`,
+      runId,
+    });
+  }
+  const workspace = renderWorkspacePath(configuration.targetRepository, options.taskId);
+  if (!isPathInside(configuration.targetRepository, workspace)) {
+    return yield* new InvalidRunRequest({
+      message: `Run workspace ${workspace} escapes target repository ${configuration.targetRepository}.`,
+      runId,
+    });
+  }
+
   const runDirectory = runDirectoryOf(configuration, runId);
   const runsRoot = join(
     configuration.targetRepository,
@@ -308,48 +474,79 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   const identityBytes = new TextEncoder().encode(`${JSON.stringify(identityDocument, null, 2)}\n`);
 
   const createRun = Effect.gen(function* () {
-    yield* store.ensureParentDirectory(runsRoot).pipe(
-      Effect.mapError(
-        (error) =>
-          new InvalidRunRequest({
-            message: `Cannot prepare run storage at ${runsRoot}: ${excerpt(error.message)}.`,
-            runId,
-          }),
-      ),
-    );
-    yield* store.createRunDirectoryExclusive(runDirectory, runId);
+    const existing = yield* store.statPath(runDirectory);
+    if (existing.exists) {
+      const retained = yield* readRetainedIdentity(store, identityPath, runId);
+      if (
+        retained === null ||
+        retained.runId !== runId ||
+        retained.taskId !== options.taskId ||
+        retained.originalContentHash !== originalContentHash ||
+        retained.normalizedPromptHash !== normalizedPromptHash
+      ) {
+        return yield* new DuplicateRunId({
+          message: `Run ID "${runId}" already exists at ${runDirectory} without this run's retained identity; a run ID must identify one durable run.`,
+          runId,
+        });
+      }
+    } else {
+      yield* store.ensureParentDirectory(runsRoot).pipe(
+        Effect.mapError(
+          (error) =>
+            new InvalidRunRequest({
+              message: `Cannot prepare run storage at ${runsRoot}: ${excerpt(error.message)}.`,
+              runId,
+            }),
+        ),
+      );
+      yield* store.createRunDirectoryExclusive(runDirectory, runId);
 
-    const persist = Effect.gen(function* () {
-      yield* store.writeFileBytes(originalPath, originalBytes);
-      yield* store.writeFileBytes(normalizedPath, normalizedBytes);
-      yield* store.writeFileBytes(identityPath, identityBytes);
-      yield* appendRunEvent({
-        runDirectory,
-        runId,
-        createIfMissing: true,
-        build: () =>
-          Effect.succeed<RunEventDraft>({
-            type: 'run-created',
-            payload: { taskId: options.taskId },
-          }),
-      });
-      yield* reconcileRunReports({ runDirectory, runId });
-    }).pipe(
-      Effect.mapError(
-        (error) =>
-          new RunIdentityStorageError({
-            message: `Cannot retain request for run "${runId}" at ${runDirectory}: ${excerpt(error.message)}.`,
-            runId,
-          }),
-      ),
-    );
+      const persist = Effect.gen(function* () {
+        yield* store.writeFileBytes(originalPath, originalBytes);
+        yield* store.writeFileBytes(normalizedPath, normalizedBytes);
+        yield* store.writeFileBytes(identityPath, identityBytes);
+        yield* appendRunEvent({
+          runDirectory,
+          runId,
+          createIfMissing: true,
+          build: () =>
+            Effect.succeed<RunEventDraft>({
+              type: 'run-created',
+              payload: { taskId: options.taskId },
+            }),
+        });
+        yield* reconcileRunReports({ runDirectory, runId });
+      }).pipe(
+        Effect.mapError(
+          (error) =>
+            new RunIdentityStorageError({
+              message: `Cannot retain request for run "${runId}" at ${runDirectory}: ${excerpt(error.message)}.`,
+              runId,
+            }),
+        ),
+        Effect.onError(() => store.removeDirectory(runDirectory).pipe(Effect.ignore)),
+      );
 
-    yield* persist.pipe(
-      Effect.onError(() => store.removeDirectory(runDirectory).pipe(Effect.ignore)),
-    );
+      yield* persist;
+    }
+
+    const provisioned = yield* provisionRunWorkspace({
+      runId,
+      runDirectory,
+      targetRepository: configuration.targetRepository,
+      sourceRemote: configuration.sourceRemote,
+      sourceBranch: configuration.sourceBranch,
+      taskBranch,
+      workspace,
+    });
+
+    yield* ensurePlanningState({ runDirectory, runId });
+    yield* reconcileRunReports({ runDirectory, runId });
+
+    return provenanceOf(provisioned.sourceFrozen, provisioned.worktreeReady);
   });
 
-  yield* withRepositoryLease(
+  const provenance = yield* withRepositoryLease(
     {
       repositoryRoot: configuration.targetRepository,
       runId,
@@ -372,6 +569,7 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
       normalizedByteLength: normalizedBytes.byteLength,
       normalizedPromptHash,
     },
+    provenance,
   };
 });
 
@@ -400,14 +598,7 @@ export const reconcileRunReports = Effect.fn('reconcileRunReports')(function* (
   for (let attempt = 1; attempt <= MAX_REPORT_REPLACEMENT_ATTEMPTS; attempt += 1) {
     const history = yield* readVerifiedRunHistory({ runDirectory, runId, createIfMissing: false });
     const derived = history.derived;
-    const state = derived.state;
-    if (state === null) {
-      return yield* new RunHistoryIntegrityError({
-        message: `Run "${runId}" canonical history at ${historyPath} records no workflow state, so current progress cannot be rebuilt. A person must investigate run integrity before this run continues.`,
-        runId,
-        problem: 'the verified history records no workflow state',
-      });
-    }
+    const state = derived.state ?? 'blocked';
 
     const writes: Array<DerivedReportWrite> = [
       {
@@ -460,6 +651,7 @@ export const reconcileRunReports = Effect.fn('reconcileRunReports')(function* (
         checkpoint: derived.checkpoint,
         attempts: derived.attempts,
         cleanupProgress,
+        provenance: provenanceOfDerived(derived),
       };
     }
     if (replaced.failure._tag !== 'RunHistoryConflict') {

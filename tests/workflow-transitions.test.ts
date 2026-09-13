@@ -11,6 +11,8 @@ import {
   recordWorkflowAttempt,
   transitionWorkflow,
 } from '../src/application/workflow-transitions/index.js';
+import { RunGit } from '../src/application/git-provisioning/index.js';
+import { appendRunEvent } from '../src/application/run-history/index.js';
 import {
   CLEANUP_PROGRESS_FILENAME,
   CLEANUP_PROGRESS_SCHEMA_VERSION,
@@ -27,6 +29,10 @@ import { RunHistoryLive } from '../src/platform/run-history.js';
 import { RunIdentityLive } from '../src/platform/run-identity.js';
 
 import type { RunEvent } from '../src/domain/run-history.js';
+import type {
+  ImplementationObservation,
+  RunWorkspaceBlocked,
+} from '../src/application/git-provisioning/index.js';
 import type { RunHistoryError } from '../src/application/run-history/index.js';
 import type {
   WorkflowAttemptRequest,
@@ -40,6 +46,14 @@ import type {
 } from '../src/application/run-identity/index.js';
 
 const RUN_ID = 'RUN-LEGAL';
+
+const FROZEN_COMMIT = '0123456789abcdef0123456789abcdef01234567';
+
+const TASK_BRANCH = 'foundry/RUN-LEGAL';
+
+const WORKSPACE = '/target/.agent/worktrees/RUN-LEGAL';
+
+const IMPLEMENTED_COMMIT = 'abc123';
 
 const LiveStore = Layer.mergeAll(RunIdentityLive, RunHistoryLive);
 
@@ -65,7 +79,7 @@ const PLAN_ACCEPTED: WorkflowTransitionRequest = {
 const IMPLEMENTATION_READY: WorkflowTransitionRequest = {
   route: 'implementation-ready',
   branchClean: true,
-  candidateCommit: 'seed-commit',
+  candidateCommit: 'abc123',
   noChangeCandidateValidated: false,
 };
 
@@ -171,29 +185,98 @@ function setupFixture(): Fixture {
   };
 }
 
-function seedRun(fixture: Fixture, state: WorkflowState) {
+function seedProvisioning(fixture: Fixture) {
   return Effect.gen(function* () {
-    yield* transitionWorkflow({
+    yield* appendRunEvent({
       runDirectory: fixture.runDirectory,
       runId: RUN_ID,
-      request: RUN_CREATED,
+      createIfMissing: true,
+      build: () =>
+        Effect.succeed({ type: 'run-created', payload: { taskId: 'TASK-LEGAL' } } as const),
     });
-    for (const request of SEED_ROUTES[state]) {
-      yield* transitionWorkflow({
-        runDirectory: fixture.runDirectory,
-        runId: RUN_ID,
-        request,
-      });
-    }
-  }).pipe(Effect.provide(LiveStore));
+    yield* appendRunEvent({
+      runDirectory: fixture.runDirectory,
+      runId: RUN_ID,
+      createIfMissing: false,
+      build: () =>
+        Effect.succeed({
+          type: 'source-frozen',
+          payload: {
+            repository: {
+              repositoryRoot: '/target',
+              gitDirectory: '/target/.git',
+              remoteUrl: 'https://example.invalid/target.git',
+            },
+            sourceRemote: 'origin',
+            sourceBranch: 'main',
+            sourceCommit: FROZEN_COMMIT,
+            taskBranch: TASK_BRANCH,
+            workspace: WORKSPACE,
+            expectedHead: FROZEN_COMMIT,
+          },
+        } as const),
+    });
+    yield* appendRunEvent({
+      runDirectory: fixture.runDirectory,
+      runId: RUN_ID,
+      createIfMissing: false,
+      build: () =>
+        Effect.succeed({
+          type: 'worktree-ready',
+          payload: {
+            taskBranch: TASK_BRANCH,
+            workspace: WORKSPACE,
+            headCommit: FROZEN_COMMIT,
+            baseCommit: FROZEN_COMMIT,
+          },
+        } as const),
+    });
+  }).pipe(Effect.provide(RunHistoryLive));
 }
 
-function transition(fixture: Fixture, request: WorkflowTransitionRequest) {
+function observingGit(observation: ImplementationObservation): RunGit['Service'] {
+  const unused = (name: string) =>
+    Effect.die(new Error(`transition tests must not call RunGit.${name}`));
+  return RunGit.of({
+    inspectRepository: () => unused('inspectRepository'),
+    fetchSource: () => unused('fetchSource'),
+    commitExists: () => unused('commitExists'),
+    readBranch: () => unused('readBranch'),
+    createBranch: () => unused('createBranch'),
+    readWorktree: () => unused('readWorktree'),
+    createWorktree: () => unused('createWorktree'),
+    observeImplementation: () => Effect.succeed(observation),
+  });
+}
+
+const CLEAN_IMPLEMENTATION: ImplementationObservation = {
+  workspaceExists: true,
+  currentBranch: TASK_BRANCH,
+  headCommit: IMPLEMENTED_COMMIT,
+  clean: true,
+  baseIsAncestor: true,
+};
+
+function seedRun(fixture: Fixture, state: WorkflowState) {
+  return Effect.gen(function* () {
+    yield* seedProvisioning(fixture);
+    yield* transition(fixture, RUN_CREATED);
+    for (const request of SEED_ROUTES[state]) {
+      yield* transition(fixture, request);
+    }
+  });
+}
+
+function transition(
+  fixture: Fixture,
+  request: WorkflowTransitionRequest,
+  observation: ImplementationObservation = CLEAN_IMPLEMENTATION,
+) {
   return transitionWorkflow({
     runDirectory: fixture.runDirectory,
     runId: RUN_ID,
     request,
-  }).pipe(Effect.provide(LiveStore));
+  }).pipe(Effect.provideService(RunGit, observingGit(observation)), Effect.provide(LiveStore));
 }
 
 function recordAttempt(fixture: Fixture, attempt: WorkflowAttemptRequest) {
@@ -231,6 +314,7 @@ function progressDocument(fixture: Fixture) {
 type TransitionFailure =
   | IllegalWorkflowTransition
   | RunStateUnavailable
+  | RunWorkspaceBlocked
   | RunIdentityStorageError
   | RunHistoryError;
 
@@ -341,6 +425,7 @@ describe('workflow transitions with live storage', () => {
 
       const created = setupFixture();
       try {
+        yield* seedProvisioning(created);
         const report = yield* transition(created, RUN_CREATED);
         expect(report).toEqual({
           runId: RUN_ID,
@@ -356,10 +441,17 @@ describe('workflow transitions with live storage', () => {
           attempts: [],
         });
         const events = historyEventsOf(created);
-        expect(events).toHaveLength(1);
+        expect(events).toHaveLength(4);
         expect(events[0]).toMatchObject({
           revision: 1,
           previousEventHash: null,
+          type: 'run-created',
+          payload: { taskId: 'TASK-LEGAL' },
+        });
+        expect(events[1]).toMatchObject({ revision: 2, type: 'source-frozen' });
+        expect(events[2]).toMatchObject({ revision: 3, type: 'worktree-ready' });
+        expect(events[3]).toMatchObject({
+          revision: 4,
           type: 'workflow-transition',
           payload: {
             route: 'run-created',
@@ -371,7 +463,7 @@ describe('workflow transitions with live storage', () => {
 
         const alreadyCreated = yield* transition(created, RUN_CREATED).pipe(Effect.flip);
         expect(expectTransitionRefusal(alreadyCreated).from).toBe('planning');
-        expect(historyEventsOf(created)).toHaveLength(1);
+        expect(historyEventsOf(created)).toHaveLength(4);
       } finally {
         created.cleanup();
       }
@@ -538,7 +630,13 @@ describe('workflow transitions with live storage', () => {
   it.effect('refuses illegal jumps and missing facts without changing the record', () =>
     Effect.gen(function* () {
       const refusedRoutes: ReadonlyArray<
-        readonly [string, WorkflowState, WorkflowTransitionRequest, string]
+        readonly [
+          string,
+          WorkflowState,
+          WorkflowTransitionRequest,
+          string,
+          ImplementationObservation?,
+        ]
       > = [
         [
           'unproven implementation plan',
@@ -562,6 +660,7 @@ describe('workflow transitions with live storage', () => {
             noChangeCandidateValidated: false,
           },
           'clean',
+          { ...CLEAN_IMPLEMENTATION, clean: false },
         ],
         [
           'no candidate commit',
@@ -573,6 +672,7 @@ describe('workflow transitions with live storage', () => {
             noChangeCandidateValidated: false,
           },
           'candidate commit',
+          { ...CLEAN_IMPLEMENTATION, headCommit: FROZEN_COMMIT },
         ],
         [
           'failed checks before testing',
@@ -836,13 +936,17 @@ describe('workflow transitions with live storage', () => {
         ],
       ];
 
-      for (const [label, state, request, expected] of refusedRoutes) {
+      for (const [label, state, request, expected, observation] of refusedRoutes) {
         const fixture = setupFixture();
         try {
           yield* seedRun(fixture, state);
           const before = stateTextOf(fixture);
           const beforeHistory = historyTextOf(fixture);
-          const error = yield* transition(fixture, request).pipe(Effect.flip);
+          const error = yield* transition(
+            fixture,
+            request,
+            observation ?? CLEAN_IMPLEMENTATION,
+          ).pipe(Effect.flip);
           const refusal = expectTransitionRefusal(error);
           expect(refusal.route, label).toBe(request.route);
           expect(refusal.from, label).toBe(state);
@@ -962,7 +1066,7 @@ describe('workflow transitions with live storage', () => {
           state: 'planning',
           reason: 'role timeout',
         });
-        expect(historyEventsOf(fixture)).toHaveLength(2);
+        expect(historyEventsOf(fixture)).toHaveLength(5);
 
         const second = yield* recordAttempt(fixture, {
           kind: 'repair',
@@ -979,14 +1083,14 @@ describe('workflow transitions with live storage', () => {
           attempts: [first.attempt, second.attempt],
         });
         const events = historyEventsOf(fixture);
-        expect(events).toHaveLength(3);
-        expect(events[1]).toMatchObject({
-          revision: 2,
+        expect(events).toHaveLength(6);
+        expect(events[4]).toMatchObject({
+          revision: 5,
           type: 'workflow-attempt',
           payload: first.attempt,
         });
-        expect(events[2]).toMatchObject({
-          revision: 3,
+        expect(events[5]).toMatchObject({
+          revision: 6,
           type: 'workflow-attempt',
           payload: second.attempt,
         });

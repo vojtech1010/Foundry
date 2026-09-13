@@ -193,7 +193,14 @@ export const readVerifiedRunHistory = Effect.fn('readVerifiedRunHistory')(functi
       runId,
       events: [],
       head: { revision: 0, eventHash: null },
-      derived: { state: null, checkpoint: null, attempts: [], cleanupProgress: null },
+      derived: {
+        state: null,
+        checkpoint: null,
+        attempts: [],
+        cleanupProgress: null,
+        sourceFrozen: null,
+        worktreeReady: null,
+      },
       streamBytes: null,
       witnessBytes: null,
     };
