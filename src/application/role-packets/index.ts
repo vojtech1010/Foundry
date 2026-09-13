@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 
+import { currentHeadFindings } from '../findings/index.js';
+
 import type {
   PlanAcceptedPayload,
   RunHistoryDerivedState,
@@ -259,12 +261,31 @@ function testerFact(
   return 'required by the accepted plan';
 }
 
-function findingsFact(history: RunHistoryDerivedState): string {
-  const corrections = history.attempts.filter((attempt) => attempt.kind === 'repair');
-  if (corrections.length === 0) {
-    return 'no recorded control repairs; see Reviewer reports for any findings';
+function findingsFact(role: WorkflowRole, history: RunHistoryDerivedState): string {
+  if (role !== 'coder' && role !== 'reviewer') {
+    return 'findings are surfaced to Coder and Reviewer only';
   }
-  return `${corrections.length} recorded control repair(s)`;
+  const implementation = history.implementation;
+  const commit =
+    implementation === null ? null : (implementation.commit ?? implementation.baseCommit);
+  const current = currentHeadFindings(history.findings, commit);
+  const older = history.findings.length - current.length;
+  const historySuffix =
+    older === 0
+      ? ''
+      : ` (${older} earlier finding(s) retained as history and never reused as current evidence)`;
+  if (current.length === 0) {
+    return older === 0
+      ? 'no findings recorded for the current head'
+      : `no findings for the current head${historySuffix}`;
+  }
+  const listed = current
+    .map(
+      (finding) =>
+        `${finding.id} [${finding.severity}${finding.blocking ? ', blocking' : ''}] ${finding.description}`,
+    )
+    .join('; ');
+  return `${listed}${historySuffix}`;
 }
 
 export function buildRolePacket(options: BuildRolePacketOptions): RolePacketAssembly {
@@ -287,7 +308,7 @@ export function buildRolePacket(options: BuildRolePacketOptions): RolePacketAsse
         : retryAttempts
             .map((attempt) => `${attempt.role} ${attempt.state}: ${attempt.reason}`)
             .join('; '),
-    findings: findingsFact(history),
+    findings: findingsFact(options.role, history),
   };
   return assembleRolePacket({
     role: options.role,
