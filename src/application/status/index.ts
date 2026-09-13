@@ -179,6 +179,12 @@ function eventDetail(event: RunEvent): string {
       return boundedDetail(`validation limitation retained for ${event.payload.commit}`);
     case 'runtime-lifecycle':
       return boundedDetail(`runtime ${event.payload.outcome}`);
+    case 'decision-opened':
+      return boundedDetail(
+        `decision ${event.payload.decisionId} opened at ${event.payload.resultCommit}`,
+      );
+    case 'publication-checkpoint':
+      return boundedDetail(`publication ${event.payload.stage}: ${event.payload.detail}`);
   }
 }
 

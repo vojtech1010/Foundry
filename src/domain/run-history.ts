@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import { Schema } from 'effect';
 
+import {
+  DecisionOpenedPayloadSchema,
+  PUBLICATION_CHECKPOINT_STAGES,
+  PublicationCheckpointPayloadSchema,
+} from './decision-publication.js';
 import { FindingRecordSchema } from './findings.js';
 import { GuidanceSnapshotFileSchema } from './guidance.js';
 import {
@@ -27,6 +32,11 @@ import {
   isActiveWorkflowState,
 } from './workflow.js';
 
+import type {
+  DecisionOpenedPayload,
+  PublicationCheckpointPayload,
+  PublicationCheckpointStage,
+} from './decision-publication.js';
 import type { FindingRecord } from './findings.js';
 import type { ProjectVerificationReport, VerificationExecution } from './project-verification.js';
 import type { RuntimeLifecycleRecord } from './project-runtime.js';
@@ -72,6 +82,8 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'tester-skipped',
   'validation-limitation',
   'runtime-lifecycle',
+  'decision-opened',
+  'publication-checkpoint',
 ] as const;
 
 export type RunHistoryEventType = (typeof RUN_HISTORY_EVENT_TYPES)[number];
@@ -518,6 +530,18 @@ export const RuntimeLifecycleEventSchema = Schema.Struct({
   payload: RuntimeLifecyclePayloadSchema,
 });
 
+export const DecisionOpenedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('decision-opened'),
+  payload: DecisionOpenedPayloadSchema,
+});
+
+export const PublicationCheckpointEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('publication-checkpoint'),
+  payload: PublicationCheckpointPayloadSchema,
+});
+
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
@@ -542,6 +566,8 @@ export const RunEventSchema = Schema.Union([
   TesterSkippedEventSchema,
   ValidationLimitationEventSchema,
   RuntimeLifecycleEventSchema,
+  DecisionOpenedEventSchema,
+  PublicationCheckpointEventSchema,
 ]);
 
 export type RunEvent = (typeof RunEventSchema)['Type'];
@@ -599,7 +625,9 @@ export type RunEventDraft =
     }
   | { readonly type: 'tester-skipped'; readonly payload: TesterSkippedPayload }
   | { readonly type: 'validation-limitation'; readonly payload: ValidationLimitationPayload }
-  | { readonly type: 'runtime-lifecycle'; readonly payload: RuntimeLifecyclePayload };
+  | { readonly type: 'runtime-lifecycle'; readonly payload: RuntimeLifecyclePayload }
+  | { readonly type: 'decision-opened'; readonly payload: DecisionOpenedPayload }
+  | { readonly type: 'publication-checkpoint'; readonly payload: PublicationCheckpointPayload };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
 
@@ -1141,6 +1169,44 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'decision-opened':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          decisionId: event.payload.decisionId,
+          nonce: event.payload.nonce,
+          options: event.payload.options.map((option) => ({
+            action: option.action,
+            id: option.id,
+            label: option.label,
+          })),
+          question: event.payload.question,
+          recommendation: event.payload.recommendation,
+          resultCommit: event.payload.resultCommit,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'publication-checkpoint':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          decisionId: event.payload.decisionId,
+          detail: event.payload.detail,
+          draftPrUrl: event.payload.draftPrUrl,
+          stage: event.payload.stage,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
   }
 }
 
@@ -1216,6 +1282,10 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'validation-limitation', payload: event.payload };
     case 'runtime-lifecycle':
       return { ...envelope, type: 'runtime-lifecycle', payload: event.payload };
+    case 'decision-opened':
+      return { ...envelope, type: 'decision-opened', payload: event.payload };
+    case 'publication-checkpoint':
+      return { ...envelope, type: 'publication-checkpoint', payload: event.payload };
   }
 }
 
@@ -1325,6 +1395,8 @@ export function verifyRunHistoryEvents(
   let acceptedPlan: PlanAcceptedPayload | null = null;
   let implementation: ImplementationAcceptedPayload | null = null;
   let previousHash: string | null = null;
+  let decisionOpened: DecisionOpenedPayload | null = null;
+  let lastPublicationCheckpoint: PublicationCheckpointStage | null = null;
 
   const currentResultCommit = (): string | null =>
     implementation === null ? null : (implementation.commit ?? implementation.baseCommit);
@@ -2116,6 +2188,65 @@ export function verifyRunHistoryEvents(
           };
         }
         runtimeLifecycles.push(event.payload);
+        break;
+      }
+      case 'decision-opened': {
+        if (state !== 'publishing') {
+          return {
+            ok: false,
+            problem: `${label} records an opened decision outside the publishing stage`,
+          };
+        }
+        if (decisionOpened !== null) {
+          return { ok: false, problem: `${label} opens a second decision for this run` };
+        }
+        const resultCommit = currentResultCommit();
+        if (resultCommit === null || event.payload.resultCommit !== resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} opens a decision for a commit other than the current result head`,
+          };
+        }
+        if (event.payload.options.length < 2) {
+          return {
+            ok: false,
+            problem: `${label} records a decision with fewer than two labelled options`,
+          };
+        }
+        decisionOpened = event.payload;
+        break;
+      }
+      case 'publication-checkpoint': {
+        if (state !== 'publishing') {
+          return {
+            ok: false,
+            problem: `${label} records a publication checkpoint outside the publishing stage`,
+          };
+        }
+        if (decisionOpened === null || event.payload.decisionId !== decisionOpened.decisionId) {
+          return {
+            ok: false,
+            problem: `${label} records a publication checkpoint for an unopened decision`,
+          };
+        }
+        const stageIndex = PUBLICATION_CHECKPOINT_STAGES.indexOf(event.payload.stage);
+        const previousIndex =
+          lastPublicationCheckpoint === null
+            ? -1
+            : PUBLICATION_CHECKPOINT_STAGES.indexOf(lastPublicationCheckpoint);
+        if (stageIndex <= previousIndex) {
+          return {
+            ok: false,
+            problem: `${label} records an out-of-order publication checkpoint`,
+          };
+        }
+        if (event.payload.stage !== 'url-recorded' && event.payload.draftPrUrl !== null) {
+          return {
+            ok: false,
+            problem: `${label} records a draft PR URL before the url-recorded checkpoint`,
+          };
+        }
+        lastPublicationCheckpoint = event.payload.stage;
         break;
       }
     }

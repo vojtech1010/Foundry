@@ -1,4 +1,4 @@
-import { DateTime, Duration, Effect, Ref, Result, Schema } from 'effect';
+import { DateTime, Duration, Effect, Option, Ref, Result, Schema } from 'effect';
 import { dirname, join } from 'node:path';
 
 import { decodeReviewerTurnControl } from '../../domain/reviewer-outcomes.js';
@@ -15,6 +15,7 @@ import {
   handleCoderTurn,
   validateCoderTurnControl,
 } from '../coder-result/index.js';
+import { GitHubPublication, publishDecisionDraftPr } from '../decision-publication/index.js';
 import { bootstrapRoleGuidance } from '../guidance/index.js';
 import { reconcileHandoff } from '../handoff/index.js';
 import { prepareAndHoldApplicationRuntime } from '../project-runtime/index.js';
@@ -591,6 +592,27 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     }
   });
 
+  /**
+   * Executes the publication transaction for a recorded human decision. The
+   * GitHub adapter is optional in the environment so a run without a wired
+   * adapter fails publication durably instead of silently guessing; the
+   * application function owns every checkpoint, push, and PR transition.
+   */
+  const runPublishing = Effect.fn('advanceRun.runPublishing')(function* () {
+    const github = yield* Effect.serviceOption(GitHubPublication);
+    if (Option.isNone(github)) {
+      yield* transitionWorkflow({
+        runDirectory,
+        runId,
+        request: { route: 'publication-unresolved', cannotReconcileSafely: true },
+      });
+      return;
+    }
+    yield* publishDecisionDraftPr({ runDirectory, runId, configuration }).pipe(
+      Effect.provideService(GitHubPublication, github.value),
+    );
+  });
+
   const runStage = Effect.fn('advanceRun.runStage')(function* (
     state: WorkflowState,
     history: VerifiedRunHistory,
@@ -611,6 +633,9 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
         return;
       case 'reviewing':
         yield* runReviewing(history);
+        return;
+      case 'publishing':
+        yield* runPublishing();
         return;
       default:
         return;
