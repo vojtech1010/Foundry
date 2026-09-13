@@ -1,13 +1,21 @@
 import { spawnSync } from 'node:child_process';
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 
-import { Effect, Layer } from 'effect';
+import { Effect, Layer, Schema } from 'effect';
 
 import {
+  PublicationProbe,
+  PublicationProbeError,
   ReadinessError,
   ReadinessFiles,
   ReadinessGit,
   ReadinessHost,
+} from '../application/readiness/index.js';
+
+import type {
+  PublicationCollaboratorPermission,
+  PublicationProbeObservation,
+  PublicationProbeRequest,
 } from '../application/readiness/index.js';
 
 function boundCause(cause: unknown): string {
@@ -85,6 +93,180 @@ const runGitCommand = Effect.fn('runGitCommand')(function* (
   return { stdout: result.stdout, exitCode: result.status ?? 1 };
 });
 
+const GITHUB_API_BASE = 'https://api.github.com';
+
+const GITHUB_API_VERSION = '2022-11-28';
+
+const GITHUB_TOKEN_ENVIRONMENT_VARIABLE = 'GITHUB_TOKEN';
+
+interface JsonDocumentSchema extends Schema.Constraint {
+  readonly DecodingServices: never;
+}
+
+const GitHubRepositorySchema = Schema.Struct({
+  full_name: Schema.String,
+  permissions: Schema.optional(
+    Schema.Struct({
+      push: Schema.optional(Schema.Boolean),
+    }),
+  ),
+});
+
+const GitHubViewerSchema = Schema.Struct({
+  login: Schema.String,
+});
+
+const GitHubCollaboratorPermissionSchema = Schema.Struct({
+  permission: Schema.Literals(['admin', 'maintain', 'write', 'triage', 'read', 'none']),
+});
+
+interface GitHubHttpResponse {
+  readonly status: number;
+  readonly scopes: ReadonlyArray<string> | null;
+  readonly body: string;
+}
+
+function parseGitHubScopes(header: string | null): ReadonlyArray<string> | null {
+  if (header === null) {
+    return null;
+  }
+  return header
+    .split(',')
+    .map((scope) => scope.trim())
+    .filter((scope) => scope.length > 0);
+}
+
+const decodeGitHubDocument = Effect.fn('publicationProbe.decodeDocument')(function* <
+  DocumentSchema extends JsonDocumentSchema,
+>(
+  schema: DocumentSchema,
+  body: string,
+  label: string,
+): Effect.fn.Return<DocumentSchema['Type'], PublicationProbeError> {
+  return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(schema))(body).pipe(
+    Effect.mapError(
+      () =>
+        new PublicationProbeError({
+          message: `GitHub ${label} response was not a recognized document.`,
+        }),
+    ),
+  );
+});
+
+const requestGitHub = Effect.fn('publicationProbe.requestGitHub')(function* (
+  path: string,
+  token: string,
+): Effect.fn.Return<GitHubHttpResponse, PublicationProbeError> {
+  const response = yield* Effect.tryPromise({
+    try: () =>
+      fetch(`${GITHUB_API_BASE}${path}`, {
+        method: 'GET',
+        headers: {
+          accept: 'application/vnd.github+json',
+          authorization: `Bearer ${token}`,
+          'x-github-api-version': GITHUB_API_VERSION,
+          'user-agent': 'foundry-publication-readiness',
+        },
+      }),
+    catch: (cause) =>
+      new PublicationProbeError({
+        message: `Cannot reach the GitHub API: ${boundCause(cause)}.`,
+      }),
+  });
+  const body = yield* Effect.tryPromise({
+    try: () => response.text(),
+    catch: (cause) =>
+      new PublicationProbeError({
+        message: `Cannot read the GitHub API response: ${boundCause(cause)}.`,
+      }),
+  });
+  return {
+    status: response.status,
+    scopes: parseGitHubScopes(response.headers.get('x-oauth-scopes')),
+    body,
+  };
+});
+
+const observePublication = Effect.fn('publicationProbe.observe')(function* (
+  request: PublicationProbeRequest,
+): Effect.fn.Return<PublicationProbeObservation, PublicationProbeError> {
+  const token = (process.env[GITHUB_TOKEN_ENVIRONMENT_VARIABLE] ?? '').trim();
+  if (token.length === 0) {
+    return {
+      repository: request.repository,
+      tokenPresent: false,
+      push: false,
+      collaboratorPermission: null,
+      issueCommentReadable: null,
+      tokenScopes: null,
+      limitations: [],
+    };
+  }
+  const lookup = yield* requestGitHub(`/repos/${request.repository}`, token);
+  if (lookup.status !== 200) {
+    return {
+      repository: request.repository,
+      tokenPresent: true,
+      push: false,
+      collaboratorPermission: null,
+      issueCommentReadable: null,
+      tokenScopes: lookup.scopes,
+      limitations: [`GitHub repository lookup failed with status ${lookup.status}.`],
+    };
+  }
+  const repository = yield* decodeGitHubDocument(GitHubRepositorySchema, lookup.body, 'repository');
+  const limitations: Array<string> = [];
+
+  const viewer = yield* requestGitHub('/user', token);
+  let collaboratorPermission: PublicationCollaboratorPermission | null = null;
+  if (viewer.status === 200) {
+    const account = yield* decodeGitHubDocument(GitHubViewerSchema, viewer.body, 'viewer');
+    const permission = yield* requestGitHub(
+      `/repos/${request.repository}/collaborators/${encodeURIComponent(account.login)}/permission`,
+      token,
+    );
+    if (permission.status === 200) {
+      const decoded = yield* decodeGitHubDocument(
+        GitHubCollaboratorPermissionSchema,
+        permission.body,
+        'collaborator permission',
+      );
+      collaboratorPermission = decoded.permission;
+    } else {
+      limitations.push(`Collaborator permission lookup failed with status ${permission.status}.`);
+    }
+  } else {
+    limitations.push(`GitHub viewer lookup failed with status ${viewer.status}.`);
+  }
+
+  const comments = yield* requestGitHub(
+    `/repos/${request.repository}/issues/comments?per_page=1`,
+    token,
+  );
+  let issueCommentReadable: boolean | null = null;
+  if (comments.status === 200) {
+    issueCommentReadable = true;
+  } else {
+    issueCommentReadable = [401, 403, 404].includes(comments.status) ? false : null;
+    limitations.push(`Issue comment read failed with status ${comments.status}.`);
+  }
+
+  return {
+    repository: repository.full_name,
+    tokenPresent: true,
+    push: repository.permissions?.push ?? false,
+    collaboratorPermission,
+    issueCommentReadable,
+    tokenScopes: lookup.scopes,
+    limitations,
+  };
+});
+
+export const PublicationProbeLive: Layer.Layer<PublicationProbe> = Layer.succeed(
+  PublicationProbe,
+  PublicationProbe.of({ observe: observePublication }),
+);
+
 export const ReadinessHostLive: Layer.Layer<ReadinessHost> = Layer.succeed(
   ReadinessHost,
   ReadinessHost.of({
@@ -115,4 +297,5 @@ export const ReadinessLive = Layer.mergeAll(
   ReadinessHostLive,
   ReadinessFilesLive,
   ReadinessGitLive,
+  PublicationProbeLive,
 );
