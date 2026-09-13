@@ -202,6 +202,7 @@ export const readVerifiedRunHistory = Effect.fn('readVerifiedRunHistory')(functi
         guidanceFrozen: null,
         worktreeReady: null,
         roleSessions: [],
+        roleControlRepairs: [],
         acceptedPlan: null,
         implementation: null,
         permissionViolations: [],

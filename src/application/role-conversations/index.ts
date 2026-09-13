@@ -14,6 +14,7 @@ import { appendRunEvent, readVerifiedRunHistory } from '../run-history/index.js'
 
 import type { RunHistoryStorage } from '../run-history/index.js';
 import type { RunHistoryError } from '../run-history/index.js';
+import type { RoleControlRepairRecord } from '../../domain/run-history.js';
 import type {
   RoleHostCapabilitiesRequest,
   RoleHostCapabilitiesResponse,
@@ -48,6 +49,7 @@ export const ROLE_CONVERSATION_FAILURE_REASONS = [
   'lost-session',
   'sequence-regression',
   'empty-narrative',
+  'narrative-changed',
   'ambiguous-submission',
   'turn-timeout',
   'permission-profile-unavailable',
@@ -180,15 +182,38 @@ export interface RoleTurnTarget {
   readonly generation: number;
 }
 
+/**
+ * The caller-owned check of a settled control envelope. When it fails, the
+ * returned problem names only the envelope errors; Foundry builds the repair
+ * prompt and never lets a repair rewrite the settled Markdown narrative.
+ */
+export interface RoleControlValidation {
+  readonly ok: boolean;
+  readonly problem: string;
+}
+
+export interface RoleControlRepairPolicy {
+  readonly maxRepairs: number;
+  readonly validate: (control: RoleHostControl) => RoleControlValidation;
+}
+
 export interface StartOrResumeRoleTurnOptions extends RoleTurnTarget {
   readonly locations: RoleTurnLocations;
   readonly prompt: string;
   readonly deadline: string;
   readonly pollMs: number;
   readonly turnTimeoutMs: number;
+  readonly controlRepair?: RoleControlRepairPolicy;
 }
 
 export type StopRoleSessionOptions = RoleTurnTarget;
+
+interface RawSettledTurn {
+  readonly session: RoleHostSessionState;
+  readonly sequence: number;
+  readonly narrative: string;
+  readonly control: RoleHostControl;
+}
 
 export interface SettledRoleTurnResult {
   readonly outcome: 'settled';
@@ -196,6 +221,9 @@ export interface SettledRoleTurnResult {
   readonly sequence: number;
   readonly narrative: string;
   readonly control: RoleHostControl;
+  readonly controlValid: boolean;
+  readonly controlProblem: string | null;
+  readonly repairsPerformed: number;
 }
 
 export interface RoleSessionStopResult {
@@ -224,7 +252,50 @@ function conversationFailure(
   return new RoleConversationError({ message, reason, runId });
 }
 
-function settledTurnOf(session: RoleHostSessionState): SettledRoleTurnResult | null {
+function sha256Hex(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+function controlEvidenceHash(control: RoleHostControl): string {
+  return sha256Hex(JSON.stringify(control) ?? 'null');
+}
+
+function buildControlRepairPrompt(problem: string): string {
+  return [
+    'Your Markdown report is accepted and must not change.',
+    'Correct only the machine-readable control envelope in this same session.',
+    'Do not change project files, tests, Git state, or application data.',
+    `Control envelope error: ${problem}`,
+    'Repeat the same Markdown report followed by a corrected control envelope.',
+  ].join('\n');
+}
+
+function settledResultOf(
+  turn: RawSettledTurn,
+  controlValid: boolean,
+  controlProblem: string | null,
+  repairsPerformed: number,
+): SettledRoleTurnResult {
+  return {
+    outcome: 'settled',
+    session: turn.session,
+    sequence: turn.sequence,
+    narrative: turn.narrative,
+    control: turn.control,
+    controlValid,
+    controlProblem,
+    repairsPerformed,
+  };
+}
+
+function countControlRepairs(
+  repairs: ReadonlyArray<RoleControlRepairRecord>,
+  sessionId: string,
+): number {
+  return repairs.filter((repair) => repair.sessionId === sessionId).length;
+}
+
+function settledTurnOf(session: RoleHostSessionState): RawSettledTurn | null {
   const observation = session.lastObservation;
   if (observation === null || observation.status !== 'settled') {
     return null;
@@ -233,7 +304,6 @@ function settledTurnOf(session: RoleHostSessionState): SettledRoleTurnResult | n
     return null;
   }
   return {
-    outcome: 'settled',
     session,
     sequence: observation.sequence,
     narrative: observation.narrative,
@@ -244,7 +314,10 @@ function settledTurnOf(session: RoleHostSessionState): SettledRoleTurnResult | n
 const readRoleHistory = Effect.fn('readRoleHistory')(function* (
   options: RoleTurnTarget,
 ): Effect.fn.Return<
-  { readonly roleSessions: ReadonlyArray<RoleHostSessionState> },
+  {
+    readonly roleSessions: ReadonlyArray<RoleHostSessionState>;
+    readonly roleControlRepairs: ReadonlyArray<RoleControlRepairRecord>;
+  },
   RunHistoryError,
   RunHistoryStorage
 > {
@@ -253,7 +326,10 @@ const readRoleHistory = Effect.fn('readRoleHistory')(function* (
     runId: options.runId,
     createIfMissing: false,
   });
-  return { roleSessions: history.derived.roleSessions };
+  return {
+    roleSessions: history.derived.roleSessions,
+    roleControlRepairs: history.derived.roleControlRepairs,
+  };
 });
 
 const requireRoleSession = Effect.fn('requireRoleSession')(function* (
@@ -285,8 +361,9 @@ const requireRoleSession = Effect.fn('requireRoleSession')(function* (
 const observeUntilSettled = Effect.fn('observeUntilSettled')(function* (
   options: StartOrResumeRoleTurnOptions,
   initial: RoleHostSessionState,
+  guardNarrativeHash: string | null,
 ): Effect.fn.Return<
-  SettledRoleTurnResult,
+  RawSettledTurn,
   RoleConversationError | RoleHostOperationalError | RunHistoryError,
   RoleHost | RunHistoryStorage
 > {
@@ -331,6 +408,13 @@ const observeUntilSettled = Effect.fn('observeUntilSettled')(function* (
           'A settled role turn returned an empty narrative.',
         );
       }
+      if (guardNarrativeHash !== null && sha256Hex(response.narrative) !== guardNarrativeHash) {
+        return yield* conversationFailure(
+          options.runId,
+          'narrative-changed',
+          'A control repair changed the Markdown report that must stay unchanged.',
+        );
+      }
       yield* appendRunEvent({
         runDirectory: options.runDirectory,
         runId: options.runId,
@@ -361,7 +445,6 @@ const observeUntilSettled = Effect.fn('observeUntilSettled')(function* (
         lastObservation: observation,
       };
       return {
-        outcome: 'settled',
         session: settledSession,
         sequence: response.sequence,
         narrative: response.narrative,
@@ -501,9 +584,163 @@ export const startOrResumeRoleTurn = Effect.fn('startOrResumeRoleTurn')(function
     session = existing;
   }
 
+  const pendingRepair = history.roleControlRepairs.find(
+    (repair) => repair.sessionId === session.sessionId && repair.observation === null,
+  );
+
+  const performControlRepair = Effect.fn('startOrResumeRoleTurn.performControlRepair')(function* (
+    rejected: RawSettledTurn,
+    problem: string,
+    existing: RoleControlRepairRecord | null,
+  ): Effect.fn.Return<
+    RawSettledTurn,
+    RoleConversationError | RoleHostOperationalError | RunHistoryError,
+    RoleHost | RunHistoryStorage
+  > {
+    const sessionId = rejected.session.sessionId;
+    const generation = rejected.session.generation;
+    const narrativeHash = sha256Hex(rejected.narrative);
+    const controlHash = controlEvidenceHash(rejected.control);
+    const prompt = buildControlRepairPrompt(problem);
+    const promptHash = sha256Hex(prompt);
+    let idempotencyKey = existing?.idempotencyKey ?? '';
+    let submissionStarted = existing?.submission ?? null;
+
+    if (existing === null) {
+      yield* appendRunEvent({
+        runDirectory: options.runDirectory,
+        runId: options.runId,
+        createIfMissing: false,
+        build: () =>
+          Effect.succeed({
+            type: 'role-control-rejected',
+            payload: {
+              sessionId,
+              generation,
+              sequence: rejected.sequence,
+              narrativeHash,
+              controlHash,
+              problem,
+            },
+          } as const),
+      });
+    }
+    if (idempotencyKey.length === 0) {
+      idempotencyKey = randomUUID();
+      yield* appendRunEvent({
+        runDirectory: options.runDirectory,
+        runId: options.runId,
+        createIfMissing: false,
+        build: () =>
+          Effect.succeed({
+            type: 'role-control-repair-requested',
+            payload: {
+              sessionId,
+              generation,
+              idempotencyKey,
+              promptHash,
+              baselineSequence: rejected.sequence,
+              problem,
+            },
+          } as const),
+      });
+    }
+    if (submissionStarted === null) {
+      const response = yield* host
+        .submit({
+          schemaVersion: ROLE_HOST_PROTOCOL_VERSION,
+          sessionId,
+          ownershipToken: rejected.session.ownershipToken,
+          generation,
+          idempotencyKey,
+          prompt,
+          deadline: options.deadline,
+        })
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new RoleConversationError({
+                message: `The control repair for session "${sessionId}" may have been accepted and cannot be repeated safely: ${error.message}`,
+                reason: 'ambiguous-submission',
+                runId: options.runId,
+              }),
+          ),
+        );
+      submissionStarted = response.submission;
+      yield* appendRunEvent({
+        runDirectory: options.runDirectory,
+        runId: options.runId,
+        createIfMissing: false,
+        build: () =>
+          Effect.succeed({
+            type: 'role-control-repair-started',
+            payload: { sessionId, generation, idempotencyKey, submission: response.submission },
+          } as const),
+      });
+    }
+    return yield* observeUntilSettled(options, rejected.session, narrativeHash).pipe(
+      Effect.timeout(Duration.millis(options.turnTimeoutMs)),
+      Effect.catchTag(
+        'TimeoutError',
+        () =>
+          new RoleConversationError({
+            message: `The control repair for session "${sessionId}" did not settle within ${options.turnTimeoutMs}ms.`,
+            reason: 'turn-timeout',
+            runId: options.runId,
+          }),
+      ),
+    );
+  });
+
+  const finishSettledTurn = Effect.fn('startOrResumeRoleTurn.finishSettledTurn')(function* (
+    turn: RawSettledTurn,
+    priorRepairs: number,
+  ): Effect.fn.Return<
+    SettledRoleTurnResult,
+    RoleConversationError | RoleHostOperationalError | RunHistoryError,
+    RoleHost | RunHistoryStorage
+  > {
+    const policy = options.controlRepair;
+    if (policy === undefined) {
+      return settledResultOf(turn, true, null, priorRepairs);
+    }
+    let current = turn;
+    let performed = priorRepairs;
+    while (true) {
+      const validation = policy.validate(current.control);
+      if (validation.ok) {
+        return settledResultOf(current, true, null, performed);
+      }
+      if (performed >= policy.maxRepairs) {
+        return settledResultOf(current, false, validation.problem, performed);
+      }
+      current = yield* performControlRepair(current, validation.problem, null);
+      performed += 1;
+    }
+  });
+
+  if (pendingRepair !== undefined) {
+    const rejected = settledTurnOf(session);
+    if (rejected === null) {
+      return yield* conversationFailure(
+        options.runId,
+        'session-missing',
+        `The pending control repair for session "${session.sessionId}" has no settled report to preserve.`,
+      );
+    }
+    const repaired = yield* performControlRepair(rejected, pendingRepair.problem, pendingRepair);
+    return yield* finishSettledTurn(
+      repaired,
+      countControlRepairs(history.roleControlRepairs, session.sessionId),
+    );
+  }
+
   const alreadySettled = settledTurnOf(session);
   if (alreadySettled !== null) {
-    return alreadySettled;
+    return yield* finishSettledTurn(
+      alreadySettled,
+      countControlRepairs(history.roleControlRepairs, session.sessionId),
+    );
   }
   if (session.lastObservation?.status === 'lost') {
     return yield* conversationFailure(
@@ -580,7 +817,7 @@ export const startOrResumeRoleTurn = Effect.fn('startOrResumeRoleTurn')(function
     });
   }
 
-  return yield* observeUntilSettled(options, session).pipe(
+  const settled = yield* observeUntilSettled(options, session, null).pipe(
     Effect.timeout(Duration.millis(options.turnTimeoutMs)),
     Effect.catchTag(
       'TimeoutError',
@@ -592,6 +829,7 @@ export const startOrResumeRoleTurn = Effect.fn('startOrResumeRoleTurn')(function
         }),
     ),
   );
+  return yield* finishSettledTurn(settled, 0);
 });
 
 export const stopRoleSession = Effect.fn('stopRoleSession')(function* (

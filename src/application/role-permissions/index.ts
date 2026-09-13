@@ -17,10 +17,12 @@ import type { RolePermissionViolationKind } from '../../domain/run-history.js';
 
 import type { RunHistoryError, RunHistoryStorage } from '../run-history/index.js';
 import type {
+  RoleControlRepairPolicy,
   RoleConversationError,
   RoleHost,
   RoleHostOperationalError,
   SettledRoleTurnResult,
+  StartOrResumeRoleTurnOptions,
 } from '../role-conversations/index.js';
 
 export const ROLE_TURN_PERMISSION_FAILURE_REASONS = [
@@ -129,6 +131,7 @@ export interface StartGovernedRoleTurnOptions {
   readonly deadline: string;
   readonly pollMs: number;
   readonly turnTimeoutMs: number;
+  readonly controlRepair?: RoleControlRepairPolicy;
 }
 
 /**
@@ -185,20 +188,24 @@ export const startGovernedRoleTurn = Effect.fn('startGovernedRoleTurn')(function
   const readOnly = isReadOnlyRole(options.role);
   const before = readOnly ? yield* observer.fingerprint(scope) : null;
 
-  const attempt = yield* Effect.exit(
-    startOrResumeRoleTurn({
-      runDirectory: options.runDirectory,
-      runId: options.runId,
-      role: options.role,
-      attempt: options.attempt,
-      generation: options.generation,
-      prompt: options.prompt,
-      deadline: options.deadline,
-      pollMs: options.pollMs,
-      turnTimeoutMs: options.turnTimeoutMs,
-      locations: options.locations,
-    }),
-  );
+  const turnOptions = {
+    runDirectory: options.runDirectory,
+    runId: options.runId,
+    role: options.role,
+    attempt: options.attempt,
+    generation: options.generation,
+    prompt: options.prompt,
+    deadline: options.deadline,
+    pollMs: options.pollMs,
+    turnTimeoutMs: options.turnTimeoutMs,
+    locations: options.locations,
+  } satisfies Omit<StartOrResumeRoleTurnOptions, 'controlRepair'>;
+  const turnRequest: StartOrResumeRoleTurnOptions =
+    options.controlRepair === undefined
+      ? turnOptions
+      : { ...turnOptions, controlRepair: options.controlRepair };
+
+  const attempt = yield* Effect.exit(startOrResumeRoleTurn(turnRequest));
 
   if (readOnly && before !== null) {
     const after = yield* observer.fingerprint(scope);
