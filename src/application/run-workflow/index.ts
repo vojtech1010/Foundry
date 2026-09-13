@@ -16,6 +16,7 @@ import {
   validateCoderTurnControl,
 } from '../coder-result/index.js';
 import { bootstrapRoleGuidance } from '../guidance/index.js';
+import { reconcileHandoff } from '../handoff/index.js';
 import { prepareAndHoldApplicationRuntime } from '../project-runtime/index.js';
 import { runProjectVerification } from '../project-verification/index.js';
 import { buildRolePacket } from '../role-packets/index.js';
@@ -694,8 +695,17 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     Effect.ensuring(disposeRuntime().pipe(Effect.ignore)),
     Effect.result,
   );
-  if (Result.isSuccess(completed)) {
-    return completed.success;
-  }
-  return yield* blockOnFailure(errorMessage(completed.failure));
+  const summary = Result.isSuccess(completed)
+    ? completed.success
+    : yield* blockOnFailure(errorMessage(completed.failure));
+
+  /**
+   * A completed or no-change run owns exactly one canonical handoff. The write
+   * is idempotent: it reconciles from verified history, so an already-settled
+   * run (including `resume`) rewrites identical bytes or repairs a missing
+   * report. A run that is not terminally successful has no handoff and this is
+   * a no-op.
+   */
+  yield* reconcileHandoff({ runDirectory, runId });
+  return summary;
 });
