@@ -11,6 +11,7 @@ import {
   isNonProductCommand,
   isPublicCommand,
 } from '../domain/public-commands.js';
+import { PUBLICATION_CAPABILITIES } from '../domain/readiness.js';
 import { Identifier } from '../domain/run-identity.js';
 import {
   CLEANUP_OUTCOMES,
@@ -208,11 +209,18 @@ const StubReportData = Schema.Struct({
   taskId: Schema.optional(Schema.String),
 });
 
+const PublicationCapabilityReadinessData = Schema.Struct({
+  capability: Schema.Literals(PUBLICATION_CAPABILITIES),
+  state: Schema.Literals(['granted', 'denied', 'unknown']),
+});
+
 const PublicationReadinessData = Schema.Struct({
   configured: Schema.Boolean,
   eligible: Schema.Boolean,
   repository: Schema.NullOr(Schema.String),
-  reason: Schema.String,
+  repositoryScope: Schema.Literals(['repository', 'broad', 'unknown']),
+  reason: Schema.NullOr(Schema.String),
+  capabilities: Schema.Array(PublicationCapabilityReadinessData),
 });
 
 const DoctorReportData = Schema.Struct({
@@ -621,7 +629,11 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
           `data.publication.configured: ${data.publication.configured}`,
           `data.publication.eligible: ${data.publication.eligible}`,
           `data.publication.repository: ${data.publication.repository ?? 'none'}`,
-          `data.publication.reason: ${data.publication.reason}`,
+          `data.publication.repositoryScope: ${data.publication.repositoryScope}`,
+          `data.publication.reason: ${data.publication.reason ?? 'none'}`,
+          `data.publication.capabilities: ${data.publication.capabilities
+            .map((capability) => `${capability.capability}=${capability.state}`)
+            .join(' ')}`,
         );
       }
     } else if ('profileCheck' in data) {

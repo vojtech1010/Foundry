@@ -720,6 +720,14 @@ describe('readiness check with fake services', () => {
         'reviewer',
       ]);
       expect(data.roleHost.networkProfiles).toEqual(['network_denied', 'runtime_origin_only']);
+      expect(data.publication).toEqual({
+        configured: false,
+        eligible: false,
+        repository: null,
+        repositoryScope: 'unknown',
+        reason: null,
+        capabilities: [],
+      });
       expect(Object.keys(data)).toEqual([
         'readiness',
         'host',
@@ -727,6 +735,7 @@ describe('readiness check with fake services', () => {
         'storage',
         'repository',
         'roleHost',
+        'publication',
       ]);
       expectNoBranchMutation(built.gitCalls);
     }),
@@ -892,6 +901,43 @@ describe('publication readiness with fake services', () => {
           { capability: 'collaborator_permission', state: 'granted' },
         ],
       });
+    }),
+  );
+
+  it.effect('presents eligible publication with a null reason through the cli envelope', () =>
+    Effect.gen(function* () {
+      const { built } = checkWith(publicationWorld());
+      const jsonResult = yield* runCli(['doctor', '--config', CONFIG_PATH, '--json']).pipe(
+        Effect.provide(built.layer),
+      );
+      const humanResult = yield* runCli(['doctor', '--config', CONFIG_PATH]).pipe(
+        Effect.provide(built.layer),
+      );
+
+      expect(jsonResult.exitCode).toBe(EXIT_CODES.reported);
+      expect(humanResult.exitCode).toBe(EXIT_CODES.reported);
+      const { data } = expectDoctorEnvelope(jsonResult.stdout);
+      expect(data.publication).toEqual({
+        configured: true,
+        eligible: true,
+        repository: 'foundry/target',
+        repositoryScope: 'repository',
+        reason: null,
+        capabilities: [
+          { capability: 'push', state: 'granted' },
+          { capability: 'pull_request', state: 'granted' },
+          { capability: 'issue_comment_read', state: 'granted' },
+          { capability: 'collaborator_permission', state: 'granted' },
+        ],
+      });
+      expect(humanResult.stdout).toContain('data.publication.configured: true');
+      expect(humanResult.stdout).toContain('data.publication.eligible: true');
+      expect(humanResult.stdout).toContain('data.publication.repository: foundry/target');
+      expect(humanResult.stdout).toContain('data.publication.repositoryScope: repository');
+      expect(humanResult.stdout).toContain('data.publication.reason: none');
+      expect(humanResult.stdout).toContain(
+        'data.publication.capabilities: push=granted pull_request=granted issue_comment_read=granted collaborator_permission=granted',
+      );
     }),
   );
 
