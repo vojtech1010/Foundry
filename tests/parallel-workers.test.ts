@@ -1,7 +1,7 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Duration, Effect, Layer, Schema } from 'effect';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -587,10 +587,32 @@ function commitWorkerChange(workingDirectory: string, index: number): void {
 }
 
 /**
+ * Integrates every run-owned worker branch into the Lead Coder worktree. The
+ * worker branches are discovered from Git, not from a trusted report, so the
+ * orchestrator can verify inclusion by ancestry afterwards.
+ */
+function integrateWorkerBranches(workingDirectory: string): void {
+  const branches = gitExec(workingDirectory, [
+    'branch',
+    '--list',
+    '*--worker-*',
+    '--format=%(refname:short)',
+  ])
+    .split('\n')
+    .map((branch) => branch.trim())
+    .filter((branch) => branch.length > 0);
+  for (const branch of branches) {
+    gitExec(workingDirectory, ['merge', '--no-ff', '--no-edit', branch]);
+  }
+}
+
+/**
  * A live in-process role host for the workflow-seam test. The Architect returns
  * a compiled parallel plan; every Coder worker turn commits a distinct file in
- * its own run-owned worktree so the orchestrator can observe a Git-derived
- * commit for each objective.
+ * its own run-owned worktree, and the Lead Coder turn (identified by running in
+ * the run worktree rather than a worker worktree) integrates every worker
+ * branch before adding its own commit. The Reviewer reports blocked so the run
+ * settles deterministically after the integrated aggregate passed checks.
  */
 function parallelFlowRoleHostLauncher(): Layer.Layer<RoleHostLauncher> {
   const sessions = new Map<
@@ -632,6 +654,9 @@ function parallelFlowRoleHostLauncher(): Layer.Layer<RoleHostLauncher> {
           const index = counters.get(role) ?? 0;
           counters.set(role, index + 1);
           if (role === 'coder' && session !== undefined && session.workingDirectory !== null) {
+            if (!session.workingDirectory.includes('--worker-')) {
+              integrateWorkerBranches(session.workingDirectory);
+            }
             coderIndex += 1;
             commitWorkerChange(session.workingDirectory, coderIndex);
           }
@@ -644,7 +669,9 @@ function parallelFlowRoleHostLauncher(): Layer.Layer<RoleHostLauncher> {
             control:
               role === 'architect'
                 ? parallelPlanControl()
-                : { schemaVersion: 1, outcome: 'implemented' },
+                : role === 'reviewer'
+                  ? { schemaVersion: 1, outcome: 'approved' }
+                  : { schemaVersion: 1, outcome: 'implemented' },
           };
         }),
       stop: () => Effect.succeed({ schemaVersion: 1 as const, disposition: 'disposed' as const }),
@@ -682,7 +709,7 @@ const parallelFlowCapabilityLayers = Layer.mergeAll(
 );
 
 describe('parallel plan at the workflow seam', () => {
-  it.live('selects parallel objectives and blocks the coding stage awaiting integration', () =>
+  it.live('integrates every objective before checks and disposes the accepted aggregate', () =>
     Effect.gen(function* () {
       const fixture = setupParallelFlowFixture();
       try {
@@ -703,12 +730,9 @@ describe('parallel plan at the workflow seam', () => {
             Layer.mergeAll(parallelFlowCapabilityLayers, parallelFlowRoleHostLauncher()),
           ),
         );
-        expect(result.exitCode).toBe(1);
+        expect(result.exitCode).toBe(0);
         const envelope = Schema.decodeUnknownSync(ReportEnvelopeJson)(result.stdout);
-        expect(envelope.ok).toBe(false);
-        if (!envelope.ok) {
-          expect(envelope.error.kind).toBe('blocked');
-        }
+        expect(envelope.ok).toBe(true);
 
         const history = yield* readVerifiedRunHistory({
           runDirectory: join(fixture.target, '.agent', 'runs', runId),
@@ -717,24 +741,50 @@ describe('parallel plan at the workflow seam', () => {
         }).pipe(Effect.provide(RunHistoryLive));
 
         expect(history.derived.acceptedPlan?.execution.mode).toBe('parallel');
-        expect(history.derived.state).toBe('blocked');
-        expect(history.derived.checkpoint).toBe('coding');
+        expect(history.derived.state).toBe('completed');
 
         const workers = history.derived.objectiveWorkers ?? [];
-        const settledCommits = workers.filter(
-          (worker) => worker.phase === 'settled' && worker.commit !== null,
+        const settledCommits = new Map(
+          workers
+            .filter((worker) => worker.phase === 'settled' && worker.commit !== null)
+            .map((worker) => [worker.objectiveId, worker.commit]),
         );
-        expect(settledCommits.map((worker) => worker.objectiveId).sort()).toEqual([
-          'OBJ-001',
-          'OBJ-002',
-        ]);
+        expect([...settledCommits.keys()].sort()).toEqual(['OBJ-001', 'OBJ-002']);
         expect(workers.some((worker) => worker.phase === 'created')).toBe(true);
         expect(workers.some((worker) => worker.phase === 'disposed')).toBe(true);
 
-        const blockRun = history.events.find(
-          (event) => event.type === 'workflow-transition' && event.payload.route === 'block-run',
-        );
-        expect(blockRun).toBeDefined();
+        const declaration = history.derived.integrationDeclared;
+        expect(declaration?.objectiveIds).toEqual(['OBJ-001', 'OBJ-002']);
+        expect(declaration?.declaredOrder).toEqual(['OBJ-001', 'OBJ-002']);
+        expect(declaration?.commits).toEqual([
+          settledCommits.get('OBJ-001'),
+          settledCommits.get('OBJ-002'),
+        ]);
+
+        const aggregate = history.derived.implementation?.commit ?? null;
+        expect(aggregate).not.toBeNull();
+        const completion = history.derived.integrationCompleted;
+        expect(completion?.aggregateCommit).toBe(aggregate);
+        expect(completion?.actualOrder).toEqual(['OBJ-001', 'OBJ-002']);
+        expect(completion?.deviationReason).toBeNull();
+
+        // The aggregate is verified by Git ancestry, not by trusting the workers.
+        for (const commit of settledCommits.values()) {
+          expect(commit).not.toBeNull();
+          expect(() =>
+            gitExec(fixture.target, ['merge-base', '--is-ancestor', commit!, aggregate!]),
+          ).not.toThrow();
+        }
+
+        // Terminal cleanup disposes the worker worktrees this run owned.
+        const cleanup = history.derived.cleanupProgress;
+        expect(cleanup?.outcome).toBe('succeeded');
+        expect(cleanup?.detail).toContain('worker-worktree');
+        const workspace = history.derived.worktreeReady?.workspace;
+        expect(workspace).toBeDefined();
+        for (const objectiveId of settledCommits.keys()) {
+          expect(existsSync(workerWorkspacePath(workspace!, objectiveId, runId))).toBe(false);
+        }
       } finally {
         fixture.cleanup();
       }

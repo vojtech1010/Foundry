@@ -94,6 +94,44 @@ export interface GitHubPushTaskBranchOptions {
 }
 
 /**
+ * One issue comment as the decision scanner sees it. `authorType` lets the
+ * application ignore bot comments without a second lookup, and `createdAt` is
+ * the watermark the scanner orders against.
+ */
+export interface GitHubIssueComment {
+  readonly commentId: string;
+  readonly author: string;
+  readonly authorType: 'User' | 'Bot';
+  readonly body: string;
+  readonly createdAt: string;
+}
+
+/**
+ * A page of issue comments. `truncated` is true when the adapter could not
+ * prove it saw every comment after the watermark, so the scanner refuses to
+ * guess and reports the ambiguity instead.
+ */
+export interface GitHubIssueCommentPage {
+  readonly comments: ReadonlyArray<GitHubIssueComment>;
+  readonly truncated: boolean;
+}
+
+export interface GitHubCollaboratorPermission {
+  readonly permission: string;
+}
+
+export interface GitHubIssueCommentsAfterOptions {
+  readonly repository: string;
+  readonly pullRequestNumber: number;
+  readonly after: string;
+}
+
+export interface GitHubCollaboratorPermissionOptions {
+  readonly repository: string;
+  readonly username: string;
+}
+
+/**
  * The only GitHub and remote-Git operations Foundry exposes for publication.
  * Merge, close, approval, review submission, and arbitrary branch mutation have
  * no method here and therefore no route through the application.
@@ -116,6 +154,12 @@ export class GitHubPublication extends Context.Service<
     readonly pushTaskBranch: (
       options: GitHubPushTaskBranchOptions,
     ) => Effect.Effect<void, GitHubPublicationError>;
+    readonly listIssueCommentsAfter: (
+      options: GitHubIssueCommentsAfterOptions,
+    ) => Effect.Effect<GitHubIssueCommentPage, GitHubPublicationError>;
+    readonly collaboratorPermission: (
+      options: GitHubCollaboratorPermissionOptions,
+    ) => Effect.Effect<GitHubCollaboratorPermission, GitHubPublicationError>;
   }
 >()('foundry/application/decision-publication/GitHubPublication') {}
 
@@ -463,3 +507,5 @@ export const publishDecisionDraftPr = Effect.fn('publishDecisionDraftPr')(functi
     exactCommands,
   } satisfies PublishDecisionDraftPrReport;
 });
+
+export { reconcilePublication } from './recovery.js';

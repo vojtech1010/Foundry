@@ -5,6 +5,7 @@ import { decodeReviewerTurnControl } from '../../domain/reviewer-outcomes.js';
 import { REQUEST_NORMALIZED_FILENAME } from '../../domain/run-identity.js';
 import { describeRunCleanupReport } from '../../domain/run-cleanup.js';
 import { decodeTesterTurnControl } from '../../domain/tester-outcomes.js';
+import { workerWorkspacePath } from '../../domain/parallel-workers.js';
 import { isActiveWorkflowState, isTerminalWorkflowState } from '../../domain/workflow.js';
 import {
   admitArchitectPlan,
@@ -17,9 +18,19 @@ import {
   handleCoderTurn,
   validateCoderTurnControl,
 } from '../coder-result/index.js';
-import { GitHubPublication, publishDecisionDraftPr } from '../decision-publication/index.js';
+import { applyDecision, scanForDecision } from '../decision-commands/index.js';
+import {
+  GitHubPublication,
+  publishDecisionDraftPr,
+  reconcilePublication,
+} from '../decision-publication/index.js';
 import { bootstrapRoleGuidance } from '../guidance/index.js';
 import { reconcileHandoff } from '../handoff/index.js';
+import {
+  recordIntegrationCompleted,
+  recordIntegrationDeclaration,
+  verifyAggregate,
+} from '../parallel-integration/index.js';
 import {
   ParallelWorkersTurnError,
   WorkerTurnRunner,
@@ -47,10 +58,11 @@ import type { ProjectConfiguration } from '../../domain/project-configuration.js
 import type { PlannedObjective } from '../../domain/architect-plan.js';
 import type { RoleHostControl, RoleHostSessionState } from '../../domain/role-host.js';
 import type { RoleTurnLocations } from '../../domain/role-permissions.js';
-import type { RunHistoryDerivedState } from '../../domain/run-history.js';
+import type { EvidenceManifestEntry, RunHistoryDerivedState } from '../../domain/run-history.js';
 import type { WorkflowRole, WorkflowState } from '../../domain/workflow.js';
 import type { WorkerTurnTarget } from '../parallel-workers/index.js';
 import type { HeldApplicationRuntime } from '../project-runtime/index.js';
+import type { WorkerWorktreeDisposal } from '../run-cleanup/index.js';
 import type { VerifiedRunHistory } from '../run-history/index.js';
 
 export const MAX_RUN_STEPS = 128;
@@ -69,10 +81,23 @@ export interface AdvanceRunOptions {
   readonly allowResume: boolean;
 }
 
+/**
+ * The decision outcome of a resume that found a run waiting for a human. A
+ * non-null `problem` is an integrity stop: the durable state is unchanged and
+ * the problem is reported instead of guessing.
+ */
+export interface RunWorkflowDecisionReport {
+  readonly applied: 'accept' | 'correct' | 'abandon' | null;
+  readonly waiting: boolean;
+  readonly draftPrUrl: string | null;
+  readonly problem: string | null;
+}
+
 export interface RunWorkflowOutcome {
   readonly workflowState: WorkflowState;
   readonly stages: ReadonlyArray<WorkflowState>;
   readonly testerSkipped: boolean;
+  readonly decision: RunWorkflowDecisionReport | null;
 }
 
 function errorMessage(error: { readonly message: string }): string {
@@ -112,6 +137,7 @@ function summaryOf(history: VerifiedRunHistory): RunWorkflowOutcome {
     workflowState: history.derived.state ?? 'blocked',
     stages: stagesOf(history),
     testerSkipped: history.derived.testerSkips.length > 0,
+    decision: null,
   };
 }
 
@@ -134,13 +160,15 @@ function repairsUsed(
   ).length;
 }
 
-function correctionRoundsUsed(history: VerifiedRunHistory): number {
+/**
+ * Automatic correction rounds are consumed only by Reviewer `changes_requested`
+ * (`correction-required`). A human-directed `correct` decision reruns the gates
+ * without spending an automatic round, so it never affects this budget.
+ */
+export function correctionRoundsUsed(history: VerifiedRunHistory): number {
   let used = 0;
   for (const event of history.events) {
-    if (
-      event.type === 'workflow-transition' &&
-      (event.payload.route === 'correction-required' || event.payload.route === 'human-corrected')
-    ) {
+    if (event.type === 'workflow-transition' && event.payload.route === 'correction-required') {
       used += 1;
     }
   }
@@ -166,6 +194,101 @@ function latestSettledTester(history: RunHistoryDerivedState): RoleHostSessionSt
     }
   }
   return latest;
+}
+
+/**
+ * Worker worktrees that this run durably provisioned, derived from the accepted
+ * plan and the recorded worker events. Terminal cleanup disposes these
+ * alongside the run worktree; a run that never ran parallel objectives reports
+ * none.
+ */
+function workerWorktreesFor(
+  history: VerifiedRunHistory | null,
+  runId: string,
+): ReadonlyArray<WorkerWorktreeDisposal> {
+  const ready = history?.derived.worktreeReady ?? null;
+  const plan = history?.derived.acceptedPlan ?? null;
+  if (ready === null || plan === null || plan.execution.mode !== 'parallel') {
+    return [];
+  }
+  const recorded = new Set(
+    (history?.derived.objectiveWorkers ?? []).map((worker) => worker.objectiveId),
+  );
+  return plan.execution.objectives
+    .filter((objective) => recorded.has(objective.id))
+    .map((objective) => ({
+      name: objective.id,
+      workspace: workerWorkspacePath(ready.workspace, objective.id, runId),
+    }));
+}
+
+const CAPTURE_SHA256_REFERENCE = /sha256:([0-9a-f]{64})/u;
+
+const CAPTURE_BYTES_REFERENCE = /bytes:(\d+)/u;
+
+/**
+ * Captures the settled Tester turn observed for the current result head. Foundry
+ * already retains the content-bound evidence the Tester consumes: every
+ * commit-bound verification log and tracked-mutation diff is content-addressed
+ * by its `sha256`, while finding evidence references stay name-only unless they
+ * carry a content hash. Entries keep history order, so identical content under
+ * different labels is recorded twice and then counted as one observation
+ * downstream by its shared hash.
+ */
+function observedCaptureEntries(
+  derived: RunHistoryDerivedState,
+  commit: string,
+): ReadonlyArray<EvidenceManifestEntry> {
+  const entries: Array<EvidenceManifestEntry> = [];
+  const seen = new Set<string>();
+  const add = (entry: EvidenceManifestEntry): void => {
+    const key = `${entry.sha256 ?? ''}\u0000${entry.kind}\u0000${entry.label}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    entries.push(entry);
+  };
+  for (const report of derived.verifications) {
+    if (report.commit !== commit) {
+      continue;
+    }
+    for (const execution of report.executions) {
+      add({
+        sha256: execution.log.sha256,
+        byteLength: execution.log.byteLength,
+        label: `${execution.name} ${execution.log.path}`,
+        kind: 'log',
+        criterionIds: [],
+      });
+      if (execution.trackedMutation !== null) {
+        add({
+          sha256: execution.trackedMutation.diff.sha256,
+          byteLength: execution.trackedMutation.diff.byteLength,
+          label: `${execution.name} ${execution.trackedMutation.diff.path}`,
+          kind: 'log',
+          criterionIds: [],
+        });
+      }
+    }
+  }
+  for (const finding of derived.findings) {
+    if (finding.commit !== commit) {
+      continue;
+    }
+    for (const evidence of finding.evidence) {
+      const sha256 = CAPTURE_SHA256_REFERENCE.exec(evidence)?.[1] ?? null;
+      const bytesMatch = CAPTURE_BYTES_REFERENCE.exec(evidence)?.[1];
+      add({
+        sha256,
+        byteLength: bytesMatch === undefined ? null : Number.parseInt(bytesMatch, 10),
+        label: evidence,
+        kind: 'capture',
+        criterionIds: [],
+      });
+    }
+  }
+  return entries;
 }
 
 const decodeRequestText = Effect.fn('advanceRun.decodeRequestText')(function* (
@@ -426,9 +549,12 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
 
   /**
    * Parallel plans run one Coder worker per accepted objective from the same
-   * frozen source, each in its own branch, worktree, and session. In this wave
-   * the coding stage ends blocked with a recoverable "awaiting integration"
-   * reason; Lead Coder integration is a later objective that replaces it.
+   * frozen source, each in its own branch, worktree, and session. Once every
+   * objective has a verified commit, Foundry records the accepted set and
+   * declared integration order, runs the Lead Coder turn, verifies the aggregate
+   * against those contributions with Git, and accepts only the combined commit
+   * for checks. A failing objective stops queued work and blocks without a
+   * partial aggregate.
    */
   const runParallelObjectives = Effect.fn('advanceRun.runParallelObjectives')(function* (
     history: VerifiedRunHistory,
@@ -474,22 +600,95 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       objectives,
     }).pipe(Effect.provide(runnerLayer));
     const failed = report.objectives.filter((outcome) => !outcome.settled);
-    const reason =
-      failed.length === 0
-        ? `Parallel objective workers settled (${report.objectives.length}/${report.objectives.length}) each with a verified commit; awaiting Lead Coder integration.`
-        : `Parallel objective workers settled with incomplete objectives: ${failed
-            .map(
-              (outcome) =>
-                `${outcome.objectiveId} (${outcome.attempts} attempt(s)${
-                  outcome.problem === null ? '' : `: ${outcome.problem}`
-                })`,
-            )
-            .join('; ')}; awaiting Lead Coder integration or recovery.`;
-    yield* transitionWorkflow({
+    if (failed.length > 0) {
+      const reason = `Parallel objective workers settled with incomplete objectives: ${failed
+        .map(
+          (outcome) =>
+            `${outcome.objectiveId} (${outcome.attempts} attempt(s)${
+              outcome.problem === null ? '' : `: ${outcome.problem}`
+            })`,
+        )
+        .join(
+          '; ',
+        )}; the run stopped queued work, drained the active workers, and disposed the worker resources it owned.`;
+      yield* transitionWorkflow({
+        runDirectory,
+        runId,
+        request: {
+          route: 'block-run',
+          recoverablePrerequisite: true,
+          reason: reason.slice(0, 500),
+        },
+      });
+      return;
+    }
+
+    /**
+     * Every objective has a verified commit. Fix the accepted objective/commit
+     * set and the declared integration order before Lead Coder starts so worker
+     * arrival order cannot silently redefine the plan.
+     */
+    const declaration = yield* recordIntegrationDeclaration({ runDirectory, runId, objectives });
+    const afterWorkers = yield* readVerifiedRunHistory({
       runDirectory,
       runId,
-      request: { route: 'block-run', recoverablePrerequisite: true, reason: reason.slice(0, 500) },
+      createIfMissing: false,
     });
+    const maxCoderAttempt = afterWorkers.derived.roleSessions
+      .filter((session) => session.role === 'coder')
+      .reduce((highest, session) => Math.max(highest, session.attempt), 0);
+    const integrationSection = declaration.declaredOrder
+      .map(
+        (objectiveId, index) =>
+          `- ${objectiveId}: accepted commit ${declaration.commits[index] ?? 'unknown'}`,
+      )
+      .join('\n');
+    const leadPrompt = `${yield* promptFor('coder', afterWorkers)}\n\n## Lead Coder integration\n\nIntegrate every accepted objective commit in the declared order, resolve overlap, complete any remaining plan work, and commit the single aggregate result. Do not check or review a partial combination.\n${integrationSection}\n`;
+    const settled = yield* performRoleTurn('coder', maxCoderAttempt + 1, leadPrompt, null);
+    if (!settled.controlValid) {
+      yield* recordControlRetry('coder', settled.controlProblem ?? 'invalid control envelope');
+      return;
+    }
+
+    /**
+     * The aggregate is verified against the accepted contributions before it is
+     * accepted, so a partial or drifted combination never enters checks. The
+     * Lead Coder turn itself is not authority: only Git ancestry plus the
+     * declared records decide inclusion and order.
+     */
+    const verification = yield* verifyAggregate({
+      runId,
+      workspace: ready.workspace,
+      baseCommit: ready.baseCommit,
+      declaration,
+    });
+
+    const handled = yield* handleCoderTurn({
+      runDirectory,
+      runId,
+      control: settled.control,
+    }).pipe(Effect.result);
+    if (Result.isFailure(handled)) {
+      if (handled.failure instanceof CoderTurnRejected) {
+        yield* recordControlRetry('coder', handled.failure.problem);
+        return;
+      }
+      return yield* handled.failure;
+    }
+    if (handled.success.outcome === 'blocked') {
+      yield* transitionWorkflow({
+        runDirectory,
+        runId,
+        request: {
+          route: 'block-run',
+          recoverablePrerequisite: true,
+          reason: 'Lead Coder reported that the integrated objective plan cannot be implemented.',
+        },
+      });
+      return;
+    }
+
+    yield* recordIntegrationCompleted({ runDirectory, runId, verification });
   });
 
   const runCoder = Effect.fn('advanceRun.runCoder')(function* (history: VerifiedRunHistory) {
@@ -660,6 +859,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     if (outcome === 'observed' || outcome === 'blocked') {
       yield* disposeRuntime();
     }
+    const captures = observedCaptureEntries(history.derived, commit);
     const disposition = yield* handleTesterTurn({
       runDirectory,
       runId,
@@ -667,6 +867,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       commit,
       testerRetriesRemaining: retriesRemaining,
       retryReason: 'Tester requested another independent observation of the same commit.',
+      captures,
     });
     if (disposition.kind === 'control-invalid') {
       yield* recordControlRetry('tester', disposition.problem);
@@ -756,6 +957,73 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     yield* publishDecisionDraftPr({ runDirectory, runId, configuration }).pipe(
       Effect.provideService(GitHubPublication, github.value),
     );
+  });
+
+  /**
+   * Resumes a run waiting for an authenticated human decision. Only a resume
+   * scans the owned decision pull request; an integrity problem or a still
+   * waiting decision returns a typed report without changing durable state.
+   * `correct` is routed to `correcting` so the body loop reruns every later
+   * gate; `accept` and `abandon` settle the run.
+   */
+  const runDecisionResume = Effect.fn('advanceRun.runDecisionResume')(function* () {
+    const unavailable = {
+      applied: null,
+      waiting: false,
+      draftPrUrl: null,
+      problem: 'GitHub decision publication is not available for this run.',
+    } satisfies RunWorkflowDecisionReport;
+    const github = yield* Effect.serviceOption(GitHubPublication);
+    if (Option.isNone(github)) {
+      return unavailable;
+    }
+    const scan = yield* scanForDecision({ runDirectory, runId, configuration }).pipe(
+      Effect.provideService(GitHubPublication, github.value),
+      Effect.result,
+    );
+    if (Result.isFailure(scan)) {
+      return {
+        applied: null,
+        waiting: false,
+        draftPrUrl: null,
+        problem: errorMessage(scan.failure),
+      } satisfies RunWorkflowDecisionReport;
+    }
+    const outcome = scan.success;
+    if (outcome.kind === 'waiting') {
+      return {
+        applied: null,
+        waiting: true,
+        draftPrUrl: outcome.draftPrUrl,
+        problem: null,
+      } satisfies RunWorkflowDecisionReport;
+    }
+    if (outcome.kind !== 'applied') {
+      return {
+        applied: null,
+        waiting: false,
+        draftPrUrl: outcome.draftPrUrl,
+        problem: outcome.problem,
+      } satisfies RunWorkflowDecisionReport;
+    }
+    const applied = yield* applyDecision(
+      { runDirectory, runId },
+      { decisionId: outcome.decisionId, option: outcome.option, evidence: outcome.evidence },
+    ).pipe(Effect.result);
+    if (Result.isFailure(applied)) {
+      return {
+        applied: null,
+        waiting: false,
+        draftPrUrl: outcome.draftPrUrl,
+        problem: errorMessage(applied.failure),
+      } satisfies RunWorkflowDecisionReport;
+    }
+    return {
+      applied: outcome.option.action,
+      waiting: false,
+      draftPrUrl: outcome.draftPrUrl,
+      problem: null,
+    } satisfies RunWorkflowDecisionReport;
   });
 
   const runStage = Effect.fn('advanceRun.runStage')(function* (
@@ -853,6 +1121,55 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
         }
         return summaryOf(history);
       }
+      if (state === 'human_decision_required') {
+        if (!options.allowResume) {
+          return summaryOf(history);
+        }
+        const decision = yield* runDecisionResume();
+        if (decision.problem !== null || decision.applied === null) {
+          return { ...summaryOf(history), decision };
+        }
+        if (decision.applied === 'correct') {
+          continue;
+        }
+        const after = yield* readVerifiedRunHistory({
+          runDirectory,
+          runId,
+          createIfMissing: false,
+        });
+        return { ...summaryOf(after), decision };
+      }
+      if (state === 'publish_failed') {
+        /**
+         * An interrupted decision publication is recovered in the same run. The
+         * reconciliation owns the resume transition and re-enters
+         * `human_decision_required` only after the journal and GitHub agree on
+         * the exact draft URL; every other outcome leaves the run durable in
+         * `publish_failed` for a later resume.
+         */
+        if (!options.allowResume || resumed) {
+          return summaryOf(history);
+        }
+        const github = yield* Effect.serviceOption(GitHubPublication);
+        if (Option.isNone(github)) {
+          return summaryOf(history);
+        }
+        const reconciliation = yield* reconcilePublication({
+          runDirectory,
+          runId,
+          configuration,
+        }).pipe(Effect.provideService(GitHubPublication, github.value), Effect.result);
+        if (Result.isSuccess(reconciliation) && reconciliation.success.outcome === 'reconciled') {
+          resumed = true;
+          continue;
+        }
+        const after = yield* readVerifiedRunHistory({
+          runDirectory,
+          runId,
+          createIfMissing: false,
+        });
+        return summaryOf(after);
+      }
       if (!isActiveWorkflowState(state)) {
         return summaryOf(history);
       }
@@ -873,11 +1190,17 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       return;
     }
     const runtime = yield* Ref.get(runtimeRef);
+    const history = yield* readVerifiedRunHistory({
+      runDirectory,
+      runId,
+      createIfMissing: false,
+    }).pipe(Effect.orElseSucceed(() => null));
     const disposal = yield* disposeRunResources({
       runDirectory,
       runId,
       configuration,
       runtime,
+      workerWorktrees: workerWorktreesFor(history, runId),
     });
     if (disposal === null) {
       return;

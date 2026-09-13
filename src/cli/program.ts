@@ -13,6 +13,8 @@ import {
 } from '../domain/public-commands.js';
 import { PUBLICATION_CAPABILITIES } from '../domain/readiness.js';
 import { RunInspectReportSchema } from '../domain/inspection.js';
+import { CleanupListReportSchema, CleanupRunReportSchema } from '../domain/retention-cleanup.js';
+import { DiagnosticBundleReportSchema } from '../domain/diagnostic-bundle.js';
 import { Identifier } from '../domain/run-identity.js';
 import {
   CLEANUP_OUTCOMES,
@@ -22,6 +24,7 @@ import {
 
 import type { PublicCommand, PublicCommandInvocation } from '../domain/public-commands.js';
 import type { ReportFailureKind } from '../domain/public-commands.js';
+import type { DiagnosticBundleReport } from '../domain/diagnostic-bundle.js';
 import type { PublicCommandError, PublicCommandReport } from '../application/public-commands.js';
 import type { RunInspectReport } from '../application/inspect/index.js';
 import type { RunGit } from '../application/git-provisioning/index.js';
@@ -183,6 +186,7 @@ const Invocation = Schema.Union([
   Schema.Struct({
     command: Schema.Literal('diagnostic-bundle'),
     config: PathValue,
+    runId: Identifier,
     output: PathValue,
   }),
   Schema.Struct({
@@ -322,6 +326,12 @@ const RecordedRunReportData = Schema.Struct({
   request: RecordedRequestData,
 });
 
+const RunWorkflowDecisionData = Schema.Struct({
+  applied: Schema.NullOr(Schema.Literals(['accept', 'correct', 'abandon'])),
+  waiting: Schema.Boolean,
+  draftPrUrl: Schema.NullOr(Schema.String),
+});
+
 const RunWorkflowReportData = Schema.Struct({
   runId: Schema.String,
   taskId: Schema.String,
@@ -332,6 +342,7 @@ const RunWorkflowReportData = Schema.Struct({
   outcome: WorkflowStateSchema,
   stages: Schema.Array(WorkflowStateSchema),
   testerSkipped: Schema.Boolean,
+  decision: Schema.optional(RunWorkflowDecisionData),
 });
 
 const StatusMeasureData = Schema.Struct({
@@ -391,6 +402,12 @@ const RunStatusReportData = Schema.Struct({
 
 const InspectReportData = RunInspectReportSchema;
 
+const CleanupListReportData = CleanupListReportSchema;
+
+const CleanupRunReportData = CleanupRunReportSchema;
+
+const DiagnosticBundleReportData = DiagnosticBundleReportSchema;
+
 const ReportData = Schema.Union([
   StubReportData,
   DoctorReportData,
@@ -400,6 +417,9 @@ const ReportData = Schema.Union([
   RecordedRunReportData,
   RunStatusReportData,
   InspectReportData,
+  CleanupListReportData,
+  CleanupRunReportData,
+  DiagnosticBundleReportData,
 ]);
 
 const SuccessEnvelope = Schema.Struct({
@@ -797,6 +817,23 @@ function renderInspectHuman(data: RunInspectReport): ReadonlyArray<string> {
   return lines;
 }
 
+function renderDiagnosticBundleHuman(data: DiagnosticBundleReport): ReadonlyArray<string> {
+  const lines: Array<string> = [
+    `data.runId: ${data.runId}`,
+    `data.destination: ${data.destination}`,
+    `data.manifestPath: ${data.manifestPath}`,
+    `data.manifest.schemaVersion: ${data.manifest.schemaVersion}`,
+    `data.manifest.entryCount: ${data.manifest.entryCount}`,
+    `data.manifest.totalByteLength: ${data.manifest.totalByteLength}`,
+  ];
+  for (const entry of data.manifest.entries) {
+    lines.push(
+      `data.manifest.entries: ${entry.path} source=${entry.source} bytes=${entry.byteLength} originalBytes=${entry.originalByteLength} sha256=${entry.sha256} redactions=${entry.redactionCount} truncated=${entry.truncated}`,
+    );
+  }
+  return lines;
+}
+
 function renderHuman(envelope: ReportEnvelopeValue): string {
   const lines = [
     `schemaVersion: ${envelope.schemaVersion}`,
@@ -879,9 +916,39 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
           `data.stages: ${data.stages.join(' ')}`,
           `data.testerSkipped: ${data.testerSkipped}`,
         );
+        if (data.decision !== undefined) {
+          lines.push(
+            `data.decision.applied: ${data.decision.applied ?? 'none'}`,
+            `data.decision.waiting: ${data.decision.waiting}`,
+            `data.decision.draftPrUrl: ${data.decision.draftPrUrl ?? 'none'}`,
+          );
+        }
       }
+    } else if ('manifest' in data) {
+      lines.push(...renderDiagnosticBundleHuman(data));
     } else if ('sections' in data) {
       lines.push(...renderInspectHuman(data));
+    } else if ('runs' in data) {
+      lines.push(`data.retentionDays: ${data.retentionDays}`, `data.guidance: ${data.guidance}`);
+      for (const run of data.runs) {
+        lines.push(
+          `data.runs: ${run.runId} state=${run.workflowState} terminalAt=${run.terminalAt} ageMs=${run.ageMs} ownership=${run.ownership} taskBranch=${run.taskBranch ?? 'none'} cleanup=${run.cleanupOutcome ?? 'none'} taskId=${run.taskId ?? 'none'}`,
+        );
+      }
+    } else if ('checks' in data) {
+      lines.push(
+        `data.runId: ${data.runId}`,
+        `data.outcome: ${data.outcome}`,
+        `data.message: ${data.message}`,
+        `data.preserved.taskBranch: ${data.preserved.taskBranch ?? 'none'}`,
+        `data.preserved.handoffPath: ${data.preserved.handoffPath}`,
+      );
+      for (const check of data.checks) {
+        lines.push(`data.checks: ${check.check} ok=${check.ok} ${check.detail}`);
+      }
+      for (const resource of data.resources) {
+        lines.push(`data.resources: ${resource.kind} ${resource.name} ${resource.disposition}`);
+      }
     } else if ('workflowState' in data) {
       lines.push(
         `data.runId: ${data.runId}`,
@@ -961,6 +1028,7 @@ function failureKindFor(error: PublicCommandError): ReportFailureKind {
     case 'RunHistoryIntegrityError':
     case 'RunHistoryStorageError':
     case 'RunHistoryConflict':
+    case 'DiagnosticBundleRefused':
     case 'RepositoryLeaseOwnershipLost':
     case 'RepositoryLeaseStorageError':
     case 'RoleHostCapabilityError':
@@ -973,6 +1041,8 @@ function failureKindFor(error: PublicCommandError): ReportFailureKind {
     case 'GuidanceSnapshotInvalid':
     case 'GuidanceStorageError':
       return 'failed';
+    case 'RetentionCleanupError':
+      return error.kind;
     default:
       return INVALID_INVOCATION_KIND;
   }
@@ -1034,13 +1104,20 @@ function toDomainInvocation(
       return { command: 'profile-check', config: invocation.config, cwd };
     }
     case 'diagnostic-bundle': {
-      return { command: 'diagnostic-bundle', config: invocation.config, cwd };
+      return {
+        command: 'diagnostic-bundle',
+        runId: invocation.runId,
+        config: invocation.config,
+        output: invocation.output,
+        cwd,
+      };
     }
     case 'cleanup': {
       if ('runId' in invocation) {
         return {
           command: 'cleanup',
           runId: invocation.runId,
+          confirm: invocation.confirm,
           config: invocation.config,
           cwd,
         };
@@ -1148,7 +1225,7 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       normalizedPromptHash: report.request.normalizedPromptHash,
     };
     if ('workflowState' in report) {
-      return {
+      const workflowReport = {
         runId: report.runId,
         taskId: report.taskId,
         runDirectory: report.runDirectory,
@@ -1159,6 +1236,17 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
         stages: [...report.stages],
         testerSkipped: report.testerSkipped,
       };
+      if (report.decision === undefined) {
+        return workflowReport;
+      }
+      return {
+        ...workflowReport,
+        decision: {
+          applied: report.decision.applied,
+          waiting: report.decision.waiting,
+          draftPrUrl: report.decision.draftPrUrl,
+        },
+      };
     }
     return {
       runId: report.runId,
@@ -1168,8 +1256,30 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       request,
     };
   }
+  if ('manifest' in report) {
+    return Schema.decodeUnknownSync(DiagnosticBundleReportData)(report);
+  }
   if ('sections' in report) {
     return Schema.decodeUnknownSync(InspectReportData)(report);
+  }
+  if ('runs' in report) {
+    return {
+      schemaVersion: report.schemaVersion,
+      retentionDays: report.retentionDays,
+      runs: report.runs.map((run) => ({ ...run })),
+      guidance: report.guidance,
+    };
+  }
+  if ('checks' in report) {
+    return {
+      schemaVersion: report.schemaVersion,
+      runId: report.runId,
+      outcome: report.outcome,
+      checks: report.checks.map((check) => ({ ...check })),
+      resources: report.resources.map((resource) => ({ ...resource })),
+      preserved: { ...report.preserved },
+      message: report.message,
+    };
   }
   if ('workflowState' in report) {
     return {

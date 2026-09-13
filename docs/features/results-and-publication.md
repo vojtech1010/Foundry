@@ -141,6 +141,11 @@ mutation have no application service operation or CLI route.
 
 ## Applying a human decision
 
+Supported: an authenticated command resolves a waiting decision. Scanning is
+idempotent — repeated identical commands select the same option without
+recording a second decision event — and a human-directed `correct` reruns the
+gates without consuming an automatic correction round.
+
 Foundry assigns a decision ID, an unpredictable 128-bit nonce, and stable option
 IDs to the Reviewer's labeled `accept`, `correct`, or `abandon` actions. The
 draft PR prints one exact command per option:

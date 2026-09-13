@@ -197,6 +197,32 @@ function eventDetail(event: RunEvent): string {
       );
     case 'evidence-bound':
       return boundedDetail(`tester observation bound to ${event.payload.commit}`);
+    case 'decision-applied':
+      return boundedDetail(
+        `decision ${event.payload.decisionId} applied ${event.payload.action} (${event.payload.optionId}) by ${event.payload.author}`,
+      );
+    case 'publication-reconciled':
+      return boundedDetail(
+        `publication reconciled (${event.payload.agreement}): ${event.payload.detail}`,
+      );
+    case 'integration-declared':
+      return boundedDetail(
+        `integration declared for ${event.payload.objectiveIds.length} objective(s) in order ${event.payload.declaredOrder.join(', ')}`,
+      );
+    case 'integration-completed':
+      return boundedDetail(
+        `integration completed at ${event.payload.aggregateCommit}${
+          event.payload.deviationReason === null
+            ? ''
+            : ` (order deviation: ${event.payload.deviationReason})`
+        }`,
+      );
+    case 'evidence-manifest':
+      return boundedDetail(
+        `tester capture manifest recorded with ${event.payload.entries.length} entr${
+          event.payload.entries.length === 1 ? 'y' : 'ies'
+        }`,
+      );
   }
 }
 
@@ -232,10 +258,7 @@ function activeAttemptFor(
 function countCorrections(events: ReadonlyArray<RunEvent>): number {
   let corrections = 0;
   for (const event of events) {
-    if (
-      event.type === 'workflow-transition' &&
-      (event.payload.route === 'correction-required' || event.payload.route === 'human-corrected')
-    ) {
+    if (event.type === 'workflow-transition' && event.payload.route === 'correction-required') {
       corrections += 1;
     }
   }

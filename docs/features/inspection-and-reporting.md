@@ -119,6 +119,17 @@ Approval can still be justified by independent evidence permitted by the plan;
 otherwise the affected criterion remains unproven. This is evidence-integrity
 review, not a mandatory screenshot or named-variant gate.
 
+**Implemented:** A settled Tester turn records an `evidence-manifest` naming
+each offered capture's `sha256`, byte length, label, kind, and the accepted-plan
+criteria it supports. A null hash is a name-only claim, `note` is informational
+copy or UX feedback, and identical content under different labels is one
+observation. Inspection lists hashed captures as `verified`, reports duplicated
+content hashes, and handoff `captures` marks each entry `hashed` and
+`duplicated`. A criterion whose only manifest support is name-only,
+informational, or duplicated is reported unproven in `missingCoverage` with
+`coverageComplete: false`; an absent gallery never fails an otherwise proven
+result, and informational notes cannot hide an unmet required criterion.
+
 ## Human-decision report
 
 When state is `human_decision_required`, inspection exposes the exact question
@@ -167,6 +178,7 @@ A diagnostic bundle is a bounded, redacted support snapshot:
 ```powershell
 node dist/cli/index.js diagnostic-bundle `
   --config .\.agent\foundry.config.json `
+  --run-id RUN-EXAMPLE-001 `
   --output .\diagnostic-bundle `
   --json
 ```
@@ -174,6 +186,12 @@ node dist/cli/index.js diagnostic-bundle `
 The output must be new or empty and outside live `.agent` storage. The manifest
 records included entries, byte counts, hashes, redaction counts, and truncation.
 A bundle is not a complete archive and is not automatically safe to publish.
+
+The command is implemented. It reads one run's verified history and retained
+bounded artifacts without appending events or rewriting derived reports, refuses
+a non-empty or in-`.agent` destination before writing anything, and applies the
+configured redaction patterns and artifact bounds before each entry is written
+and hashed.
 
 All JSON CLI output uses the single versioned success/error envelope in
 [protocol contracts](protocol-contracts.md#cli-result-contract). Human-readable
@@ -196,11 +214,16 @@ worktrees, branches, and ownership before each deletion. It may partially
 succeed, so list again after any failure. Never delete `.agent/runs` manually.
 
 Use `cleanup --list` to report eligibility and
-`cleanup --run-id <id> --confirm <id>` to act. Cleanup is explicit, never
-background retention work; normal end-of-run resource disposal remains
-automatic. It preserves the task branch and canonical handoff while disposing
-verified owned sessions, worktrees, worker branches, and eligible bounded
-evidence.
+`cleanup --run-id <id> --confirm <id>` to act. The list names each eligible
+run's workflow state, terminal transition time, configured retention window,
+ownership state, and last recorded cleanup outcome. Confirmation refuses a run
+that is not terminal or is still inside its retention window without writing
+anything, and reports which pre-deletion check failed. Cleanup is explicit,
+never background retention work; normal end-of-run resource disposal remains
+automatic. It preserves the task branch, every verified worker branch, and the
+canonical handoff while disposing verified owned sessions, worktrees, worker
+worktrees, and eligible bounded evidence, and a failed disposal leaves the run
+listed so the operator can retry.
 
 ## When to intervene
 

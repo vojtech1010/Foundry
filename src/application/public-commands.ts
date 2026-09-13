@@ -11,7 +11,10 @@ import { PRODUCT_NAME } from '../domain/workflow.js';
 import { checkProjectProfile } from './profile-check/index.js';
 import { checkReadiness } from './readiness/index.js';
 import { previewRunLocations } from './preview-run-locations/index.js';
+import { createDiagnosticBundle } from './diagnostic-bundle/index.js';
 import { readRunInspect } from './inspect/index.js';
+import { readRetentionCleanupList, runRetentionCleanup } from './retention-cleanup/index.js';
+import type { RetentionCleanupError } from './retention-cleanup/index.js';
 import { advanceRun, RunWorkflowError } from './run-workflow/index.js';
 import {
   InvalidRunRequest,
@@ -48,6 +51,7 @@ import type {
   PreviewLocationsError,
   PreviewLocationsReport,
 } from './preview-run-locations/index.js';
+import type { CleanupListReport, CleanupRunReport } from '../domain/retention-cleanup.js';
 import type {
   ProfileCheckError,
   ProfileCheckReport,
@@ -63,6 +67,10 @@ import type {
 } from './run-identity/index.js';
 import type { RunStatusReport } from './status/index.js';
 import type { RunInspectError, RunInspectReport } from './inspect/index.js';
+import type {
+  CreateDiagnosticBundleError,
+  DiagnosticBundleReport,
+} from './diagnostic-bundle/index.js';
 import type { RepositoryHostIdentity, RepositoryLeaseStore } from './repository-lease/index.js';
 import type { RoleHostCapabilityError, RoleHostLauncher } from './role-conversations/index.js';
 import type { RoleTurnResourceObserver } from './role-permissions/index.js';
@@ -72,6 +80,16 @@ export interface StubCommandReport {
   readonly message: string;
   readonly runId?: string | undefined;
   readonly taskId?: string | undefined;
+}
+
+/**
+ * The authenticated human-decision outcome of a resume, included in the
+ * success report only when no integrity problem was recorded.
+ */
+export interface RunWorkflowDecision {
+  readonly applied: 'accept' | 'correct' | 'abandon' | null;
+  readonly waiting: boolean;
+  readonly draftPrUrl: string | null;
 }
 
 export interface RunWorkflowReport {
@@ -84,6 +102,7 @@ export interface RunWorkflowReport {
   readonly outcome: WorkflowState;
   readonly stages: ReadonlyArray<WorkflowState>;
   readonly testerSkipped: boolean;
+  readonly decision?: RunWorkflowDecision;
 }
 
 export type PublicCommandReport =
@@ -94,7 +113,10 @@ export type PublicCommandReport =
   | RecordedRunIdentityReport
   | RunStatusReport
   | RunInspectReport
-  | RunWorkflowReport;
+  | RunWorkflowReport
+  | CleanupListReport
+  | CleanupRunReport
+  | DiagnosticBundleReport;
 
 export type PublicCommandError =
   | ReadinessError
@@ -106,9 +128,11 @@ export type PublicCommandError =
   | RoleHostCapabilityError
   | RunWorkflowError
   | RunInspectError
+  | CreateDiagnosticBundleError
   | RunHistoryIntegrityError
   | RunHistoryStorageError
-  | RunHistoryConflict;
+  | RunHistoryConflict
+  | RetentionCleanupError;
 
 function stubReport(invocation: PublicCommandInvocation): StubCommandReport {
   const report: StubCommandReport = {
@@ -259,6 +283,14 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
     if (terminalFailure !== null) {
       return yield* terminalFailure;
     }
+    const decision = outcome.decision;
+    if (decision !== null && decision.problem !== null) {
+      return yield* new RunWorkflowError({
+        message: `Run "${runId}" stopped for human recovery: ${decision.problem}`,
+        runId,
+        kind: 'blocked',
+      });
+    }
     const progress = yield* reconcileRunReports({ runDirectory: context.runDirectory, runId });
     if (progress.provenance === null) {
       return yield* new RunStateUnavailable({
@@ -266,7 +298,7 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
         runId,
       });
     }
-    return {
+    const report: RunWorkflowReport = {
       runId,
       taskId: identity.taskId,
       runDirectory: context.runDirectory,
@@ -276,7 +308,18 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       outcome: outcome.workflowState,
       stages: outcome.stages,
       testerSkipped: outcome.testerSkipped,
-    } satisfies RunWorkflowReport;
+    };
+    if (decision === null) {
+      return report;
+    }
+    return {
+      ...report,
+      decision: {
+        applied: decision.applied,
+        waiting: decision.waiting,
+        draftPrUrl: decision.draftPrUrl,
+      },
+    };
   }
   if (invocation.command === 'status') {
     const configArg = invocation.config;
@@ -295,6 +338,21 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       return stubReport(invocation);
     }
     return yield* readRunInspect({ configArg, cwd, runId });
+  }
+  if (invocation.command === 'diagnostic-bundle') {
+    const configArg = invocation.config;
+    const cwd = invocation.cwd;
+    const runId = invocation.runId;
+    const output = invocation.output;
+    if (
+      configArg === undefined ||
+      cwd === undefined ||
+      runId === undefined ||
+      output === undefined
+    ) {
+      return stubReport(invocation);
+    }
+    return yield* createDiagnosticBundle({ configArg, cwd, runId, output });
   }
   if (invocation.command === 'doctor') {
     const configArg = invocation.config;
@@ -320,6 +378,22 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       return stubReport(invocation);
     }
     return yield* checkProjectProfile({ configArg, cwd });
+  }
+  if (invocation.command === 'cleanup') {
+    const configArg = invocation.config;
+    const cwd = invocation.cwd;
+    if (configArg === undefined || cwd === undefined) {
+      return stubReport(invocation);
+    }
+    const runId = invocation.runId;
+    if (runId === undefined) {
+      return yield* readRetentionCleanupList({ configArg, cwd });
+    }
+    const confirm = invocation.confirm;
+    if (confirm === undefined) {
+      return stubReport(invocation);
+    }
+    return yield* runRetentionCleanup({ configArg, cwd, runId, confirm });
   }
   return stubReport(invocation);
 });

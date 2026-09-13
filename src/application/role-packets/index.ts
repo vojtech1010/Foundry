@@ -37,6 +37,7 @@ export interface RolePacketFacts {
   readonly tester: string;
   readonly retriesAndCorrections: string;
   readonly findings: string;
+  readonly captures: string;
 }
 
 export interface AssembleRolePacketOptions {
@@ -78,7 +79,7 @@ function roleInstruction(role: WorkflowRole): string {
     case 'tester':
       return 'Observe the prepared application read-only. Do not create, change, or delete application data. Do not run project checks again.';
     case 'reviewer':
-      return 'Evaluate the current commit, checks, observations, and history. Choose one closed outcome. Do not modify files.';
+      return 'Evaluate the current commit, checks, observations, and history against the capture manifest. Discount mislabeled or duplicated captures, state what you excluded, and require independent evidence for any criterion whose only support is discounted. Choose one closed outcome. Do not modify files.';
   }
 }
 
@@ -103,6 +104,7 @@ export function renderRolePacketFacts(facts: RolePacketFacts): string {
     `- Runtime/Tester: ${facts.tester}`,
     `- Retries and corrections: ${facts.retriesAndCorrections}`,
     `- Findings: ${facts.findings}`,
+    `- Captures: ${facts.captures}`,
     '',
   ].join('\n');
 }
@@ -288,6 +290,48 @@ function findingsFact(role: WorkflowRole, history: RunHistoryDerivedState): stri
   return `${listed}${historySuffix}`;
 }
 
+/**
+ * Renders the latest settled Tester capture manifest for Reviewer. Hashed and
+ * name-only claims stay distinguishable, and identical content under different
+ * labels is named as one observation so a caption can never inflate support.
+ */
+function capturesFact(role: WorkflowRole, history: RunHistoryDerivedState): string {
+  if (role !== 'reviewer') {
+    return 'Tester capture manifests are surfaced to Reviewer only';
+  }
+  const manifests = history.evidenceManifests ?? [];
+  const latest = manifests[manifests.length - 1];
+  if (latest === undefined) {
+    return 'no settled Tester capture manifest is recorded; an absent gallery is not proof that nothing was observed';
+  }
+  const hashed = latest.entries.filter((entry) => entry.sha256 !== null);
+  const nameOnlyLabels = latest.entries
+    .filter((entry) => entry.sha256 === null)
+    .map((entry) => entry.label);
+  const nameOnly = nameOnlyLabels.length;
+  const labelsByHash = new Map<string, Array<string>>();
+  for (const entry of hashed) {
+    const hash = entry.sha256;
+    if (hash === null) {
+      continue;
+    }
+    const labels = labelsByHash.get(hash) ?? [];
+    if (!labels.includes(entry.label)) {
+      labels.push(entry.label);
+    }
+    labelsByHash.set(hash, labels);
+  }
+  const duplicates = [...labelsByHash.entries()]
+    .filter(([, labels]) => labels.length > 1)
+    .map(([hash, labels]) => `${hash} (${labels.join(' | ')})`);
+  const duplicateText =
+    duplicates.length === 0
+      ? 'no duplicated content'
+      : `duplicated content: ${duplicates.join('; ')}`;
+  const nameOnlyText = nameOnly === 0 ? '' : ` (name-only: ${nameOnlyLabels.join(' | ')})`;
+  return `${latest.entries.length} capture(s): ${hashed.length} hashed, ${nameOnly} name-only${nameOnlyText}; ${duplicateText}. Identical content under different labels is one observation.`;
+}
+
 export function buildRolePacket(options: BuildRolePacketOptions): RolePacketAssembly {
   const history = options.history;
   const plan = history.acceptedPlan;
@@ -309,6 +353,7 @@ export function buildRolePacket(options: BuildRolePacketOptions): RolePacketAsse
             .map((attempt) => `${attempt.role} ${attempt.state}: ${attempt.reason}`)
             .join('; '),
     findings: findingsFact(options.role, history),
+    captures: capturesFact(options.role, history),
   };
   return assembleRolePacket({
     role: options.role,

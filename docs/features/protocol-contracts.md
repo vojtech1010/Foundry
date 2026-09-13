@@ -337,9 +337,12 @@ End-of-run disposal of owned processes, sessions, and worktrees is automatic.
 Retention cleanup is never automatic. `retentionDays` determines eligibility
 from the terminal `completed`, `completed_no_change`, `failed`, or `abandoned`
 transition time shown by `cleanup --list`; nonterminal runs are never eligible.
-Retention cleanup may remove verified disposable resources and bounded
-artifacts, but preserves the task branch and canonical handoff unless a future
-explicit policy says otherwise.
+`cleanup --run-id <id> --confirm <id>` refuses a nonterminal run, a run still
+inside its retention window, or a run whose pre-deletion state, history,
+workers, workspaces, branches, or ownership check fails, naming the failed
+check and writing nothing. Retention cleanup may remove verified disposable
+resources and bounded artifacts, but preserves the task branch and canonical
+handoff unless a future explicit policy says otherwise.
 
 ## Linux and Windows parity
 

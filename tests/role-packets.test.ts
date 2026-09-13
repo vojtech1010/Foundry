@@ -21,6 +21,7 @@ const FACTS: RolePacketFacts = {
   tester: 'required',
   retriesAndCorrections: 'none',
   findings: 'none',
+  captures: 'no settled Tester capture manifest is recorded',
 };
 
 function session(

@@ -2,11 +2,14 @@ import { createHash } from 'node:crypto';
 import { Schema } from 'effect';
 
 import {
+  DecisionId,
   DecisionOpenedPayloadSchema,
+  DecisionOptionId,
   PUBLICATION_CHECKPOINT_STAGES,
   PublicationCheckpointPayloadSchema,
 } from './decision-publication.js';
 import { FindingRecordSchema } from './findings.js';
+import { REVIEWER_DECISION_ACTIONS } from './reviewer-outcomes.js';
 import { GuidanceSnapshotFileSchema } from './guidance.js';
 import {
   ROLE_HOST_DISPOSITIONS,
@@ -87,6 +90,11 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'objective-worker',
   'evidence-invalidated',
   'evidence-bound',
+  'decision-applied',
+  'publication-reconciled',
+  'integration-declared',
+  'integration-completed',
+  'evidence-manifest',
 ] as const;
 
 export type RunHistoryEventType = (typeof RUN_HISTORY_EVENT_TYPES)[number];
@@ -439,6 +447,111 @@ export const EvidenceBoundPayloadSchema = Schema.Struct({
 
 export type EvidenceBoundPayload = (typeof EvidenceBoundPayloadSchema)['Type'];
 
+/**
+ * The permissions that authenticate a decision command. A maintain or admin
+ * repository permission is required, and the observed value is retained so the
+ * applied choice stays auditable even if permission changes later.
+ */
+export const DECISION_PERMISSION_SNAPSHOTS = ['admin', 'maintain'] as const;
+
+export type DecisionPermissionSnapshot = (typeof DECISION_PERMISSION_SNAPSHOTS)[number];
+
+/**
+ * Durable evidence that one exact authenticated command selected a labelled
+ * option. The comment body is never stored; its hash plus the comment id,
+ * author, and permission snapshot make later edits or deletion unable to undo
+ * the recorded decision.
+ */
+export const DecisionAppliedPayloadSchema = Schema.Struct({
+  decisionId: DecisionId,
+  optionId: DecisionOptionId,
+  action: Schema.Literals(REVIEWER_DECISION_ACTIONS),
+  commentId: Schema.NonEmptyString,
+  author: Schema.NonEmptyString,
+  bodyHash: Sha256Hex,
+  permissionSnapshot: Schema.Literals(DECISION_PERMISSION_SNAPSHOTS),
+});
+
+export type DecisionAppliedPayload = (typeof DecisionAppliedPayloadSchema)['Type'];
+
+/**
+ * Durable agreement that a partially completed decision publication has been
+ * reconciled in place. `agreement` names the strongest journal fact the resume
+ * reconciled from, and a `publication-reconciled` event is appended only after
+ * the exact draft URL is durable.
+ */
+export const PUBLICATION_RECONCILIATION_AGREEMENTS = ['push', 'pull-request', 'draft-url'] as const;
+
+export type PublicationReconciliationAgreement =
+  (typeof PUBLICATION_RECONCILIATION_AGREEMENTS)[number];
+
+export const PublicationReconciledPayloadSchema = Schema.Struct({
+  agreement: Schema.Literals(PUBLICATION_RECONCILIATION_AGREEMENTS),
+  detail: Schema.String,
+});
+
+export type PublicationReconciledPayload = (typeof PublicationReconciledPayloadSchema)['Type'];
+
+/**
+ * The accepted integration plan recorded before Lead Coder starts: the complete
+ * objective set, the Git-derived commit accepted for each objective, and the
+ * declared application order. Arrival order cannot silently redefine the plan
+ * because the declared order is fixed here, not inferred from worker settling.
+ */
+export const IntegrationDeclaredPayloadSchema = Schema.Struct({
+  objectiveIds: Schema.Array(Schema.NonEmptyString),
+  commits: Schema.Array(GitCommitId),
+  declaredOrder: Schema.Array(Schema.NonEmptyString),
+});
+
+export type IntegrationDeclaredPayload = (typeof IntegrationDeclaredPayloadSchema)['Type'];
+
+/**
+ * The verified outcome of Lead Coder integration: the single aggregate commit
+ * that contains every accepted contribution, the actual Git contribution
+ * application order, and the reason when that order deviates from the declared
+ * order. The aggregate commit is the only candidate result.
+ */
+export const IntegrationCompletedPayloadSchema = Schema.Struct({
+  aggregateCommit: GitCommitId,
+  actualOrder: Schema.Array(Schema.NonEmptyString),
+  deviationReason: Schema.NullOr(Schema.NonEmptyString),
+});
+
+export type IntegrationCompletedPayload = (typeof IntegrationCompletedPayloadSchema)['Type'];
+
+export const EVIDENCE_MANIFEST_KINDS = ['capture', 'log', 'note'] as const;
+
+export type EvidenceManifestKind = (typeof EVIDENCE_MANIFEST_KINDS)[number];
+
+/**
+ * One bounded capture a settled Tester turn offers as observation evidence for
+ * the current result head. A non-null `sha256` proves content; a null hash is a
+ * name-only claim. `criterionIds` links the capture to the accepted-plan
+ * criteria it is offered to support, and `note` marks pre-existing
+ * informational copy/UX observations that can never prove a criterion alone.
+ */
+export const EvidenceManifestEntrySchema = Schema.Struct({
+  sha256: Schema.NullOr(Sha256Hex),
+  byteLength: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  label: Schema.NonEmptyString,
+  kind: Schema.Literals(EVIDENCE_MANIFEST_KINDS),
+  criterionIds: Schema.Array(Schema.NonEmptyString),
+});
+
+export type EvidenceManifestEntry = (typeof EvidenceManifestEntrySchema)['Type'];
+
+/**
+ * The capture inventory for one result head. Two entries with the same sha256
+ * are one observation regardless of their labels; the manifest records what was
+ * captured, never whether a criterion passed.
+ */
+export const EvidenceManifestPayloadSchema = Schema.Struct({
+  entries: Schema.Array(EvidenceManifestEntrySchema),
+});
+
+export type EvidenceManifestPayload = (typeof EvidenceManifestPayloadSchema)['Type'];
+
 const RunEventEnvelopeFields = {
   schemaVersion: Schema.Literal(RUN_HISTORY_SCHEMA_VERSION),
   runId: Identifier,
@@ -617,6 +730,36 @@ export const EvidenceBoundEventSchema = Schema.Struct({
   payload: EvidenceBoundPayloadSchema,
 });
 
+export const DecisionAppliedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('decision-applied'),
+  payload: DecisionAppliedPayloadSchema,
+});
+
+export const PublicationReconciledEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('publication-reconciled'),
+  payload: PublicationReconciledPayloadSchema,
+});
+
+export const IntegrationDeclaredEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('integration-declared'),
+  payload: IntegrationDeclaredPayloadSchema,
+});
+
+export const IntegrationCompletedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('integration-completed'),
+  payload: IntegrationCompletedPayloadSchema,
+});
+
+export const EvidenceManifestEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('evidence-manifest'),
+  payload: EvidenceManifestPayloadSchema,
+});
+
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
@@ -646,6 +789,11 @@ export const RunEventSchema = Schema.Union([
   ObjectiveWorkerEventSchema,
   EvidenceInvalidatedEventSchema,
   EvidenceBoundEventSchema,
+  DecisionAppliedEventSchema,
+  PublicationReconciledEventSchema,
+  IntegrationDeclaredEventSchema,
+  IntegrationCompletedEventSchema,
+  EvidenceManifestEventSchema,
 ]);
 
 export type RunEvent = (typeof RunEventSchema)['Type'];
@@ -711,7 +859,21 @@ export type RunEventDraft =
       readonly type: 'evidence-invalidated';
       readonly payload: EvidenceInvalidatedPayload;
     }
-  | { readonly type: 'evidence-bound'; readonly payload: EvidenceBoundPayload };
+  | { readonly type: 'evidence-bound'; readonly payload: EvidenceBoundPayload }
+  | { readonly type: 'decision-applied'; readonly payload: DecisionAppliedPayload }
+  | {
+      readonly type: 'publication-reconciled';
+      readonly payload: PublicationReconciledPayload;
+    }
+  | {
+      readonly type: 'integration-declared';
+      readonly payload: IntegrationDeclaredPayload;
+    }
+  | {
+      readonly type: 'integration-completed';
+      readonly payload: IntegrationCompletedPayload;
+    }
+  | { readonly type: 'evidence-manifest'; readonly payload: EvidenceManifestPayload };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
 
@@ -744,6 +906,10 @@ export interface RunHistoryDerivedState {
   readonly objectiveWorkers?: ReadonlyArray<ObjectiveWorkerPayload>;
   readonly evidenceInvalidations: ReadonlyArray<EvidenceInvalidatedPayload>;
   readonly evidenceBindings: ReadonlyArray<EvidenceBoundPayload>;
+  readonly decisionApplieds: ReadonlyArray<DecisionAppliedPayload>;
+  readonly integrationDeclared?: IntegrationDeclaredPayload | null;
+  readonly integrationCompleted?: IntegrationCompletedPayload | null;
+  readonly evidenceManifests: ReadonlyArray<EvidenceManifestPayload>;
 }
 
 export type RunHistoryVerification =
@@ -1343,6 +1509,88 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'decision-applied':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          action: event.payload.action,
+          author: event.payload.author,
+          bodyHash: event.payload.bodyHash,
+          commentId: event.payload.commentId,
+          decisionId: event.payload.decisionId,
+          optionId: event.payload.optionId,
+          permissionSnapshot: event.payload.permissionSnapshot,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'publication-reconciled':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          agreement: event.payload.agreement,
+          detail: event.payload.detail,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'integration-declared':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          commits: event.payload.commits,
+          declaredOrder: event.payload.declaredOrder,
+          objectiveIds: event.payload.objectiveIds,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'integration-completed':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          actualOrder: event.payload.actualOrder,
+          aggregateCommit: event.payload.aggregateCommit,
+          deviationReason: event.payload.deviationReason,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'evidence-manifest':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          entries: event.payload.entries.map((entry) => ({
+            byteLength: entry.byteLength,
+            criterionIds: entry.criterionIds,
+            kind: entry.kind,
+            label: entry.label,
+            sha256: entry.sha256,
+          })),
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
   }
 }
 
@@ -1428,6 +1676,16 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'evidence-invalidated', payload: event.payload };
     case 'evidence-bound':
       return { ...envelope, type: 'evidence-bound', payload: event.payload };
+    case 'decision-applied':
+      return { ...envelope, type: 'decision-applied', payload: event.payload };
+    case 'publication-reconciled':
+      return { ...envelope, type: 'publication-reconciled', payload: event.payload };
+    case 'integration-declared':
+      return { ...envelope, type: 'integration-declared', payload: event.payload };
+    case 'integration-completed':
+      return { ...envelope, type: 'integration-completed', payload: event.payload };
+    case 'evidence-manifest':
+      return { ...envelope, type: 'evidence-manifest', payload: event.payload };
   }
 }
 
@@ -1536,12 +1794,18 @@ export function verifyRunHistoryEvents(
   const objectiveWorkers: Array<ObjectiveWorkerPayload> = [];
   const evidenceInvalidations: Array<EvidenceInvalidatedPayload> = [];
   const evidenceBindings: Array<EvidenceBoundPayload> = [];
+  const decisionApplieds: Array<DecisionAppliedPayload> = [];
+  const openedDecisionIds = new Set<string>();
+  let integrationDeclared: IntegrationDeclaredPayload | null = null;
+  let integrationCompleted: IntegrationCompletedPayload | null = null;
+  const evidenceManifests: Array<EvidenceManifestPayload> = [];
   const retiredRevisions = new Set<number>();
   const findings: Array<FindingRecord> = [];
   let acceptedPlan: PlanAcceptedPayload | null = null;
   let implementation: ImplementationAcceptedPayload | null = null;
   let previousHash: string | null = null;
   let decisionOpened: DecisionOpenedPayload | null = null;
+  let decisionApplied: DecisionAppliedPayload | null = null;
   let lastPublicationCheckpoint: PublicationCheckpointStage | null = null;
 
   const currentResultCommit = (): string | null =>
@@ -2343,9 +2607,6 @@ export function verifyRunHistoryEvents(
             problem: `${label} records an opened decision outside the publishing stage`,
           };
         }
-        if (decisionOpened !== null) {
-          return { ok: false, problem: `${label} opens a second decision for this run` };
-        }
         const resultCommit = currentResultCommit();
         if (resultCommit === null || event.payload.resultCommit !== resultCommit) {
           return {
@@ -2359,7 +2620,19 @@ export function verifyRunHistoryEvents(
             problem: `${label} records a decision with fewer than two labelled options`,
           };
         }
+        if (openedDecisionIds.has(event.payload.decisionId)) {
+          return { ok: false, problem: `${label} re-opens a decision id for this run` };
+        }
+        if (decisionOpened !== null && decisionOpened.resultCommit === event.payload.resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} opens a second decision for the same result head`,
+          };
+        }
+        openedDecisionIds.add(event.payload.decisionId);
         decisionOpened = event.payload;
+        decisionApplied = null;
+        lastPublicationCheckpoint = null;
         break;
       }
       case 'publication-checkpoint': {
@@ -2527,6 +2800,181 @@ export function verifyRunHistoryEvents(
         evidenceBindings.push(event.payload);
         break;
       }
+      case 'decision-applied': {
+        if (state !== 'human_decision_required') {
+          return {
+            ok: false,
+            problem: `${label} applies a human decision outside the waiting state`,
+          };
+        }
+        if (decisionOpened === null || event.payload.decisionId !== decisionOpened.decisionId) {
+          return {
+            ok: false,
+            problem: `${label} applies a decision that is not the open decision`,
+          };
+        }
+        const option = decisionOpened.options.find(
+          (candidate) => candidate.id === event.payload.optionId,
+        );
+        if (option === undefined) {
+          return { ok: false, problem: `${label} applies an unknown decision option` };
+        }
+        if (option.action !== event.payload.action) {
+          return {
+            ok: false,
+            problem: `${label} records an action that differs from the labelled decision option`,
+          };
+        }
+        if (decisionApplied !== null) {
+          return {
+            ok: false,
+            problem: `${label} applies a second decision to the same opened decision`,
+          };
+        }
+        decisionApplied = event.payload;
+        decisionApplieds.push(event.payload);
+        break;
+      }
+      case 'publication-reconciled': {
+        if (state !== 'publishing') {
+          return {
+            ok: false,
+            problem: `${label} records a reconciled publication outside the publishing stage`,
+          };
+        }
+        if (lastPublicationCheckpoint !== 'url-recorded') {
+          return {
+            ok: false,
+            problem: `${label} records a reconciled publication before the exact draft URL is durable`,
+          };
+        }
+        if (decisionOpened === null) {
+          return {
+            ok: false,
+            problem: `${label} records a reconciled publication for an unopened decision`,
+          };
+        }
+        break;
+      }
+      case 'integration-declared': {
+        if (state !== 'coding' && state !== 'correcting') {
+          return {
+            ok: false,
+            problem: `${label} records an integration declaration outside the coding stage`,
+          };
+        }
+        if (integrationDeclared !== null) {
+          return { ok: false, problem: `${label} records a second integration declaration` };
+        }
+        const declared = event.payload;
+        if (declared.objectiveIds.length < 2) {
+          return {
+            ok: false,
+            problem: `${label} declares integration for fewer than two objectives`,
+          };
+        }
+        if (
+          declared.commits.length !== declared.objectiveIds.length ||
+          declared.declaredOrder.length !== declared.objectiveIds.length
+        ) {
+          return {
+            ok: false,
+            problem: `${label} declares an integration set with mismatched lengths`,
+          };
+        }
+        const declaredObjectives = new Set(declared.objectiveIds);
+        if (declaredObjectives.size !== declared.objectiveIds.length) {
+          return { ok: false, problem: `${label} declares duplicate objective ids` };
+        }
+        if (
+          new Set(declared.declaredOrder).size !== declared.declaredOrder.length ||
+          !declared.declaredOrder.every((objectiveId) => declaredObjectives.has(objectiveId))
+        ) {
+          return {
+            ok: false,
+            problem: `${label} declares an integration order that is not a permutation of the objective set`,
+          };
+        }
+        for (const [index, objectiveId] of declared.objectiveIds.entries()) {
+          const commit = declared.commits[index];
+          const settled = objectiveWorkers.some(
+            (worker) =>
+              worker.objectiveId === objectiveId &&
+              worker.phase === 'settled' &&
+              worker.commit !== null &&
+              worker.commit === commit,
+          );
+          if (!settled) {
+            return {
+              ok: false,
+              problem: `${label} declares objective "${objectiveId}" without a matching settled worker commit`,
+            };
+          }
+        }
+        integrationDeclared = declared;
+        break;
+      }
+      case 'integration-completed': {
+        if (integrationDeclared === null) {
+          return {
+            ok: false,
+            problem: `${label} completes integration without a declaration`,
+          };
+        }
+        if (integrationCompleted !== null) {
+          return { ok: false, problem: `${label} records a second integration completion` };
+        }
+        if (state !== 'verifying') {
+          return {
+            ok: false,
+            problem: `${label} completes integration outside the verifying stage`,
+          };
+        }
+        const completion = event.payload;
+        const declaredObjectives = new Set(integrationDeclared.objectiveIds);
+        if (
+          completion.actualOrder.length !== integrationDeclared.objectiveIds.length ||
+          new Set(completion.actualOrder).size !== completion.actualOrder.length ||
+          !completion.actualOrder.every((objectiveId) => declaredObjectives.has(objectiveId))
+        ) {
+          return {
+            ok: false,
+            problem: `${label} records an actual order that is not a permutation of the declared objective set`,
+          };
+        }
+        const resultCommit = currentResultCommit();
+        if (resultCommit === null || completion.aggregateCommit !== resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} completes integration for a commit other than the current result head`,
+          };
+        }
+        integrationCompleted = completion;
+        break;
+      }
+      case 'evidence-manifest': {
+        if (state !== 'testing') {
+          return {
+            ok: false,
+            problem: `${label} records a Tester evidence manifest outside the testing stage`,
+          };
+        }
+        if (acceptedPlan !== null) {
+          const knownCriterionIds = new Set(acceptedPlan.criteria.map((criterion) => criterion.id));
+          for (const entry of event.payload.entries) {
+            for (const criterionId of entry.criterionIds) {
+              if (!knownCriterionIds.has(criterionId)) {
+                return {
+                  ok: false,
+                  problem: `${label} links a Tester evidence manifest entry to the unknown criterion "${criterionId}"`,
+                };
+              }
+            }
+          }
+        }
+        evidenceManifests.push(event.payload);
+        break;
+      }
     }
     previousHash = event.eventHash;
   }
@@ -2570,6 +3018,10 @@ export function verifyRunHistoryEvents(
       objectiveWorkers,
       evidenceInvalidations,
       evidenceBindings,
+      decisionApplieds,
+      integrationDeclared,
+      integrationCompleted,
+      evidenceManifests,
     },
   };
 }

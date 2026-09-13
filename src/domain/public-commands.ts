@@ -75,7 +75,9 @@ export interface PublicCommandInvocation {
   readonly taskId?: string | undefined;
   readonly config?: string | undefined;
   readonly request?: string | undefined;
+  readonly output?: string | undefined;
   readonly cwd?: string | undefined;
   readonly abandon?: boolean | undefined;
   readonly reason?: string | undefined;
+  readonly confirm?: string | undefined;
 }
