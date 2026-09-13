@@ -3,6 +3,7 @@ import { Effect } from 'effect';
 import type { Schema } from 'effect';
 
 import { decodeReviewerTurnControl } from '../../domain/reviewer-outcomes.js';
+import { recordReviewerCorrectionFinding } from '../findings/index.js';
 import { transitionWorkflow } from '../workflow-transitions/index.js';
 
 import type { RunGit, RunWorkspaceBlocked } from '../git-provisioning/index.js';
@@ -42,6 +43,7 @@ export interface HandleReviewerTurnOptions {
   readonly runId: string;
   readonly control: Schema.Json;
   readonly assessment: ReviewerEvidenceAssessment;
+  readonly narrative: string;
   readonly correctionReason: string;
   readonly blockedReason: string;
 }
@@ -148,6 +150,14 @@ export const handleReviewerTurn = Effect.fn('handleReviewerTurn')(function* (
           problem:
             'changes_requested is invalid: no correction round remains. Choose human_decision_required or blocked.',
         };
+      }
+      if (assessment.reviewableCommit !== null) {
+        yield* recordReviewerCorrectionFinding({
+          runDirectory: options.runDirectory,
+          runId: options.runId,
+          commit: assessment.reviewableCommit,
+          narrative: options.narrative,
+        });
       }
       yield* transitionWorkflow({
         runDirectory: options.runDirectory,

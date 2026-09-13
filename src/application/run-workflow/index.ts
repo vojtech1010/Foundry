@@ -276,9 +276,15 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     return yield* startGovernedRoleTurn(governedTurn).pipe(Effect.provide(hostLayer));
   });
 
-  const recordControlRepair = Effect.fn('advanceRun.recordControlRepair')(function* (
+  /**
+   * A settled turn whose control envelope is still invalid has already spent
+   * its bounded same-session control repair inside the conversation layer.
+   * Foundry maps the remaining failure onto the ordinary role retry budget so a
+   * repair is never repeated in a fresh session; when no retry remains the run
+   * blocks instead of looping.
+   */
+  const recordControlRetry = Effect.fn('advanceRun.recordControlRetry')(function* (
     role: WorkflowRole,
-    state: WorkflowState,
     problem: string,
   ) {
     const history = yield* readVerifiedRunHistory({
@@ -286,10 +292,10 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       runId,
       createIfMissing: false,
     });
-    const repairs = repairsUsed(history.derived, role, state);
-    if (repairs >= configuration.limits.maxControlRepairsPerAttempt) {
+    const retries = retriesUsed(history.derived, role);
+    if (retries >= configuration.retryBudgets[role]) {
       return yield* new RunWorkflowError({
-        message: `The ${role} control envelope for run "${runId}" remained invalid and no control repair remains: ${problem}`,
+        message: `The ${role} control envelope for run "${runId}" remained invalid after same-session repair and no ${role} retry remains: ${problem}`,
         runId,
         kind: 'blocked',
       });
@@ -298,10 +304,10 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       runDirectory,
       runId,
       attempt: {
-        kind: 'repair',
+        kind: 'retry',
         role,
-        reason: `${role} control envelope was invalid: ${problem}`,
-        repairsRemaining: configuration.limits.maxControlRepairsPerAttempt - repairs,
+        reason: `${role} control envelope remained invalid after same-session repair: ${problem}`,
+        retriesRemaining: configuration.retryBudgets[role] - retries,
       },
     });
   });
@@ -316,6 +322,10 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     const prompt = yield* promptFor('architect', history);
     const attempt = countSessions(history.derived, 'architect') + 1;
     const settled = yield* performRoleTurn('architect', attempt, prompt, null);
+    if (!settled.controlValid) {
+      yield* recordControlRetry('architect', settled.controlProblem ?? 'invalid control envelope');
+      return;
+    }
     const admission = yield* admitArchitectPlan({
       runDirectory,
       runId,
@@ -344,10 +354,13 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
   });
 
   const runCoder = Effect.fn('advanceRun.runCoder')(function* (history: VerifiedRunHistory) {
-    const state = history.derived.state ?? 'coding';
     const prompt = yield* promptFor('coder', history);
     const attempt = countSessions(history.derived, 'coder') + 1;
     const settled = yield* performRoleTurn('coder', attempt, prompt, null);
+    if (!settled.controlValid) {
+      yield* recordControlRetry('coder', settled.controlProblem ?? 'invalid control envelope');
+      return;
+    }
     const handled = yield* handleCoderTurn({
       runDirectory,
       runId,
@@ -368,7 +381,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       return;
     }
     if (handled.failure instanceof CoderTurnRejected) {
-      yield* recordControlRepair('coder', state, handled.failure.problem);
+      yield* recordControlRetry('coder', handled.failure.problem);
       return;
     }
     return yield* handled.failure;
@@ -487,6 +500,10 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     const attempt = countSessions(history.derived, 'tester') + 1;
     const baseUrl = held.baseUrl;
     const settled = yield* performRoleTurn('tester', attempt, prompt, baseUrl);
+    if (!settled.controlValid) {
+      yield* recordControlRetry('tester', settled.controlProblem ?? 'invalid control envelope');
+      return;
+    }
     const outcome = testerObservationOutcome(settled.control);
     const retriesRemaining = Math.max(
       0,
@@ -504,7 +521,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       retryReason: 'Tester requested another independent observation of the same commit.',
     });
     if (disposition.kind === 'control-invalid') {
-      yield* recordControlRepair('tester', 'testing', disposition.problem);
+      yield* recordControlRetry('tester', disposition.problem);
     }
   });
 
@@ -550,16 +567,21 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     const prompt = yield* promptFor('reviewer', history);
     const attempt = countSessions(history.derived, 'reviewer') + 1;
     const settled = yield* performRoleTurn('reviewer', attempt, prompt, null);
+    if (!settled.controlValid) {
+      yield* recordControlRetry('reviewer', settled.controlProblem ?? 'invalid control envelope');
+      return;
+    }
     const disposition = yield* handleReviewerTurn({
       runDirectory,
       runId,
       control: settled.control,
       assessment,
+      narrative: settled.narrative,
       correctionReason: 'Reviewer requested a bounded correction.',
       blockedReason: 'Reviewer reported an operational or integrity problem.',
     });
     if (disposition.kind === 'control-invalid') {
-      yield* recordControlRepair('reviewer', 'reviewing', disposition.problem);
+      yield* recordControlRetry('reviewer', disposition.problem);
     }
   });
 

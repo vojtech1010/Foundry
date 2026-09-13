@@ -252,6 +252,27 @@ function runRetestFlow(fixture: Fixture, runId: string) {
   ]).pipe(Effect.provide(withRoleHost(roleHost)));
 }
 
+function runInvalidArchitectControl(fixture: Fixture, runId: string) {
+  const roleHost = scriptedRoleHostLauncher({
+    architect: {
+      narrative: 'The plan control cannot be decoded.',
+      control: { schemaVersion: 1, outcome: 'bogus' },
+    },
+  });
+  return runCli([
+    'run',
+    '--config',
+    fixture.configPath,
+    '--request',
+    fixture.requestPath,
+    '--task-id',
+    'TASK-LIFECYCLE',
+    '--run-id',
+    runId,
+    '--json',
+  ]).pipe(Effect.provide(withRoleHost(roleHost)));
+}
+
 function readHistory(fixture: Fixture, runId: string) {
   return readVerifiedRunHistory({
     runDirectory: join(fixture.target, '.agent', 'runs', runId),
@@ -329,6 +350,37 @@ describe('run owns the first pass through review', () => {
           (report) => report.result === 'passed',
         );
         expect(noChangeVerification?.commit).toBe(sourceCommit);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.live('maps an exhausted same-session control repair to a bounded role retry', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        const result = yield* runInvalidArchitectControl(fixture, 'RUN-CONTROL-RETRY');
+        expect(result.exitCode).toBe(1);
+        const envelope = Schema.decodeUnknownSync(ReportEnvelopeJson)(result.stdout);
+        expect(envelope.ok).toBe(false);
+        if (envelope.ok) {
+          throw new Error(`Expected a blocked failure envelope: ${result.stdout}`);
+        }
+        expect(envelope.error.kind).toBe('blocked');
+
+        const history = yield* readHistory(fixture, 'RUN-CONTROL-RETRY');
+        expect(history.derived.state).toBe('blocked');
+        expect(history.derived.roleControlRepairs.length).toBeGreaterThanOrEqual(1);
+        expect(
+          history.derived.attempts.filter(
+            (attempt) => attempt.role === 'architect' && attempt.kind === 'retry',
+          ),
+        ).toHaveLength(1);
+        expect(history.derived.attempts.some((attempt) => attempt.kind === 'repair')).toBe(false);
+        expect(
+          history.derived.roleSessions.filter((session) => session.role === 'architect'),
+        ).toHaveLength(2);
       } finally {
         fixture.cleanup();
       }

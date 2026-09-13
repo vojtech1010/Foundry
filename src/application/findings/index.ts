@@ -1,4 +1,5 @@
 import { Effect, Schema } from 'effect';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
 import {
@@ -6,8 +7,9 @@ import {
   FindingCompanionDocumentSchema,
   ReviewResultDocumentSchema,
   isBlockingSeverity,
+  renderFindingId,
 } from '../../domain/findings.js';
-import { appendRunEvent } from '../run-history/index.js';
+import { appendRunEvent, readVerifiedRunHistory } from '../run-history/index.js';
 
 import type { FindingRecord, ReviewResultEntry } from '../../domain/findings.js';
 import type {
@@ -162,6 +164,61 @@ export const recordFinding = Effect.fn('findings.recordFinding')(function* (
     build: () => Effect.succeed({ type: 'finding-recorded', payload: options.finding } as const),
   });
   return options.finding;
+});
+
+function sha256Hex(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+export interface RecordReviewerCorrectionFindingOptions {
+  readonly runDirectory: string;
+  readonly runId: string;
+  readonly commit: string;
+  readonly narrative: string;
+}
+
+/**
+ * Persists one durable blocking correction brief for a Reviewer
+ * `changes_requested` turn. The complete, unmodified Reviewer Markdown is the
+ * finding detail and evidence records only Foundry-derived provenance. The
+ * brief is appended before the correction transition so Coder can never begin
+ * work the verified history does not contain. Re-recording the same brief for
+ * the same commit is idempotent.
+ */
+export const recordReviewerCorrectionFinding = Effect.fn(
+  'findings.recordReviewerCorrectionFinding',
+)(function* (
+  options: RecordReviewerCorrectionFindingOptions,
+): Effect.fn.Return<FindingRecord, RunHistoryError, RunHistoryStorage> {
+  const history = yield* readVerifiedRunHistory({
+    runDirectory: options.runDirectory,
+    runId: options.runId,
+    createIfMissing: false,
+  });
+  const existingForCommit = history.derived.findings.filter(
+    (finding) => finding.commit === options.commit,
+  );
+  const candidate = reviewerCorrectionFinding({
+    id: renderFindingId(existingForCommit.length + 1),
+    commit: options.commit,
+    narrative: options.narrative,
+    evidence: [
+      `reviewer changes_requested for commit ${options.commit}`,
+      `reviewer narrative sha256:${sha256Hex(options.narrative)}`,
+    ],
+  });
+  const already = history.derived.findings.find(
+    (finding) => findingSignature(finding) === findingSignature(candidate),
+  );
+  if (already !== undefined) {
+    return already;
+  }
+  yield* recordFinding({
+    runDirectory: options.runDirectory,
+    runId: options.runId,
+    finding: candidate,
+  });
+  return candidate;
 });
 
 export function currentHeadFindings(

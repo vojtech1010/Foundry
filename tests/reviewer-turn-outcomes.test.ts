@@ -190,12 +190,14 @@ function handle(
   runDirectory: string,
   control: Schema.Json,
   overrides: Partial<ReviewerEvidenceAssessment> = {},
+  narrative = '# Reviewer findings\n\nClose every medium finding.\n',
 ) {
   return handleReviewerTurn({
     runDirectory,
     runId: RUN_ID,
     control,
     assessment: assessment(overrides),
+    narrative,
     correctionReason: 'correction requested',
     blockedReason: 'reviewer reported a problem',
   }).pipe(Effect.provide(Live));
@@ -442,6 +444,36 @@ describe('Reviewer closed outcomes', () => {
           { correctionRoundsRemaining: 0 },
         );
         expect(noBudget.kind).toBe('control-invalid');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('records a durable blocking correction brief before entering correcting', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture('changes-finding');
+      const narrative = '# Reviewer findings\n\n1. Handle the empty state.\n';
+      try {
+        yield* seedReviewing(fixture.runDirectory, { runtimeValidationRequired: false });
+        const disposition = yield* handle(
+          fixture.runDirectory,
+          { schemaVersion: 1, outcome: 'changes_requested' },
+          {},
+          narrative,
+        );
+        expect(disposition).toEqual({ kind: 'changes-requested' });
+        const after = yield* history(fixture.runDirectory);
+        expect(after.derived.state).toBe('correcting');
+        expect(after.derived.findings).toHaveLength(1);
+        const finding = after.derived.findings[0]!;
+        expect(finding.source).toBe('reviewer-changes-requested');
+        expect(finding.blocking).toBe(true);
+        expect(finding.commit).toBe(IMPLEMENTED_COMMIT);
+        expect(finding.detail).toBe(narrative);
+        expect(finding.evidence).toContain(
+          `reviewer changes_requested for commit ${IMPLEMENTED_COMMIT}`,
+        );
       } finally {
         fixture.cleanup();
       }
