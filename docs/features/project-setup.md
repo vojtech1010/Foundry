@@ -11,11 +11,12 @@ branches, execution worktrees, and ignored `.agent` run data.
 - a reachable authoritative source remote and branch;
 - project-owned deterministic verification commands;
 - one configured live role harness for real runs; and
-- GitHub credentials only if Reviewer decision escalation may publish a draft
-  PR.
+- a `GITHUB_TOKEN` environment credential only if Reviewer decision escalation
+  may publish a draft PR.
 
 Use a disposable repository first. Keep `.agent` ignored and restrict credentials
-to the target repository.
+to the target repository. `GITHUB_TOKEN` is read from the process environment
+only; it is never written to configuration, run storage, or logs.
 
 “Clean” means no staged or unstaged tracked changes, no untracked files outside
 ignored paths, and no merge, rebase, cherry-pick, revert, or bisect in progress.
@@ -259,5 +260,36 @@ that:
 - the credential is limited to the configured repository and has no Actions,
   deployment, administration, or unrelated-repository access.
 
-A project may run without eligible GitHub publication, but Reviewer decision
-escalation will then block rather than invent another human channel.
+When `decisionPublication` is configured, `doctor` reports a closed
+`publication` object alongside the other readiness facts:
+
+- `configured` and `eligible` describe whether publication can proceed;
+- `repository` is the resolved `owner/name` from the publication remote, or
+  `null` when the remote is not a GitHub repository;
+- `repositoryScope` is `repository` for a repository-limited credential,
+  `broad` when advertised token scopes reach unrelated repositories or
+  administration, and `unknown` when the probe could not establish it;
+- `capabilities` reports each required capability—`push`, `pull_request`,
+  `issue_comment_read`, `collaborator_permission`—as `granted`, `denied`, or
+  `unknown`; and
+- `reason` is a specific, bounded explanation whenever publication is not
+  eligible, or `null` when it is eligible.
+
+The readiness probe is read-only: it looks up repository identity, the
+authenticated viewer's repository permission and advertised token scopes, and
+issue-comment readability with `GITHUB_TOKEN` from the environment. It never
+performs a mutating GitHub call, never pushes, and never persists the token.
+Draft-PR creation/update is derived from repository push permission because the
+probe deliberately does not create a PR to prove it. A required capability stays
+`unknown` rather than `denied` when the probe cannot establish it, and any
+unverified scope or capability makes the report ineligible rather than assume
+privilege. A classic token that advertises broad scopes such as `repo`,
+`workflow`, or `admin:*` is reported as `broad` and ineligible; a token that does
+not advertise scopes (a fine-grained token) is treated as repository-limited.
+
+`doctor` reports a configured-but-ineligible publication as a readiness fact, not
+an error; it does not block ordinary approved runs. A project may run without
+publication at all, in which case `configured` is `false` with no reason. If a
+run later reaches a genuine human-decision outcome while publication is absent or
+ineligible, Reviewer routing blocks it for later publication rather than inventing
+another human channel.
