@@ -17,7 +17,11 @@ import {
   handleCoderTurn,
   validateCoderTurnControl,
 } from '../coder-result/index.js';
-import { GitHubPublication, publishDecisionDraftPr } from '../decision-publication/index.js';
+import {
+  GitHubPublication,
+  publishDecisionDraftPr,
+  reconcilePublication,
+} from '../decision-publication/index.js';
 import { bootstrapRoleGuidance } from '../guidance/index.js';
 import { reconcileHandoff } from '../handoff/index.js';
 import {
@@ -852,6 +856,37 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
           continue;
         }
         return summaryOf(history);
+      }
+      if (state === 'publish_failed') {
+        /**
+         * An interrupted decision publication is recovered in the same run. The
+         * reconciliation owns the resume transition and re-enters
+         * `human_decision_required` only after the journal and GitHub agree on
+         * the exact draft URL; every other outcome leaves the run durable in
+         * `publish_failed` for a later resume.
+         */
+        if (!options.allowResume || resumed) {
+          return summaryOf(history);
+        }
+        const github = yield* Effect.serviceOption(GitHubPublication);
+        if (Option.isNone(github)) {
+          return summaryOf(history);
+        }
+        const reconciliation = yield* reconcilePublication({
+          runDirectory,
+          runId,
+          configuration,
+        }).pipe(Effect.provideService(GitHubPublication, github.value), Effect.result);
+        if (Result.isSuccess(reconciliation) && reconciliation.success.outcome === 'reconciled') {
+          resumed = true;
+          continue;
+        }
+        const after = yield* readVerifiedRunHistory({
+          runDirectory,
+          runId,
+          createIfMissing: false,
+        });
+        return summaryOf(after);
       }
       if (!isActiveWorkflowState(state)) {
         return summaryOf(history);

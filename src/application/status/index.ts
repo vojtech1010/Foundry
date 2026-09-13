@@ -197,6 +197,10 @@ function eventDetail(event: RunEvent): string {
       );
     case 'evidence-bound':
       return boundedDetail(`tester observation bound to ${event.payload.commit}`);
+    case 'publication-reconciled':
+      return boundedDetail(
+        `publication reconciled (${event.payload.agreement}): ${event.payload.detail}`,
+      );
   }
 }
 

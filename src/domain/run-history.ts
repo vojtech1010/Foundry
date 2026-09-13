@@ -87,6 +87,7 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'objective-worker',
   'evidence-invalidated',
   'evidence-bound',
+  'publication-reconciled',
 ] as const;
 
 export type RunHistoryEventType = (typeof RUN_HISTORY_EVENT_TYPES)[number];
@@ -439,6 +440,24 @@ export const EvidenceBoundPayloadSchema = Schema.Struct({
 
 export type EvidenceBoundPayload = (typeof EvidenceBoundPayloadSchema)['Type'];
 
+/**
+ * Durable agreement that a partially completed decision publication has been
+ * reconciled in place. `agreement` names the strongest journal fact the resume
+ * reconciled from, and a `publication-reconciled` event is appended only after
+ * the exact draft URL is durable.
+ */
+export const PUBLICATION_RECONCILIATION_AGREEMENTS = ['push', 'pull-request', 'draft-url'] as const;
+
+export type PublicationReconciliationAgreement =
+  (typeof PUBLICATION_RECONCILIATION_AGREEMENTS)[number];
+
+export const PublicationReconciledPayloadSchema = Schema.Struct({
+  agreement: Schema.Literals(PUBLICATION_RECONCILIATION_AGREEMENTS),
+  detail: Schema.String,
+});
+
+export type PublicationReconciledPayload = (typeof PublicationReconciledPayloadSchema)['Type'];
+
 const RunEventEnvelopeFields = {
   schemaVersion: Schema.Literal(RUN_HISTORY_SCHEMA_VERSION),
   runId: Identifier,
@@ -617,6 +636,12 @@ export const EvidenceBoundEventSchema = Schema.Struct({
   payload: EvidenceBoundPayloadSchema,
 });
 
+export const PublicationReconciledEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('publication-reconciled'),
+  payload: PublicationReconciledPayloadSchema,
+});
+
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
@@ -646,6 +671,7 @@ export const RunEventSchema = Schema.Union([
   ObjectiveWorkerEventSchema,
   EvidenceInvalidatedEventSchema,
   EvidenceBoundEventSchema,
+  PublicationReconciledEventSchema,
 ]);
 
 export type RunEvent = (typeof RunEventSchema)['Type'];
@@ -711,7 +737,11 @@ export type RunEventDraft =
       readonly type: 'evidence-invalidated';
       readonly payload: EvidenceInvalidatedPayload;
     }
-  | { readonly type: 'evidence-bound'; readonly payload: EvidenceBoundPayload };
+  | { readonly type: 'evidence-bound'; readonly payload: EvidenceBoundPayload }
+  | {
+      readonly type: 'publication-reconciled';
+      readonly payload: PublicationReconciledPayload;
+    };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
 
@@ -1343,6 +1373,20 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'publication-reconciled':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          agreement: event.payload.agreement,
+          detail: event.payload.detail,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
   }
 }
 
@@ -1428,6 +1472,8 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'evidence-invalidated', payload: event.payload };
     case 'evidence-bound':
       return { ...envelope, type: 'evidence-bound', payload: event.payload };
+    case 'publication-reconciled':
+      return { ...envelope, type: 'publication-reconciled', payload: event.payload };
   }
 }
 
@@ -2525,6 +2571,27 @@ export function verifyRunHistoryEvents(
           };
         }
         evidenceBindings.push(event.payload);
+        break;
+      }
+      case 'publication-reconciled': {
+        if (state !== 'publishing') {
+          return {
+            ok: false,
+            problem: `${label} records a reconciled publication outside the publishing stage`,
+          };
+        }
+        if (lastPublicationCheckpoint !== 'url-recorded') {
+          return {
+            ok: false,
+            problem: `${label} records a reconciled publication before the exact draft URL is durable`,
+          };
+        }
+        if (decisionOpened === null) {
+          return {
+            ok: false,
+            problem: `${label} records a reconciled publication for an unopened decision`,
+          };
+        }
         break;
       }
     }

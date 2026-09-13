@@ -463,3 +463,5 @@ export const publishDecisionDraftPr = Effect.fn('publishDecisionDraftPr')(functi
     exactCommands,
   } satisfies PublishDecisionDraftPrReport;
 });
+
+export { reconcilePublication } from './recovery.js';
