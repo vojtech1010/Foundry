@@ -12,7 +12,11 @@ import {
   isPublicCommand,
 } from '../domain/public-commands.js';
 import { Identifier } from '../domain/run-identity.js';
-import { WorkflowStateSchema } from '../domain/workflow.js';
+import {
+  CLEANUP_OUTCOMES,
+  WorkflowAttemptSchema,
+  WorkflowStateSchema,
+} from '../domain/workflow.js';
 
 import type { PublicCommand, PublicCommandInvocation } from '../domain/public-commands.js';
 import type { ReportFailureKind } from '../domain/public-commands.js';
@@ -204,6 +208,13 @@ const StubReportData = Schema.Struct({
   taskId: Schema.optional(Schema.String),
 });
 
+const PublicationReadinessData = Schema.Struct({
+  configured: Schema.Boolean,
+  eligible: Schema.Boolean,
+  repository: Schema.NullOr(Schema.String),
+  reason: Schema.String,
+});
+
 const DoctorReportData = Schema.Struct({
   readiness: Schema.Literal('ready'),
   host: Schema.Struct({
@@ -234,6 +245,7 @@ const DoctorReportData = Schema.Struct({
     filesystemProfiles: Schema.Array(Schema.String),
     networkProfiles: Schema.Array(Schema.String),
   }),
+  publication: Schema.optional(PublicationReadinessData),
 });
 
 const InitPreviewReportData = Schema.Struct({
@@ -264,24 +276,6 @@ const ProfileCheckReportData = Schema.Struct({
       name: Schema.String,
       command: Schema.Array(Schema.String),
       exitCode: Schema.Number,
-    }),
-  ),
-});
-
-const RunWorkflowStateReportData = Schema.Struct({
-  runId: Schema.String,
-  workflowState: WorkflowStateSchema,
-  provenance: Schema.NullOr(
-    Schema.Struct({
-      repositoryRoot: Schema.String,
-      gitDirectory: Schema.String,
-      remoteUrl: Schema.String,
-      sourceRemote: Schema.String,
-      sourceBranch: Schema.String,
-      sourceCommit: Schema.String,
-      taskBranch: Schema.String,
-      workspace: Schema.String,
-      headCommit: Schema.String,
     }),
   ),
 });
@@ -329,6 +323,61 @@ const RunWorkflowReportData = Schema.Struct({
   testerSkipped: Schema.Boolean,
 });
 
+const StatusMeasureData = Schema.Struct({
+  available: Schema.Boolean,
+  total: Schema.NullOr(Schema.Number),
+  detail: Schema.String,
+});
+
+const StatusCountsData = Schema.Struct({
+  roleAttempts: Schema.Number,
+  retries: Schema.Number,
+  repairs: Schema.Number,
+  controlRepairs: Schema.Number,
+  corrections: Schema.Number,
+  findings: Schema.Number,
+});
+
+const StatusActiveRoleData = Schema.Struct({
+  role: Schema.String,
+  attempt: Schema.Number,
+});
+
+const StatusLastEventData = Schema.Struct({
+  revision: Schema.Number,
+  type: Schema.String,
+  occurredAt: Schema.String,
+  detail: Schema.String,
+});
+
+const StatusCleanupProgressData = Schema.Struct({
+  outcome: Schema.Literals(CLEANUP_OUTCOMES),
+  detail: Schema.String,
+});
+
+const RunStatusReportData = Schema.Struct({
+  runId: Schema.String,
+  workflowState: WorkflowStateSchema,
+  checkpoint: Schema.NullOr(WorkflowStateSchema),
+  activeRole: Schema.NullOr(StatusActiveRoleData),
+  startedAt: Schema.NullOr(Schema.String),
+  elapsedMs: Schema.NullOr(Schema.Number),
+  lastEvent: Schema.NullOr(StatusLastEventData),
+  branch: Schema.NullOr(Schema.String),
+  commit: Schema.NullOr(Schema.String),
+  counts: StatusCountsData,
+  usage: Schema.Struct({
+    tokens: StatusMeasureData,
+    cost: StatusMeasureData,
+  }),
+  attempts: Schema.Array(WorkflowAttemptSchema),
+  cleanupProgress: Schema.NullOr(StatusCleanupProgressData),
+  provenance: Schema.NullOr(RunProvenanceData),
+  historyPath: Schema.String,
+  revision: Schema.Number,
+  eventHash: Schema.NullOr(Schema.String),
+});
+
 const ReportData = Schema.Union([
   StubReportData,
   DoctorReportData,
@@ -336,7 +385,7 @@ const ReportData = Schema.Union([
   ProfileCheckReportData,
   RunWorkflowReportData,
   RecordedRunReportData,
-  RunWorkflowStateReportData,
+  RunStatusReportData,
 ]);
 
 const SuccessEnvelope = Schema.Struct({
@@ -567,6 +616,14 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         `data.roleHost.filesystemProfiles: ${data.roleHost.filesystemProfiles.join(' ')}`,
         `data.roleHost.networkProfiles: ${data.roleHost.networkProfiles.join(' ')}`,
       );
+      if (data.publication !== undefined) {
+        lines.push(
+          `data.publication.configured: ${data.publication.configured}`,
+          `data.publication.eligible: ${data.publication.eligible}`,
+          `data.publication.repository: ${data.publication.repository ?? 'none'}`,
+          `data.publication.reason: ${data.publication.reason}`,
+        );
+      }
     } else if ('profileCheck' in data) {
       lines.push(
         `data.profileCheck: ${data.profileCheck}`,
@@ -604,8 +661,47 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
       lines.push(
         `data.runId: ${data.runId}`,
         `data.workflowState: ${data.workflowState}`,
-        ...renderProvenanceLines(data.provenance),
+        `data.checkpoint: ${data.checkpoint ?? 'none'}`,
+        data.activeRole === null
+          ? 'data.activeRole: none'
+          : `data.activeRole: ${data.activeRole.role} attempt ${data.activeRole.attempt}`,
+        `data.startedAt: ${data.startedAt ?? 'unknown'}`,
+        `data.elapsedMs: ${data.elapsedMs ?? 'unknown'}`,
+        `data.branch: ${data.branch ?? 'unknown'}`,
+        `data.commit: ${data.commit ?? 'unknown'}`,
+        `data.counts.roleAttempts: ${data.counts.roleAttempts}`,
+        `data.counts.retries: ${data.counts.retries}`,
+        `data.counts.repairs: ${data.counts.repairs}`,
+        `data.counts.controlRepairs: ${data.counts.controlRepairs}`,
+        `data.counts.corrections: ${data.counts.corrections}`,
+        `data.counts.findings: ${data.counts.findings}`,
+        `data.usage.tokens.available: ${data.usage.tokens.available}`,
+        `data.usage.tokens.total: ${data.usage.tokens.total ?? 'unknown'}`,
+        `data.usage.tokens.detail: ${data.usage.tokens.detail}`,
+        `data.usage.cost.available: ${data.usage.cost.available}`,
+        `data.usage.cost.total: ${data.usage.cost.total ?? 'unknown'}`,
+        `data.usage.cost.detail: ${data.usage.cost.detail}`,
+        `data.revision: ${data.revision}`,
+        `data.eventHash: ${data.eventHash ?? 'none'}`,
+        `data.historyPath: ${data.historyPath}`,
+        `data.cleanupProgress: ${data.cleanupProgress === null ? 'none' : data.cleanupProgress.outcome}`,
       );
+      for (const attempt of data.attempts) {
+        lines.push(
+          `data.attempts: ${attempt.sequence} ${attempt.kind} ${attempt.role} ${attempt.state}`,
+        );
+      }
+      if (data.lastEvent === null) {
+        lines.push('data.lastEvent: none');
+      } else {
+        lines.push(
+          `data.lastEvent.revision: ${data.lastEvent.revision}`,
+          `data.lastEvent.type: ${data.lastEvent.type}`,
+          `data.lastEvent.occurredAt: ${data.lastEvent.occurredAt}`,
+          `data.lastEvent.detail: ${data.lastEvent.detail}`,
+        );
+      }
+      lines.push(...renderProvenanceLines(data.provenance));
     } else {
       lines.push(
         `data.taskId: ${data.taskId}`,
@@ -763,7 +859,7 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
     };
   }
   if ('host' in report) {
-    return {
+    const base: (typeof DoctorReportData)['Type'] = {
       readiness: 'ready',
       host: {
         platform: report.host.platform,
@@ -793,6 +889,13 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
         filesystemProfiles: [...report.roleHost.filesystemProfiles],
         networkProfiles: [...report.roleHost.networkProfiles],
       },
+    };
+    if (!('publication' in report)) {
+      return base;
+    }
+    return {
+      ...base,
+      publication: Schema.decodeUnknownSync(PublicationReadinessData)(report.publication),
     };
   }
   if ('profileCheck' in report) {
@@ -844,7 +947,35 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
     return {
       runId: report.runId,
       workflowState: report.workflowState,
+      checkpoint: report.checkpoint,
+      activeRole:
+        report.activeRole === null
+          ? null
+          : { role: report.activeRole.role, attempt: report.activeRole.attempt },
+      startedAt: report.startedAt,
+      elapsedMs: report.elapsedMs,
+      lastEvent:
+        report.lastEvent === null
+          ? null
+          : {
+              revision: report.lastEvent.revision,
+              type: report.lastEvent.type,
+              occurredAt: report.lastEvent.occurredAt,
+              detail: report.lastEvent.detail,
+            },
+      branch: report.branch,
+      commit: report.commit,
+      counts: { ...report.counts },
+      usage: {
+        tokens: { ...report.usage.tokens },
+        cost: { ...report.usage.cost },
+      },
+      attempts: report.attempts.map((attempt) => ({ ...attempt })),
+      cleanupProgress: report.cleanupProgress === null ? null : { ...report.cleanupProgress },
       provenance: report.provenance === null ? null : { ...report.provenance },
+      historyPath: report.historyPath,
+      revision: report.revision,
+      eventHash: report.eventHash,
     };
   }
   return {
