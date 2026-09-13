@@ -161,6 +161,7 @@ export const WORKFLOW_TRANSITION_ROUTE_KINDS = [
   'retest-requested',
   'review-approved',
   'review-approved-no-change',
+  'review-requested-implementation',
   'human-decision-required',
   'publication-unavailable',
   'draft-pr-reconciled',
@@ -230,6 +231,12 @@ export type WorkflowTransitionRequest =
       readonly route: 'review-approved-no-change';
       readonly verifiedSourceApproved: boolean;
       readonly implementationCommit: string | null;
+      readonly checksPassed: boolean;
+      readonly evidenceCommitMatches: boolean;
+    }
+  | {
+      readonly route: 'review-requested-implementation';
+      readonly verifiedNoChangeCandidate: boolean;
     }
   | {
       readonly route: 'human-decision-required';
@@ -338,6 +345,11 @@ export const WORKFLOW_TRANSITION_ROUTES: Readonly<
     from: ['reviewing'],
     to: 'completed_no_change',
     fact: 'Reviewer approved the verified source as already satisfying the request',
+  },
+  'review-requested-implementation': {
+    from: ['reviewing'],
+    to: 'coding',
+    fact: 'Reviewer requested implementation of a verified no-change candidate without spending a correction round',
   },
   'human-decision-required': {
     from: ['reviewing'],
@@ -669,7 +681,31 @@ function checkTransitionFacts(
           'A changed result cannot complete as a no-change run.',
         );
       }
+      if (!request.checksPassed) {
+        return refused(
+          'completed_no_change',
+          'passed source-bound checks',
+          'A no-change run cannot complete without passed checks bound to the frozen source commit.',
+        );
+      }
+      if (!request.evidenceCommitMatches) {
+        return refused(
+          'completed_no_change',
+          'source-bound verification evidence',
+          'A no-change run cannot complete without verification evidence bound to the frozen source commit.',
+        );
+      }
       return allowed('completed_no_change', null);
+    }
+    case 'review-requested-implementation': {
+      if (!request.verifiedNoChangeCandidate) {
+        return refused(
+          'coding',
+          'verified no-change candidate',
+          'The "review-requested-implementation" route requires a verified no-change candidate so an implementation request does not spend a correction round.',
+        );
+      }
+      return allowed('coding', null);
     }
     case 'human-decision-required': {
       if (!request.envelopeValid) {
