@@ -40,16 +40,22 @@ reports failure, so request files or a directory alone never establish success.
 `status` verifies the complete history first, rebuilds current progress from it,
 and returns the verified state, checkpoint, attempts, cleanup progress, and the
 canonical history path with the accepted revision so a later inspection surface
-can point at the source of truth; its presented output still contains only the
-run ID and verified state. `workflow-state.json` is a disposable derived report:
-missing, malformed, wrong-run, or disagreeing records are replaced atomically
-from verified history and are never read to infer status, while a report that
-disagrees with a verified history is never reported. Cleanup progress is rebuilt
-the same way from cleanup events without changing the accepted result. An
-incomplete or invalid stream or witness fails the command with a typed integrity
-report naming the canonical history and never repairs, truncates, appends, or
-synthesizes state. Active role/attempt details, elapsed time, last event,
-branch/commit reporting, and resume/recovery are not delivered yet.
+can point at the source of truth. It is read-only: it never appends events,
+approves, advances, pauses, or repairs a run. Its presentation reports the run ID
+and verified state, the active role and attempt when role work is active, elapsed
+time since run creation, the last recorded event with a bounded detail, the known
+task branch and result commit, Foundry role retries, same-session control
+repairs, correction rounds, findings, and bounded statistics. Token and cost
+figures are not recorded in the current history, so they are presented as
+unavailable with a null total rather than as zero consumption or zero spend.
+`workflow-state.json` is a disposable derived report: missing, malformed,
+wrong-run, or disagreeing records are replaced atomically from verified history
+and are never read to infer status, while a report that disagrees with a verified
+history is never reported. Cleanup progress is rebuilt the same way from cleanup
+events without changing the accepted result. An incomplete or invalid stream or
+witness fails the command with a typed integrity report naming the canonical
+history and never repairs, truncates, appends, or synthesizes state.
+Resume/recovery is not delivered yet.
 
 ## Inspect artifacts and findings
 
@@ -113,11 +119,15 @@ zero. Report availability and incompleteness alongside totals: unavailable token
 usage cannot be presented as zero consumption or zero cost, and an unavailable
 cost estimate remains unknown. Missing verification/publication telemetry does
 not mean those operations did not happen; consult their reports and journals.
-Statistics never determine acceptance.
+Statistics never determine acceptance. `status` reports each bounded measure with
+an explicit availability flag and a null total when it is unavailable, so a
+missing figure is never rendered as zero.
 
 Distinguish a Foundry role retry, control repair, or correction from a command
 failure handled inside one Coder/worker session. Zero workflow retries can
 coexist with failed local test invocations followed by same-session fixes.
+`status` counts role retries only from durable workflow-attempt records and
+reports same-session control repairs and correction rounds as separate counts.
 Bounded terminal logs retain that diagnostic context; do not promote every
 local command failure into a workflow failure or silently count it as a new
 role attempt.
