@@ -196,11 +196,16 @@ worktrees, branches, and ownership before each deletion. It may partially
 succeed, so list again after any failure. Never delete `.agent/runs` manually.
 
 Use `cleanup --list` to report eligibility and
-`cleanup --run-id <id> --confirm <id>` to act. Cleanup is explicit, never
-background retention work; normal end-of-run resource disposal remains
-automatic. It preserves the task branch and canonical handoff while disposing
-verified owned sessions, worktrees, worker branches, and eligible bounded
-evidence.
+`cleanup --run-id <id> --confirm <id>` to act. The list names each eligible
+run's workflow state, terminal transition time, configured retention window,
+ownership state, and last recorded cleanup outcome. Confirmation refuses a run
+that is not terminal or is still inside its retention window without writing
+anything, and reports which pre-deletion check failed. Cleanup is explicit,
+never background retention work; normal end-of-run resource disposal remains
+automatic. It preserves the task branch, every verified worker branch, and the
+canonical handoff while disposing verified owned sessions, worktrees, worker
+worktrees, and eligible bounded evidence, and a failed disposal leaves the run
+listed so the operator can retry.
 
 ## When to intervene
 

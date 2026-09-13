@@ -78,4 +78,5 @@ export interface PublicCommandInvocation {
   readonly cwd?: string | undefined;
   readonly abandon?: boolean | undefined;
   readonly reason?: string | undefined;
+  readonly confirm?: string | undefined;
 }

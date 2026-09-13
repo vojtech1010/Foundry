@@ -106,6 +106,7 @@ const UntouchedReadiness = Layer.mergeAll(
       writeFileBytes: (_path: string, _bytes: Uint8Array) =>
         untouchedReadiness('runIdentity.writeFileBytes'),
       removeDirectory: (_path: string) => untouchedReadiness('runIdentity.removeDirectory'),
+      listRuns: (_runsRoot: string) => untouchedReadiness('runIdentity.listRuns'),
     }),
   ),
   Layer.succeed(
@@ -178,18 +179,6 @@ const validScenarios: ReadonlyArray<ValidScenario> = [
     command: 'diagnostic-bundle',
     argv: ['diagnostic-bundle', '--config', 'foundry.config.json', '--output', 'bundle'],
     runId: undefined,
-    taskId: undefined,
-  },
-  {
-    command: 'cleanup',
-    argv: ['cleanup', '--list', '--config', 'foundry.config.json'],
-    runId: undefined,
-    taskId: undefined,
-  },
-  {
-    command: 'cleanup',
-    argv: ['cleanup', '--config', 'foundry.config.json', '--run-id', 'RUN-1', '--confirm', 'RUN-1'],
-    runId: 'RUN-1',
     taskId: undefined,
   },
 ];

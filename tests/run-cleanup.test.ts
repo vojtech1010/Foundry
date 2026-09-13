@@ -114,6 +114,7 @@ function fakeStore(fixture: UnitFixture, failRemoval = false): Layer.Layer<RunId
           : Effect.sync(() => {
               fixture.removed.push(path);
             }),
+      listRuns: () => Effect.succeed([]),
     }),
   );
 }

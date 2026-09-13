@@ -12,6 +12,8 @@ import { checkProjectProfile } from './profile-check/index.js';
 import { checkReadiness } from './readiness/index.js';
 import { previewRunLocations } from './preview-run-locations/index.js';
 import { readRunInspect } from './inspect/index.js';
+import { readRetentionCleanupList, runRetentionCleanup } from './retention-cleanup/index.js';
+import type { RetentionCleanupError } from './retention-cleanup/index.js';
 import { advanceRun, RunWorkflowError } from './run-workflow/index.js';
 import {
   InvalidRunRequest,
@@ -48,6 +50,7 @@ import type {
   PreviewLocationsError,
   PreviewLocationsReport,
 } from './preview-run-locations/index.js';
+import type { CleanupListReport, CleanupRunReport } from '../domain/retention-cleanup.js';
 import type {
   ProfileCheckError,
   ProfileCheckReport,
@@ -94,7 +97,9 @@ export type PublicCommandReport =
   | RecordedRunIdentityReport
   | RunStatusReport
   | RunInspectReport
-  | RunWorkflowReport;
+  | RunWorkflowReport
+  | CleanupListReport
+  | CleanupRunReport;
 
 export type PublicCommandError =
   | ReadinessError
@@ -108,7 +113,8 @@ export type PublicCommandError =
   | RunInspectError
   | RunHistoryIntegrityError
   | RunHistoryStorageError
-  | RunHistoryConflict;
+  | RunHistoryConflict
+  | RetentionCleanupError;
 
 function stubReport(invocation: PublicCommandInvocation): StubCommandReport {
   const report: StubCommandReport = {
@@ -320,6 +326,22 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       return stubReport(invocation);
     }
     return yield* checkProjectProfile({ configArg, cwd });
+  }
+  if (invocation.command === 'cleanup') {
+    const configArg = invocation.config;
+    const cwd = invocation.cwd;
+    if (configArg === undefined || cwd === undefined) {
+      return stubReport(invocation);
+    }
+    const runId = invocation.runId;
+    if (runId === undefined) {
+      return yield* readRetentionCleanupList({ configArg, cwd });
+    }
+    const confirm = invocation.confirm;
+    if (confirm === undefined) {
+      return stubReport(invocation);
+    }
+    return yield* runRetentionCleanup({ configArg, cwd, runId, confirm });
   }
   return stubReport(invocation);
 });
