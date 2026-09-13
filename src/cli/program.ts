@@ -617,6 +617,7 @@ function renderInspectHuman(data: RunInspectReport): ReadonlyArray<string> {
   pushSection('corrections', data.sections.corrections);
   pushSection('decision', data.sections.decision);
   pushSection('publication', data.sections.publication);
+  pushSection('cleanup', data.sections.cleanup);
   pushSection('journals', data.sections.journals);
   pushSection('captures', data.sections.captures);
 
@@ -764,6 +765,15 @@ function renderInspectHuman(data: RunInspectReport): ReadonlyArray<string> {
   for (const checkpoint of data.publication.checkpoints) {
     lines.push(
       `data.publication.checkpoints: ${checkpoint.stage} decisionId=${checkpoint.decisionId ?? 'none'} draftPrUrl=${checkpoint.draftPrUrl ?? 'none'} ${checkpoint.detail}`,
+    );
+  }
+
+  if (data.cleanup === null) {
+    lines.push('data.cleanup: none');
+  } else {
+    lines.push(
+      `data.cleanup.outcome: ${data.cleanup.outcome}`,
+      `data.cleanup.detail: ${data.cleanup.detail}`,
     );
   }
 

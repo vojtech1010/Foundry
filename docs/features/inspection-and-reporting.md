@@ -72,9 +72,10 @@ sections summarize the accepted plan, the commit-bound implementation, every
 verification report per commit (command, exit code, bounded hashed log
 reference), Tester observations/limitations/skips, the Reviewer outcome and
 narrative, rejected attempts and control rejections, permission violations,
-findings, correction transitions, publication checkpoints, and incomplete or
-uncertain journal records (an unstarted submission, an observation that never
-settled, or an unresolved control repair).
+findings, correction transitions, publication checkpoints, end-of-run cleanup
+completion (kept distinct from result acceptance), and incomplete or uncertain
+journal records (an unstarted submission, an observation that never settled, or
+an unresolved control repair).
 
 Every section carries an availability flag. `empty-not-proven` means no records
 were found and the empty list is not proof that nothing happened;

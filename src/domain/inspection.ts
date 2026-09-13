@@ -4,6 +4,7 @@ import { FindingRecordSchema } from './findings.js';
 import { REVIEWER_DECISION_ACTIONS, REVIEWER_TURN_OUTCOMES } from './reviewer-outcomes.js';
 import { GitCommitId } from './run-locations.js';
 import {
+  CleanupProgressPayloadSchema,
   PlanAcceptedObjectiveSchema,
   RolePermissionViolationPayloadSchema,
   UtcInstant,
@@ -47,6 +48,7 @@ export const InspectSectionsSchema = Schema.Struct({
   corrections: InspectAvailabilityEntrySchema,
   decision: InspectAvailabilityEntrySchema,
   publication: InspectAvailabilityEntrySchema,
+  cleanup: InspectAvailabilityEntrySchema,
   journals: InspectAvailabilityEntrySchema,
   captures: InspectAvailabilityEntrySchema,
 });
@@ -314,6 +316,7 @@ export const RunInspectReportSchema = Schema.Struct({
   corrections: Schema.Array(InspectCorrectionSchema),
   decision: Schema.NullOr(InspectDecisionSchema),
   publication: InspectPublicationSchema,
+  cleanup: Schema.NullOr(CleanupProgressPayloadSchema),
   journals: Schema.Array(InspectJournalSchema),
   captures: InspectCapturesSchema,
 });
