@@ -31,6 +31,7 @@ import type {
   ReadinessHost,
 } from '../application/readiness/index.js';
 import type { RunIdentityStore } from '../application/run-identity/index.js';
+import type { RoleHostLauncher } from '../application/role-conversations/index.js';
 
 const UNKNOWN_COMMAND_LABEL = 'foundry';
 
@@ -219,6 +220,14 @@ const DoctorReportData = Schema.Struct({
     remote: Schema.String,
     branch: Schema.String,
     commit: Schema.String,
+  }),
+  roleHost: Schema.Struct({
+    protocol: Schema.String,
+    adapterVersion: Schema.String,
+    resumable: Schema.Literal(true),
+    availableRoles: Schema.Array(Schema.String),
+    filesystemProfiles: Schema.Array(Schema.String),
+    networkProfiles: Schema.Array(Schema.String),
   }),
 });
 
@@ -531,6 +540,12 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         `data.repository.remote: ${data.repository.remote}`,
         `data.repository.branch: ${data.repository.branch}`,
         `data.repository.commit: ${data.repository.commit}`,
+        `data.roleHost.protocol: ${data.roleHost.protocol}`,
+        `data.roleHost.adapterVersion: ${data.roleHost.adapterVersion}`,
+        `data.roleHost.resumable: ${data.roleHost.resumable}`,
+        `data.roleHost.availableRoles: ${data.roleHost.availableRoles.join(' ')}`,
+        `data.roleHost.filesystemProfiles: ${data.roleHost.filesystemProfiles.join(' ')}`,
+        `data.roleHost.networkProfiles: ${data.roleHost.networkProfiles.join(' ')}`,
       );
     } else if ('profileCheck' in data) {
       lines.push(
@@ -597,6 +612,7 @@ function failureKindFor(error: PublicCommandError): ReportFailureKind {
     case 'RunHistoryConflict':
     case 'RepositoryLeaseOwnershipLost':
     case 'RepositoryLeaseStorageError':
+    case 'RoleHostCapabilityError':
       return 'failed';
     case 'RunWorkspaceBlocked':
     case 'RepositoryLeaseContended':
@@ -730,6 +746,14 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
         branch: report.repository.branch,
         commit: report.repository.commit,
       },
+      roleHost: {
+        protocol: report.roleHost.protocol,
+        adapterVersion: report.roleHost.adapterVersion,
+        resumable: report.roleHost.resumable,
+        availableRoles: [...report.roleHost.availableRoles],
+        filesystemProfiles: [...report.roleHost.filesystemProfiles],
+        networkProfiles: [...report.roleHost.networkProfiles],
+      },
     };
   }
   if ('profileCheck' in report) {
@@ -802,6 +826,7 @@ export const runCli = Effect.fn('runCli')(function* (
   | RunHistoryStorage
   | RepositoryLeaseStore
   | RepositoryHostIdentity
+  | RoleHostLauncher
   | RunGit
   | GuidanceGit
   | GuidanceSnapshotStore

@@ -25,6 +25,7 @@ import {
 import { appendRunEvent, readVerifiedRunHistory } from '../src/application/run-history/index.js';
 import { roleHostProcessLayer } from '../src/platform/role-host.js';
 import { RunHistoryLive } from '../src/platform/run-history.js';
+import { CAPABLE_ROLE_HOST_CAPABILITIES } from './fixtures/role-host/role-host-launcher.js';
 
 import type {
   RoleHostCreateRequest,
@@ -32,6 +33,7 @@ import type {
   RoleHostObserveRequest,
   RoleHostObserveResponse,
   RoleHostOperation,
+  RoleHostRuntimeIdentity,
   RoleHostStopRequest,
   RoleHostStopResponse,
   RoleHostSubmitRequest,
@@ -175,6 +177,7 @@ interface FakeRoleHostOptions {
   readonly observeResponses: ReadonlyArray<RoleHostObserveResponse>;
   readonly createGeneration?: number;
   readonly submitFails?: boolean;
+  readonly identity?: RoleHostRuntimeIdentity;
 }
 
 interface FakeRoleHost {
@@ -190,6 +193,10 @@ function fakeRoleHost(options: FakeRoleHostOptions): FakeRoleHost {
   const layer = Layer.succeed(
     RoleHost,
     RoleHost.of({
+      capabilities: () => {
+        calls.push('capabilities');
+        return Effect.succeed(CAPABLE_ROLE_HOST_CAPABILITIES);
+      },
       create: (): Effect.Effect<RoleHostCreateResponse, RoleHostOperationalError> => {
         calls.push('create');
         return Effect.succeed({
@@ -198,7 +205,7 @@ function fakeRoleHost(options: FakeRoleHostOptions): FakeRoleHost {
           ownershipToken: options.ownershipToken,
           generation: options.createGeneration ?? options.generation,
           sequence: options.initialSequence,
-          runtimeIdentity: FIXTURE_IDENTITY,
+          runtimeIdentity: options.identity ?? FIXTURE_IDENTITY,
         });
       },
       submit: (
@@ -709,6 +716,41 @@ describe('role conversation lifecycle', () => {
         expect(session?.runtimeIdentity).toEqual(FIXTURE_IDENTITY);
         expect(session?.submissionStarted).toBe('accepted');
         expect(session?.lastObservation?.status).toBe('settled');
+      } finally {
+        run.cleanup();
+      }
+    }),
+  );
+
+  it.effect('records the host-selected runtime identity unchanged', () =>
+    Effect.gen(function* () {
+      const run = setupRun();
+      try {
+        yield* seedRunCreated(run.runDirectory);
+        const identity = {
+          adapterVersion: 'host-b',
+          provider: 'host-b-provider',
+          model: 'host-b-model',
+          toolProfile: 'host-b-profile',
+        } as const;
+        const fake = fakeRoleHost({
+          sessionId: 'session-1',
+          ownershipToken: 'owner-1',
+          generation: 1,
+          initialSequence: 0,
+          observeResponses: [SETTLED_RESPONSE],
+          identity,
+        });
+        const result = yield* startOrResumeRoleTurn(baseTurnOptions(run.runDirectory)).pipe(
+          Effect.provide(Layer.mergeAll(RunHistoryLive, fake.layer)),
+        );
+
+        expect(result.outcome).toBe('settled');
+        expect(result.sequence).toBe(SETTLED_RESPONSE.sequence);
+        const session = yield* readRecordedSession(run.runDirectory);
+        expect(session?.runtimeIdentity).toEqual(identity);
+        expect(session?.runtimeIdentity).not.toEqual(FIXTURE_IDENTITY);
+        expect(fake.calls).toEqual(['create', 'submit', 'observe']);
       } finally {
         run.cleanup();
       }

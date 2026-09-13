@@ -25,6 +25,9 @@ import {
 } from '../src/domain/run-locations.js';
 import { EXIT_CODES } from '../src/domain/public-commands.js';
 import { ReadinessFilesLive, ReadinessGitLive } from '../src/platform/readiness.js';
+import { capableRoleHostLauncher } from './fixtures/role-host/role-host-launcher.js';
+
+import type { RoleHostLauncher } from '../src/application/role-conversations/index.js';
 
 const ReportEnvelopeJson = Schema.fromJsonString(ReportEnvelope);
 
@@ -153,7 +156,9 @@ interface FakeWorld {
 }
 
 interface BuiltWorld {
-  readonly layer: Layer.Layer<ReadinessHost | ReadinessFiles | ReadinessGit>;
+  readonly layer: Layer.Layer<
+    ReadinessHost | ReadinessFiles | ReadinessGit | ProjectCommandProcess | RoleHostLauncher
+  >;
   readonly gitCalls: Array<{ readonly args: ReadonlyArray<string>; readonly cwd: string }>;
 }
 
@@ -196,7 +201,10 @@ const UnusedProcess = Layer.succeed(
   }),
 );
 
-function buildWorld(world: FakeWorld): BuiltWorld {
+function buildWorld(
+  world: FakeWorld,
+  roleHostLayer: Layer.Layer<RoleHostLauncher> = capableRoleHostLauncher(),
+): BuiltWorld {
   const gitCalls: BuiltWorld['gitCalls'] = [];
   const layer = Layer.mergeAll(
     Layer.succeed(
@@ -292,6 +300,7 @@ function buildWorld(world: FakeWorld): BuiltWorld {
       }),
     ),
     UnusedProcess,
+    roleHostLayer,
   );
   return { layer, gitCalls };
 }
@@ -575,7 +584,12 @@ const integrationHost = Layer.succeed(
   }),
 );
 
-const integrationLayer = Layer.mergeAll(integrationHost, ReadinessFilesLive, ReadinessGitLive);
+const integrationLayer = Layer.mergeAll(
+  integrationHost,
+  ReadinessFilesLive,
+  ReadinessGitLive,
+  capableRoleHostLauncher(),
+);
 
 describe('preview against real temporary git repositories', () => {
   it.effect('succeeds twice without touching the checkout or creating worktrees and runs', () =>

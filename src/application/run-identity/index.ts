@@ -36,6 +36,7 @@ import {
 import { ensureGuidanceSnapshot } from '../guidance/index.js';
 import { ReadinessFiles } from '../readiness/index.js';
 import { withRepositoryLease } from '../repository-lease/index.js';
+import { preflightRoleHostCapabilities } from '../role-conversations/index.js';
 import {
   RunHistoryConflict,
   RunHistoryStorage,
@@ -56,6 +57,7 @@ import type {
   RepositoryLeaseError,
   RepositoryLeaseStore,
 } from '../repository-lease/index.js';
+import type { RoleHostCapabilityError, RoleHostLauncher } from '../role-conversations/index.js';
 import type {
   CleanupProgressPayload,
   RunEventDraft,
@@ -109,6 +111,7 @@ export type RunIdentityError =
   | RunWorkspaceBlocked
   | RunHistoryError
   | GuidanceError
+  | RoleHostCapabilityError
   | RepositoryLeaseError;
 
 export interface RunStorageFileStatus {
@@ -375,6 +378,7 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   | RunHistoryStorage
   | RepositoryLeaseStore
   | RepositoryHostIdentity
+  | RoleHostLauncher
   | RunGit
   | GuidanceGit
   | GuidanceSnapshotStore
@@ -583,6 +587,8 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
 
     return provenanceOf(frozen, ready);
   });
+
+  yield* preflightRoleHostCapabilities({ configuration, runId });
 
   const provenance = yield* withRepositoryLease(
     {

@@ -13,9 +13,13 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { RunGit, RunWorkspaceBlocked } from '../src/application/git-provisioning/index.js';
 import { ReadinessHost } from '../src/application/readiness/index.js';
+import { RoleHostCapabilityError } from '../src/application/role-conversations/index.js';
+import { RoleHostLauncherLive } from '../src/platform/role-host.js';
+import { capableRoleHostLauncher } from './fixtures/role-host/role-host-launcher.js';
 import {
   readRunWorkflowState,
   reconcileRunReports,
@@ -47,12 +51,17 @@ import type {
   RepositoryHostIdentity,
   RepositoryLeaseStore,
 } from '../src/application/repository-lease/index.js';
+import type { RoleHostLauncher } from '../src/application/role-conversations/index.js';
 import type { RunHistoryStorage } from '../src/application/run-history/index.js';
 import type { RunIdentityStore } from '../src/application/run-identity/index.js';
 
 const TASK_ID = 'example-change';
 
 const SOURCE_COMMIT = '0123456789abcdef0123456789abcdef01234567';
+
+const FIXTURE_PATH = fileURLToPath(
+  new URL('./fixtures/role-host/fake-role-host.mjs', import.meta.url),
+);
 
 function git(dir: string, args: ReadonlyArray<string>): string {
   return execFileSync('git', [...args], { cwd: dir, encoding: 'utf8' });
@@ -73,7 +82,10 @@ interface RepositoryFixture {
   readonly cleanup: () => void;
 }
 
-function goldenDocument(targetRepository: string) {
+function goldenDocument(
+  targetRepository: string,
+  roleHarnessCommand: ReadonlyArray<string> = ['foundry-role-host'],
+) {
   return {
     schemaVersion: 1,
     targetRepository,
@@ -82,7 +94,7 @@ function goldenDocument(targetRepository: string) {
     taskBranchPolicy: 'foundry/<task-id>',
     roleHarness: {
       protocol: 'foundry-role-host-v1',
-      command: ['foundry-role-host'],
+      command: roleHarnessCommand,
       environmentAllowlist: [],
     },
     timeouts: {
@@ -123,7 +135,10 @@ function goldenDocument(targetRepository: string) {
   };
 }
 
-function setupRepositoryFixture(label: string): RepositoryFixture {
+function setupRepositoryFixture(
+  label: string,
+  roleHarnessCommand: ReadonlyArray<string> = ['foundry-role-host'],
+): RepositoryFixture {
   const base = mkdtempSync(join(tmpdir(), `foundry-workspace-${label}-`));
   const target = join(base, 'target');
   const remote = join(base, 'remote.git');
@@ -140,7 +155,7 @@ function setupRepositoryFixture(label: string): RepositoryFixture {
   git(target, ['remote', 'add', 'origin', remote]);
   git(target, ['push', '-u', 'origin', 'main']);
   const configPath = join(home, 'foundry.config.json');
-  writeFileSync(configPath, JSON.stringify(goldenDocument(target)));
+  writeFileSync(configPath, JSON.stringify(goldenDocument(target, roleHarnessCommand)));
   const requestPath = join(home, 'request.md');
   writeFileSync(requestPath, `# Outcome\n\n${label}\n`);
   return {
@@ -167,7 +182,7 @@ const integrationHost = Layer.succeed(
   }),
 );
 
-const AppLive = Layer.mergeAll(
+const AppBase = Layer.mergeAll(
   integrationHost,
   ReadinessFilesLive,
   RunIdentityLive,
@@ -177,6 +192,8 @@ const AppLive = Layer.mergeAll(
   GuidanceLive,
 );
 
+const AppLive = Layer.mergeAll(AppBase, capableRoleHostLauncher());
+
 type AppRequirements =
   | ReadinessHost
   | ReadinessFiles
@@ -184,6 +201,7 @@ type AppRequirements =
   | RunHistoryStorage
   | RepositoryLeaseStore
   | RepositoryHostIdentity
+  | RoleHostLauncher
   | RunGit
   | GuidanceGit
   | GuidanceSnapshotStore;
@@ -364,6 +382,7 @@ describe('run-owned workspace provisioning', () => {
           RepositoryLeaseLive,
           failingRunGit('createWorktree'),
           GuidanceLive,
+          capableRoleHostLauncher(),
         );
         const error = yield* record(fixture, { runId: 'RUN-OWN-RETRY' }, partial).pipe(Effect.flip);
         expect(error).toBeInstanceOf(RunWorkspaceBlocked);
@@ -413,6 +432,7 @@ describe('run-owned workspace provisioning', () => {
           RepositoryLeaseLive,
           failingRunGit('createWorktree'),
           GuidanceLive,
+          capableRoleHostLauncher(),
         );
         yield* record(fixture, { runId: 'RUN-OWN-MOVED' }, partial).pipe(Effect.flip);
 
@@ -507,6 +527,38 @@ describe('run-owned workspace provisioning', () => {
           fixture.cleanup();
         }
       }),
+  );
+
+  it.effect('rejects an incapable role host before provisioning any run-owned resource', () =>
+    Effect.gen(function* () {
+      const fixture = setupRepositoryFixture('incapable', [
+        process.execPath,
+        FIXTURE_PATH,
+        'not-resumable',
+        join(tmpdir(), 'foundry-role-host-incapable.log'),
+      ]);
+      try {
+        const error = yield* record(
+          fixture,
+          { runId: 'RUN-INC' },
+          Layer.mergeAll(AppBase, RoleHostLauncherLive),
+        ).pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(RoleHostCapabilityError);
+        if (!(error instanceof RoleHostCapabilityError)) {
+          throw new Error('Expected a RoleHostCapabilityError.');
+        }
+        expect(error.reason).toBe('not-resumable');
+        expect(error.runId).toBe('RUN-INC');
+
+        expect(existsSync(fixture.runDirectory('RUN-INC'))).toBe(false);
+        expect(existsSync(join(fixture.target, '.agent', 'runs'))).toBe(false);
+        expect(existsSync(join(fixture.target, '.agent', 'worktrees', TASK_ID))).toBe(false);
+        expect(gitIn(fixture.target, ['branch', '--list', `foundry/${TASK_ID}`]).trim()).toBe('');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
   );
 });
 

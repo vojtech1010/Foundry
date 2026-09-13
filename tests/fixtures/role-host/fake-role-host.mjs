@@ -38,6 +38,47 @@ function settled() {
   };
 }
 
+function capabilities() {
+  const base = {
+    schemaVersion: 1,
+    protocol: 'foundry-role-host-v1',
+    resumable: true,
+    availableRoles: ['architect', 'coder', 'lead_coder', 'tester', 'reviewer'],
+    capabilityProfiles: {
+      filesystem: [
+        'read_only_snapshot',
+        'run_owned_worktree',
+        'owned_scratch',
+        'owned_capture_scratch',
+      ],
+      network: ['network_denied', 'runtime_origin_only'],
+    },
+    adapterVersion: 'fake-1',
+  };
+  if (scenario === 'not-resumable') {
+    return { ...base, resumable: false };
+  }
+  if (scenario === 'missing-role') {
+    return { ...base, availableRoles: base.availableRoles.filter((role) => role !== 'tester') };
+  }
+  if (scenario === 'missing-profile') {
+    return {
+      ...base,
+      capabilityProfiles: { ...base.capabilityProfiles, network: ['network_denied'] },
+    };
+  }
+  if (scenario === 'unsupported-protocol') {
+    return { ...base, protocol: 'foundry-role-host-v0' };
+  }
+  if (scenario === 'extra-capabilities') {
+    return { ...base, extra: true };
+  }
+  if (scenario === 'unknown-role') {
+    return { ...base, availableRoles: [...base.availableRoles, 'operator'] };
+  }
+  return base;
+}
+
 function submitAlreadyAccepted() {
   if (logPath.length === 0) {
     return false;
@@ -83,6 +124,14 @@ const sessionId = 'session-1';
 const ownershipToken = 'owner-1';
 
 switch (operation) {
+  case 'capabilities': {
+    if (scenario === 'malformed') {
+      process.stdout.write('{not-json');
+      break;
+    }
+    writeDocument(capabilities());
+    break;
+  }
   case 'create': {
     const generation = scenario === 'mismatch-generation' ? 99 : 1;
     writeDocument({

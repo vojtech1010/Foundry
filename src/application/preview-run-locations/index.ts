@@ -13,6 +13,7 @@ import { checkReadiness, ReadinessFiles } from '../readiness/index.js';
 import { decodeProjectConfiguration } from '../project-configuration.js';
 
 import type { ReadinessError, ReadinessGit, ReadinessHost } from '../readiness/index.js';
+import type { RoleHostCapabilityError, RoleHostLauncher } from '../role-conversations/index.js';
 import type { CommandVector } from '../../domain/project-configuration.js';
 
 export class PreviewLocationsError extends Schema.TaggedError<PreviewLocationsError>()(
@@ -60,8 +61,8 @@ export const previewRunLocations = Effect.fn('previewRunLocations')(function* (
   options: PreviewRunLocationsOptions,
 ): Effect.fn.Return<
   PreviewLocationsReport,
-  PreviewLocationsError | ReadinessError,
-  ReadinessHost | ReadinessFiles | ReadinessGit
+  PreviewLocationsError | ReadinessError | RoleHostCapabilityError,
+  ReadinessHost | ReadinessFiles | ReadinessGit | RoleHostLauncher
 > {
   const readiness = yield* checkReadiness({ configArg: options.configArg, cwd: options.cwd });
 

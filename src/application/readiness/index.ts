@@ -15,6 +15,9 @@ import {
 } from '../../domain/readiness.js';
 
 import { decodeProjectConfiguration } from '../project-configuration.js';
+import { preflightRoleHostCapabilities } from '../role-conversations/index.js';
+
+import type { RoleHostCapabilityError, RoleHostLauncher } from '../role-conversations/index.js';
 
 export class ReadinessError extends Schema.TaggedError<ReadinessError>()('ReadinessError', {
   message: Schema.String,
@@ -83,11 +86,21 @@ export interface DoctorRepositoryReport {
   readonly commit: string;
 }
 
+export interface DoctorRoleHostReport {
+  readonly protocol: string;
+  readonly adapterVersion: string;
+  readonly resumable: true;
+  readonly availableRoles: ReadonlyArray<string>;
+  readonly filesystemProfiles: ReadonlyArray<string>;
+  readonly networkProfiles: ReadonlyArray<string>;
+}
+
 export interface DoctorReport {
   readonly host: DoctorHostReport;
   readonly config: DoctorConfigReport;
   readonly storage: DoctorStorageReport;
   readonly repository: DoctorRepositoryReport;
+  readonly roleHost: DoctorRoleHostReport;
 }
 
 export interface CheckReadinessOptions {
@@ -114,7 +127,11 @@ function excerpt(output: string): string {
 
 export const checkReadiness = Effect.fn('checkReadiness')(function* (
   options: CheckReadinessOptions,
-): Effect.fn.Return<DoctorReport, ReadinessError, ReadinessHost | ReadinessFiles | ReadinessGit> {
+): Effect.fn.Return<
+  DoctorReport,
+  ReadinessError | RoleHostCapabilityError,
+  ReadinessHost | ReadinessFiles | ReadinessGit | RoleHostLauncher
+> {
   const host = yield* ReadinessHost;
   const files = yield* ReadinessFiles;
   const git = yield* ReadinessGit;
@@ -277,6 +294,8 @@ export const checkReadiness = Effect.fn('checkReadiness')(function* (
     }
   }
 
+  const capabilities = yield* preflightRoleHostCapabilities({ configuration });
+
   return {
     host: {
       platform: displayPlatform(platform),
@@ -297,6 +316,14 @@ export const checkReadiness = Effect.fn('checkReadiness')(function* (
       remote: configuration.sourceRemote,
       branch: configuration.sourceBranch,
       commit,
+    },
+    roleHost: {
+      protocol: capabilities.protocol,
+      adapterVersion: capabilities.adapterVersion,
+      resumable: true,
+      availableRoles: [...capabilities.availableRoles],
+      filesystemProfiles: [...capabilities.capabilityProfiles.filesystem],
+      networkProfiles: [...capabilities.capabilityProfiles.network],
     },
   };
 });
