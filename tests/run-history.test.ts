@@ -46,7 +46,13 @@ import {
 import { RunHistoryLive } from '../src/platform/run-history.js';
 import { RunIdentityLive } from '../src/platform/run-identity.js';
 
-import type { RunEvent, RunEventDraft, RunEventEnvelope } from '../src/domain/run-history.js';
+import type {
+  RoleSessionRepairContext,
+  RunEvent,
+  RunEventDraft,
+  RunEventEnvelope,
+} from '../src/domain/run-history.js';
+import type { FindingRecord } from '../src/domain/findings.js';
 import type { WorkflowTransitionRequest } from '../src/domain/workflow.js';
 
 const RUN_ID = 'RUN-HISTORY';
@@ -823,4 +829,367 @@ describe('collision handling and interrupted publication', () => {
       }
     }),
   );
+});
+
+const IMPLEMENTED_COMMIT = 'abcdefabcdefabcdefabcdefabcdefabcdefabcd';
+
+const RUNTIME_IDENTITY = {
+  adapterVersion: 'test',
+  provider: 'test',
+  model: 'test',
+  toolProfile: 'test',
+};
+
+function eventId(index: number): string {
+  return `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
+}
+
+function sealChain(runId: string, drafts: ReadonlyArray<RunEventDraft>): ReadonlyArray<RunEvent> {
+  const events: Array<RunEvent> = [];
+  let previousHash: string | null = null;
+  drafts.forEach((draft, index) => {
+    const envelope: RunEventEnvelope = {
+      schemaVersion: 1,
+      runId,
+      revision: index + 1,
+      eventId: eventId(index + 1),
+      occurredAt: OCCURRED_AT,
+      previousEventHash: previousHash,
+    };
+    const sealed = sealRunEvent(envelope, draft);
+    events.push(sealed);
+    previousHash = sealed.eventHash;
+  });
+  return events;
+}
+
+const PROVISIONING_DRAFTS: ReadonlyArray<RunEventDraft> = [
+  { type: 'run-created', payload: { taskId: 'TASK-1' } },
+  {
+    type: 'source-frozen',
+    payload: {
+      repository: {
+        repositoryRoot: '/repo',
+        gitDirectory: '/repo/.git',
+        remoteUrl: 'https://example.invalid/repo.git',
+      },
+      sourceRemote: 'origin',
+      sourceBranch: 'main',
+      sourceCommit: FROZEN_COMMIT,
+      taskBranch: TASK_BRANCH,
+      workspace: WORKSPACE,
+      expectedHead: FROZEN_COMMIT,
+    },
+  },
+  {
+    type: 'guidance-frozen',
+    payload: {
+      sourceCommit: FROZEN_COMMIT,
+      manifestPath: 'guidance-manifest.json',
+      aggregateHash: 'f'.repeat(64),
+      files: [],
+    },
+  },
+  {
+    type: 'worktree-ready',
+    payload: {
+      taskBranch: TASK_BRANCH,
+      workspace: WORKSPACE,
+      headCommit: FROZEN_COMMIT,
+      baseCommit: FROZEN_COMMIT,
+    },
+  },
+  {
+    type: 'workflow-transition',
+    payload: { route: 'run-created', from: null, to: 'planning', checkpoint: null },
+  },
+  {
+    type: 'plan-accepted',
+    payload: {
+      outcome: 'plan_ready',
+      criteria: [{ id: 'AC-001', text: 'the criterion' }],
+      runtimeValidationRequired: false,
+      execution: {
+        mode: 'sequential',
+        objectives: [
+          { id: 'OBJ-001', title: 'implement', affectedPaths: ['.'], criterionIds: ['AC-001'] },
+        ],
+      },
+    },
+  },
+  {
+    type: 'workflow-transition',
+    payload: { route: 'plan-accepted', from: 'planning', to: 'coding', checkpoint: null },
+  },
+  {
+    type: 'implementation-accepted',
+    payload: {
+      taskBranch: TASK_BRANCH,
+      baseCommit: FROZEN_COMMIT,
+      commit: IMPLEMENTED_COMMIT,
+      changedFiles: ['src/a.ts'],
+      noChangeCandidate: false,
+    },
+  },
+  {
+    type: 'workflow-transition',
+    payload: { route: 'implementation-ready', from: 'coding', to: 'verifying', checkpoint: null },
+  },
+];
+
+function findingDraft(overrides: Partial<FindingRecord> = {}): RunEventDraft {
+  return {
+    type: 'finding-recorded',
+    payload: {
+      id: 'FND-001',
+      category: 'check',
+      source: 'failed-check',
+      owner: 'coder',
+      severity: 'high',
+      blocking: true,
+      commit: IMPLEMENTED_COMMIT,
+      description: 'Required command "lint" exited with code 1; the deterministic gate failed.',
+      detail: 'The deterministic project command "lint" did not pass.',
+      evidence: ['log /evidence/lint.log sha256:' + 'b'.repeat(64)],
+      ...overrides,
+    },
+  };
+}
+
+describe('durable finding records and repair submissions', () => {
+  it('accepts a commit-bound finding and exposes it as derived state', () => {
+    const events = sealChain(RUN_ID, [...PROVISIONING_DRAFTS, findingDraft()]);
+    const verification = verifyRunHistoryEvents(events, RUN_ID);
+    expect(verification.ok).toBe(true);
+    if (verification.ok) {
+      expect(verification.derived.findings).toEqual([findingDraft().payload]);
+    }
+  });
+
+  it('refuses a finding for a commit other than the current result head', () => {
+    const events = sealChain(RUN_ID, [
+      ...PROVISIONING_DRAFTS,
+      findingDraft({ commit: 'c'.repeat(40) }),
+    ]);
+    const verification = verifyRunHistoryEvents(events, RUN_ID);
+    expect(verification.ok).toBe(false);
+    if (!verification.ok) {
+      expect(verification.problem).toContain('other than the current result head');
+    }
+  });
+
+  it('refuses a reused finding id for the same commit', () => {
+    const events = sealChain(RUN_ID, [
+      ...PROVISIONING_DRAFTS,
+      findingDraft(),
+      findingDraft({ description: 'a different summary' }),
+    ]);
+    const verification = verifyRunHistoryEvents(events, RUN_ID);
+    expect(verification.ok).toBe(false);
+    if (!verification.ok) {
+      expect(verification.problem).toContain('reuses the finding id');
+    }
+  });
+
+  const rejectedNarrative = '# Result\n\nThe original rejected narrative.';
+  const rejectedControl = { schemaVersion: 1, outcome: 'bogus' };
+  const repairedControl = { schemaVersion: 1, outcome: 'implemented' };
+  const rejectedNarrativeHash = createHash('sha256')
+    .update(rejectedNarrative, 'utf8')
+    .digest('hex');
+  const rejectedControlHash = createHash('sha256')
+    .update(JSON.stringify(rejectedControl), 'utf8')
+    .digest('hex');
+
+  const sessionDrafts: ReadonlyArray<RunEventDraft> = [
+    ...PROVISIONING_DRAFTS,
+    {
+      type: 'role-session-created',
+      payload: {
+        role: 'coder',
+        attempt: 1,
+        generation: 1,
+        sessionId: 'session-1',
+        ownershipToken: 'owner-1',
+        sequence: 0,
+        runtimeIdentity: RUNTIME_IDENTITY,
+        workingDirectory: null,
+      },
+    },
+    {
+      type: 'role-session-submission-requested',
+      payload: {
+        sessionId: 'session-1',
+        generation: 1,
+        idempotencyKey: 'key-1',
+        promptHash: 'a'.repeat(64),
+        baselineSequence: 0,
+      },
+    },
+    {
+      type: 'role-session-submission-started',
+      payload: {
+        sessionId: 'session-1',
+        generation: 1,
+        idempotencyKey: 'key-1',
+        submission: 'accepted',
+      },
+    },
+    {
+      type: 'role-session-observed',
+      payload: {
+        sessionId: 'session-1',
+        generation: 1,
+        status: 'settled',
+        sequence: 1,
+        eventCount: 1,
+        narrative: rejectedNarrative,
+        control: rejectedControl,
+      },
+    },
+  ];
+
+  function repairSubmissionDraft(
+    repairOverrides: Partial<RoleSessionRepairContext> = {},
+  ): RunEventDraft {
+    return {
+      type: 'role-session-submission-requested',
+      payload: {
+        sessionId: 'session-1',
+        generation: 1,
+        kind: 'repair',
+        idempotencyKey: 'key-2',
+        promptHash: 'd'.repeat(64),
+        baselineSequence: 1,
+        repair: {
+          rejectedSequence: 1,
+          rejectedControl,
+          rejectedNarrativeHash,
+          rejectedControlHash,
+          validationError: 'the control envelope is invalid',
+          ...repairOverrides,
+        },
+      },
+    };
+  }
+
+  const repairCompletion: ReadonlyArray<RunEventDraft> = [
+    {
+      type: 'role-session-submission-started',
+      payload: {
+        sessionId: 'session-1',
+        generation: 1,
+        idempotencyKey: 'key-2',
+        submission: 'accepted',
+      },
+    },
+    {
+      type: 'role-session-observed',
+      payload: {
+        sessionId: 'session-1',
+        generation: 1,
+        status: 'settled',
+        sequence: 2,
+        eventCount: 2,
+        narrative: rejectedNarrative,
+        control: repairedControl,
+      },
+    },
+  ];
+
+  it('accepts a same-session repair that preserves the original narrative', () => {
+    const events = sealChain(RUN_ID, [
+      ...sessionDrafts,
+      repairSubmissionDraft(),
+      ...repairCompletion,
+    ]);
+    const verification = verifyRunHistoryEvents(events, RUN_ID);
+    expect(verification.ok).toBe(true);
+    if (verification.ok) {
+      const session = verification.derived.roleSessions[0];
+      expect(session?.submission?.idempotencyKey).toBe('key-2');
+      expect(session?.lastObservation?.sequence).toBe(2);
+    }
+  });
+
+  it('refuses a repair that does not preserve the rejected narrative hash', () => {
+    const events = sealChain(RUN_ID, [
+      ...sessionDrafts,
+      repairSubmissionDraft({ rejectedNarrativeHash: '0'.repeat(64) }),
+      ...repairCompletion,
+    ]);
+    const verification = verifyRunHistoryEvents(events, RUN_ID);
+    expect(verification.ok).toBe(false);
+    if (!verification.ok) {
+      expect(verification.problem).toContain('does not preserve the rejected narrative');
+    }
+  });
+
+  it('refuses a repaired observation whose narrative changed', () => {
+    const events = sealChain(RUN_ID, [
+      ...sessionDrafts,
+      repairSubmissionDraft(),
+      {
+        type: 'role-session-submission-started',
+        payload: {
+          sessionId: 'session-1',
+          generation: 1,
+          idempotencyKey: 'key-2',
+          submission: 'accepted',
+        },
+      },
+      {
+        type: 'role-session-observed',
+        payload: {
+          sessionId: 'session-1',
+          generation: 1,
+          status: 'settled',
+          sequence: 2,
+          eventCount: 2,
+          narrative: '# Result\n\nA changed narrative.',
+          control: repairedControl,
+        },
+      },
+    ]);
+    const verification = verifyRunHistoryEvents(events, RUN_ID);
+    expect(verification.ok).toBe(false);
+    if (!verification.ok) {
+      expect(verification.problem).toContain('changed the original narrative');
+    }
+  });
+
+  it('refuses a repair submission without a settled rejected report', () => {
+    const events = sealChain(RUN_ID, [
+      ...PROVISIONING_DRAFTS,
+      {
+        type: 'role-session-created',
+        payload: {
+          role: 'coder',
+          attempt: 1,
+          generation: 1,
+          sessionId: 'session-1',
+          ownershipToken: 'owner-1',
+          sequence: 0,
+          runtimeIdentity: RUNTIME_IDENTITY,
+          workingDirectory: null,
+        },
+      },
+      {
+        type: 'role-session-submission-requested',
+        payload: {
+          sessionId: 'session-1',
+          generation: 1,
+          idempotencyKey: 'key-1',
+          promptHash: 'a'.repeat(64),
+          baselineSequence: 0,
+        },
+      },
+      repairSubmissionDraft(),
+    ]);
+    const verification = verifyRunHistoryEvents(events, RUN_ID);
+    expect(verification.ok).toBe(false);
+    if (!verification.ok) {
+      expect(verification.problem).toContain('settled rejected report');
+    }
+  });
 });

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Schema } from 'effect';
 
+import { FindingRecordSchema } from './findings.js';
 import { GuidanceSnapshotFileSchema } from './guidance.js';
 import {
   ROLE_HOST_DISPOSITIONS,
@@ -26,9 +27,10 @@ import {
   isActiveWorkflowState,
 } from './workflow.js';
 
+import type { FindingRecord } from './findings.js';
 import type { ProjectVerificationReport, VerificationExecution } from './project-verification.js';
 import type { RuntimeLifecycleRecord } from './project-runtime.js';
-import type { RoleHostSessionState } from './role-host.js';
+import type { RoleHostControl, RoleHostSessionState } from './role-host.js';
 import type { WorkflowAttempt, WorkflowState } from './workflow.js';
 
 export const RUN_HISTORY_SCHEMA_VERSION = 1 as const;
@@ -55,6 +57,7 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'role-session-observed',
   'role-session-stopped',
   'plan-accepted',
+  'finding-recorded',
   'role-permission-violation',
   'implementation-accepted',
   'verification-completed',
@@ -158,12 +161,34 @@ export const RoleSessionCreatedPayloadSchema = Schema.Struct({
 
 export type RoleSessionCreatedPayload = (typeof RoleSessionCreatedPayloadSchema)['Type'];
 
+export const ROLE_SESSION_SUBMISSION_KINDS = ['initial', 'repair'] as const;
+
+export type RoleSessionSubmissionKind = (typeof ROLE_SESSION_SUBMISSION_KINDS)[number];
+
+/**
+ * Durable context for a same-session control repair. The rejected narrative
+ * and control hashes prove the repair prompt could not have changed the
+ * original Markdown, and the validation error explains why a repair was
+ * required. The repair prompt hash travels in the submission's `promptHash`.
+ */
+export const RoleSessionRepairContextSchema = Schema.Struct({
+  rejectedSequence: Schema.Natural,
+  rejectedControl: Schema.NullOr(RoleHostControlSchema),
+  rejectedNarrativeHash: Sha256Hex,
+  rejectedControlHash: Schema.NullOr(Sha256Hex),
+  validationError: Schema.NonEmptyString,
+});
+
+export type RoleSessionRepairContext = (typeof RoleSessionRepairContextSchema)['Type'];
+
 export const RoleSessionSubmissionRequestedPayloadSchema = Schema.Struct({
   sessionId: Schema.NonEmptyString,
   generation: PositiveCount,
+  kind: Schema.optional(Schema.Literals(ROLE_SESSION_SUBMISSION_KINDS)),
   idempotencyKey: Schema.NonEmptyString,
   promptHash: Sha256Hex,
   baselineSequence: Schema.Natural,
+  repair: Schema.optional(Schema.NullOr(RoleSessionRepairContextSchema)),
 });
 
 export type RoleSessionSubmissionRequestedPayload =
@@ -230,6 +255,10 @@ export const PlanAcceptedPayloadSchema = Schema.Struct({
 });
 
 export type PlanAcceptedPayload = (typeof PlanAcceptedPayloadSchema)['Type'];
+
+export const FindingRecordedPayloadSchema = FindingRecordSchema;
+
+export type FindingRecordedPayload = FindingRecord;
 
 export const ROLE_PERMISSION_VIOLATION_KINDS = [
   'project-mutation',
@@ -368,6 +397,12 @@ export const PlanAcceptedEventSchema = Schema.Struct({
   payload: PlanAcceptedPayloadSchema,
 });
 
+export const FindingRecordedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('finding-recorded'),
+  payload: FindingRecordedPayloadSchema,
+});
+
 export const RolePermissionViolationEventSchema = Schema.Struct({
   ...RunEventEnvelopeFields,
   type: Schema.Literal('role-permission-violation'),
@@ -418,6 +453,7 @@ export const RunEventSchema = Schema.Union([
   RoleSessionObservedEventSchema,
   RoleSessionStoppedEventSchema,
   PlanAcceptedEventSchema,
+  FindingRecordedEventSchema,
   RolePermissionViolationEventSchema,
   ImplementationAcceptedEventSchema,
   VerificationCompletedEventSchema,
@@ -457,6 +493,7 @@ export type RunEventDraft =
   | { readonly type: 'role-session-observed'; readonly payload: RoleSessionObservedPayload }
   | { readonly type: 'role-session-stopped'; readonly payload: RoleSessionStoppedPayload }
   | { readonly type: 'plan-accepted'; readonly payload: PlanAcceptedPayload }
+  | { readonly type: 'finding-recorded'; readonly payload: FindingRecordedPayload }
   | {
       readonly type: 'role-permission-violation';
       readonly payload: RolePermissionViolationPayload;
@@ -493,6 +530,7 @@ export interface RunHistoryDerivedState {
   readonly worktreeReady: WorktreeReadyPayload | null;
   readonly roleSessions: ReadonlyArray<RoleHostSessionState>;
   readonly acceptedPlan: PlanAcceptedPayload | null;
+  readonly findings: ReadonlyArray<FindingRecord>;
   readonly implementation: ImplementationAcceptedPayload | null;
   readonly permissionViolations: ReadonlyArray<RolePermissionViolationPayload>;
   readonly verifications: ReadonlyArray<VerificationCompletedPayload>;
@@ -753,7 +791,18 @@ function canonicalEventText(event: UnsignedRunEvent): string {
           baselineSequence: event.payload.baselineSequence,
           generation: event.payload.generation,
           idempotencyKey: event.payload.idempotencyKey,
+          kind: event.payload.kind ?? null,
           promptHash: event.payload.promptHash,
+          repair:
+            event.payload.repair === undefined || event.payload.repair === null
+              ? null
+              : {
+                  rejectedControl: event.payload.repair.rejectedControl,
+                  rejectedControlHash: event.payload.repair.rejectedControlHash,
+                  rejectedNarrativeHash: event.payload.repair.rejectedNarrativeHash,
+                  rejectedSequence: event.payload.repair.rejectedSequence,
+                  validationError: event.payload.repair.validationError,
+                },
           sessionId: event.payload.sessionId,
         },
         previousEventHash: event.previousEventHash,
@@ -832,6 +881,28 @@ function canonicalEventText(event: UnsignedRunEvent): string {
           },
           outcome: event.payload.outcome,
           runtimeValidationRequired: event.payload.runtimeValidationRequired,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'finding-recorded':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          blocking: event.payload.blocking,
+          category: event.payload.category,
+          commit: event.payload.commit,
+          description: event.payload.description,
+          detail: event.payload.detail,
+          evidence: event.payload.evidence,
+          id: event.payload.id,
+          owner: event.payload.owner,
+          severity: event.payload.severity,
+          source: event.payload.source,
         },
         previousEventHash: event.previousEventHash,
         revision: event.revision,
@@ -977,6 +1048,8 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'role-session-stopped', payload: event.payload };
     case 'plan-accepted':
       return { ...envelope, type: 'plan-accepted', payload: event.payload };
+    case 'finding-recorded':
+      return { ...envelope, type: 'finding-recorded', payload: event.payload };
     case 'role-permission-violation':
       return { ...envelope, type: 'role-permission-violation', payload: event.payload };
     case 'implementation-accepted':
@@ -1040,6 +1113,26 @@ function verifyTransitionPayload(
   return null;
 }
 
+interface RoleSessionVerification {
+  state: RoleHostSessionState;
+  readonly submissions: Array<{
+    readonly kind: RoleSessionSubmissionKind;
+    readonly idempotencyKey: string;
+  }>;
+  readonly startedIdempotencyKeys: Set<string>;
+  pendingIdempotencyKey: string | null;
+  awaitingObservation: boolean;
+  expectedRepairNarrativeHash: string | null;
+}
+
+function hashUtf8(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function hashControl(control: RoleHostControl): string {
+  return hashUtf8(JSON.stringify(control));
+}
+
 export function verifyRunHistoryEvents(
   events: ReadonlyArray<RunEvent>,
   runId: string,
@@ -1051,12 +1144,13 @@ export function verifyRunHistoryEvents(
   let guidanceFrozen: GuidanceFrozenPayload | null = null;
   let worktreeReady: WorktreeReadyPayload | null = null;
   const attempts: Array<WorkflowAttempt> = [];
-  const roleSessions = new Map<string, RoleHostSessionState>();
+  const roleSessions = new Map<string, RoleSessionVerification>();
   const permissionViolations: Array<RolePermissionViolationPayload> = [];
   const verifications: Array<VerificationCompletedPayload> = [];
   const testerSkips: Array<TesterSkippedPayload> = [];
   const validationLimitations: Array<ValidationLimitationPayload> = [];
   const runtimeLifecycles: Array<RuntimeLifecyclePayload> = [];
+  const findings: Array<FindingRecord> = [];
   let acceptedPlan: PlanAcceptedPayload | null = null;
   let implementation: ImplementationAcceptedPayload | null = null;
   let previousHash: string | null = null;
@@ -1229,7 +1323,7 @@ export function verifyRunHistoryEvents(
           return { ok: false, problem: `${label} reuses the role session "${sessionId}"` };
         }
         for (const existing of roleSessions.values()) {
-          if (existing.role === role && existing.attempt === attempt) {
+          if (existing.state.role === role && existing.state.attempt === attempt) {
             return {
               ok: false,
               problem: `${label} starts a second session for role "${role}" attempt ${attempt}`,
@@ -1237,18 +1331,25 @@ export function verifyRunHistoryEvents(
           }
         }
         roleSessions.set(sessionId, {
-          role,
-          attempt,
-          generation,
-          sessionId,
-          ownershipToken,
-          initialSequence: event.payload.sequence,
-          runtimeIdentity: event.payload.runtimeIdentity,
-          workingDirectory: event.payload.workingDirectory,
-          submission: null,
-          submissionStarted: null,
-          lastObservation: null,
-          stopDisposition: null,
+          state: {
+            role,
+            attempt,
+            generation,
+            sessionId,
+            ownershipToken,
+            initialSequence: event.payload.sequence,
+            runtimeIdentity: event.payload.runtimeIdentity,
+            workingDirectory: event.payload.workingDirectory,
+            submission: null,
+            submissionStarted: null,
+            lastObservation: null,
+            stopDisposition: null,
+          },
+          submissions: [],
+          startedIdempotencyKeys: new Set(),
+          pendingIdempotencyKey: null,
+          awaitingObservation: false,
+          expectedRepairNarrativeHash: null,
         });
         break;
       }
@@ -1260,29 +1361,110 @@ export function verifyRunHistoryEvents(
             problem: `${label} submits a role turn for an unknown session "${event.payload.sessionId}"`,
           };
         }
-        if (session.submission !== null) {
-          return { ok: false, problem: `${label} records a second submission intent` };
-        }
-        if (session.generation !== event.payload.generation) {
+        if (session.state.generation !== event.payload.generation) {
           return {
             ok: false,
             problem: `${label} records a submission generation that differs from its session`,
           };
         }
-        if (event.payload.baselineSequence < session.initialSequence) {
+        const kind = event.payload.kind ?? 'initial';
+        if (kind === 'initial') {
+          if (session.submissions.length > 0) {
+            return { ok: false, problem: `${label} records a second submission intent` };
+          }
+        } else {
+          if (session.submissions.length === 0) {
+            return {
+              ok: false,
+              problem: `${label} records a repair submission before any initial submission`,
+            };
+          }
+          const observation = session.state.lastObservation;
+          if (
+            observation === null ||
+            observation.status !== 'settled' ||
+            observation.narrative === null
+          ) {
+            return {
+              ok: false,
+              problem: `${label} records a repair submission without a settled rejected report`,
+            };
+          }
+          const repair = event.payload.repair ?? null;
+          if (repair === null) {
+            return {
+              ok: false,
+              problem: `${label} records a repair submission without the rejected envelope context`,
+            };
+          }
+          if (repair.rejectedSequence !== observation.sequence) {
+            return {
+              ok: false,
+              problem: `${label} records a repair for a different rejected sequence`,
+            };
+          }
+          if (repair.rejectedNarrativeHash !== hashUtf8(observation.narrative)) {
+            return {
+              ok: false,
+              problem: `${label} records a repair that does not preserve the rejected narrative`,
+            };
+          }
+          if (observation.control === null) {
+            if (repair.rejectedControl !== null || repair.rejectedControlHash !== null) {
+              return {
+                ok: false,
+                problem: `${label} records a rejected control that the session never produced`,
+              };
+            }
+          } else if (
+            repair.rejectedControl === null ||
+            repair.rejectedControlHash !== hashControl(observation.control)
+          ) {
+            return {
+              ok: false,
+              problem: `${label} records a repair that does not preserve the rejected control`,
+            };
+          }
+          session.expectedRepairNarrativeHash = repair.rejectedNarrativeHash;
+        }
+        if (
+          session.submissions.some((entry) => entry.idempotencyKey === event.payload.idempotencyKey)
+        ) {
+          return { ok: false, problem: `${label} reuses the recorded idempotency key` };
+        }
+        if (session.pendingIdempotencyKey !== null) {
+          return {
+            ok: false,
+            problem: `${label} records a submission intent before the prior submission started`,
+          };
+        }
+        if (event.payload.baselineSequence < session.state.initialSequence) {
           return {
             ok: false,
             problem: `${label} records a submission baseline older than the session sequence`,
           };
         }
-        roleSessions.set(event.payload.sessionId, {
-          ...session,
+        const priorSequence =
+          session.state.lastObservation?.sequence ?? session.state.initialSequence;
+        if (event.payload.baselineSequence < priorSequence) {
+          return {
+            ok: false,
+            problem: `${label} records a submission baseline older than the last observed sequence`,
+          };
+        }
+        session.submissions.push({
+          kind,
+          idempotencyKey: event.payload.idempotencyKey,
+        });
+        session.pendingIdempotencyKey = event.payload.idempotencyKey;
+        session.state = {
+          ...session.state,
           submission: {
             idempotencyKey: event.payload.idempotencyKey,
             promptHash: event.payload.promptHash,
             baselineSequence: event.payload.baselineSequence,
           },
-        });
+        };
         break;
       }
       case 'role-session-submission-started': {
@@ -1293,25 +1475,25 @@ export function verifyRunHistoryEvents(
             problem: `${label} starts a submission for an unknown session "${event.payload.sessionId}"`,
           };
         }
-        if (session.generation !== event.payload.generation) {
+        if (session.state.generation !== event.payload.generation) {
           return {
             ok: false,
             problem: `${label} records a submission generation that differs from its session`,
           };
         }
-        if (session.submission === null) {
+        if (session.pendingIdempotencyKey === null || session.state.submission === null) {
           return { ok: false, problem: `${label} starts a submission before recording its intent` };
         }
-        if (session.submission.idempotencyKey !== event.payload.idempotencyKey) {
+        if (session.pendingIdempotencyKey !== event.payload.idempotencyKey) {
           return { ok: false, problem: `${label} changes the recorded idempotency key` };
         }
-        if (session.submissionStarted !== null) {
+        if (session.startedIdempotencyKeys.has(event.payload.idempotencyKey)) {
           return { ok: false, problem: `${label} records a second submission start` };
         }
-        roleSessions.set(event.payload.sessionId, {
-          ...session,
-          submissionStarted: event.payload.submission,
-        });
+        session.startedIdempotencyKeys.add(event.payload.idempotencyKey);
+        session.pendingIdempotencyKey = null;
+        session.awaitingObservation = true;
+        session.state = { ...session.state, submissionStarted: event.payload.submission };
         break;
       }
       case 'role-session-observed': {
@@ -1322,20 +1504,21 @@ export function verifyRunHistoryEvents(
             problem: `${label} observes an unknown session "${event.payload.sessionId}"`,
           };
         }
-        if (session.generation !== event.payload.generation) {
+        if (session.state.generation !== event.payload.generation) {
           return {
             ok: false,
             problem: `${label} records an observation generation that differs from its session`,
           };
         }
-        const previousObservation = session.lastObservation;
-        if (
+        const previousObservation = session.state.lastObservation;
+        const becameTerminal =
           previousObservation !== null &&
-          (previousObservation.status === 'settled' || previousObservation.status === 'lost')
-        ) {
+          (previousObservation.status === 'settled' || previousObservation.status === 'lost');
+        if (becameTerminal && !session.awaitingObservation) {
           return { ok: false, problem: `${label} observes a session after it became terminal` };
         }
-        const baseline = session.submission?.baselineSequence ?? session.initialSequence;
+        const baseline =
+          session.state.submission?.baselineSequence ?? session.state.initialSequence;
         if (event.payload.sequence < baseline) {
           return { ok: false, problem: `${label} regresses the observed session sequence` };
         }
@@ -1364,14 +1547,25 @@ export function verifyRunHistoryEvents(
               problem: `${label} records a settled observation without a control envelope`,
             };
           }
+          if (
+            session.expectedRepairNarrativeHash !== null &&
+            hashUtf8(event.payload.narrative) !== session.expectedRepairNarrativeHash
+          ) {
+            return {
+              ok: false,
+              problem: `${label} records a repair that changed the original narrative`,
+            };
+          }
+          session.expectedRepairNarrativeHash = null;
+          session.awaitingObservation = false;
         } else if (event.payload.narrative !== null || event.payload.control !== null) {
           return {
             ok: false,
             problem: `${label} records an unfinished observation with a settled result`,
           };
         }
-        roleSessions.set(event.payload.sessionId, {
-          ...session,
+        session.state = {
+          ...session.state,
           lastObservation: {
             status: event.payload.status,
             sequence: event.payload.sequence,
@@ -1379,7 +1573,7 @@ export function verifyRunHistoryEvents(
             narrative: event.payload.narrative,
             control: event.payload.control,
           },
-        });
+        };
         break;
       }
       case 'role-session-stopped': {
@@ -1390,19 +1584,16 @@ export function verifyRunHistoryEvents(
             problem: `${label} stops an unknown session "${event.payload.sessionId}"`,
           };
         }
-        if (session.generation !== event.payload.generation) {
+        if (session.state.generation !== event.payload.generation) {
           return {
             ok: false,
             problem: `${label} records a stop generation that differs from its session`,
           };
         }
-        if (session.stopDisposition !== null) {
+        if (session.state.stopDisposition !== null) {
           return { ok: false, problem: `${label} records a second stop disposition` };
         }
-        roleSessions.set(event.payload.sessionId, {
-          ...session,
-          stopDisposition: event.payload.disposition,
-        });
+        session.state = { ...session.state, stopDisposition: event.payload.disposition };
         break;
       }
       case 'plan-accepted': {
@@ -1429,6 +1620,33 @@ export function verifyRunHistoryEvents(
           };
         }
         acceptedPlan = event.payload;
+        break;
+      }
+      case 'finding-recorded': {
+        const resultCommit = currentResultCommit();
+        if (resultCommit === null) {
+          return {
+            ok: false,
+            problem: `${label} records a finding without an accepted implementation commit`,
+          };
+        }
+        if (event.payload.commit !== resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} records a finding for a commit other than the current result head`,
+          };
+        }
+        if (
+          findings.some(
+            (finding) => finding.commit === event.payload.commit && finding.id === event.payload.id,
+          )
+        ) {
+          return {
+            ok: false,
+            problem: `${label} reuses the finding id "${event.payload.id}" for ${event.payload.commit}`,
+          };
+        }
+        findings.push(event.payload);
         break;
       }
       case 'role-permission-violation': {
@@ -1599,8 +1817,9 @@ export function verifyRunHistoryEvents(
       sourceFrozen,
       guidanceFrozen,
       worktreeReady,
-      roleSessions: [...roleSessions.values()],
+      roleSessions: [...roleSessions.values()].map((session) => session.state),
       acceptedPlan,
+      findings,
       implementation,
       permissionViolations,
       verifications,

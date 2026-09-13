@@ -192,7 +192,12 @@ describe('plan-controlled validation routing', () => {
           runDirectory: fixture.runDirectory,
           runtimeValidationRequired: false,
         }).pipe(Effect.provide(Live));
-        const failed = { ...passingVerificationReport(), result: 'failed' as const };
+        const base = passingVerificationReport();
+        const failed = {
+          ...base,
+          result: 'failed' as const,
+          executions: [{ ...base.executions[0]!, actualExitCode: 1 }],
+        };
         yield* appendVerification(fixture.runDirectory, failed).pipe(Effect.provide(Live));
 
         const route = yield* routeAfterProjectChecks({
@@ -201,13 +206,90 @@ describe('plan-controlled validation routing', () => {
           correctionRoundsRemaining: 1,
         }).pipe(Effect.provide(Live));
 
-        expect(route).toEqual({ route: 'correcting' });
+        expect(route.route).toBe('correcting');
+        if (route.route === 'correcting') {
+          expect(route.findings.length).toBeGreaterThanOrEqual(1);
+        }
         const history = yield* readVerifiedRunHistory({
           runDirectory: fixture.runDirectory,
           runId: RUN_ID,
           createIfMissing: false,
         }).pipe(Effect.provide(Live));
         expect(history.derived.state).toBe('correcting');
+        expect(history.derived.findings.length).toBeGreaterThanOrEqual(1);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('routes an exhausted correction budget to Reviewer while retaining findings', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture('exhausted');
+      try {
+        yield* seedVerifyingRun({
+          runDirectory: fixture.runDirectory,
+          runtimeValidationRequired: false,
+        }).pipe(Effect.provide(Live));
+        const base = passingVerificationReport();
+        const failed = {
+          ...base,
+          result: 'failed' as const,
+          executions: [{ ...base.executions[0]!, actualExitCode: 2 }],
+        };
+        yield* appendVerification(fixture.runDirectory, failed).pipe(Effect.provide(Live));
+
+        const route = yield* routeAfterProjectChecks({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          correctionRoundsRemaining: 0,
+        }).pipe(Effect.provide(Live));
+
+        expect(route.route).toBe('reviewing');
+        const history = yield* readVerifiedRunHistory({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          createIfMissing: false,
+        }).pipe(Effect.provide(Live));
+        expect(history.derived.state).toBe('reviewing');
+        expect(history.derived.findings).toHaveLength(1);
+        expect(history.derived.findings[0]?.category).toBe('check');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('separates environment failures from Coder findings and blocks for recovery', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture('environment');
+      try {
+        yield* seedVerifyingRun({
+          runDirectory: fixture.runDirectory,
+          runtimeValidationRequired: false,
+        }).pipe(Effect.provide(Live));
+        const base = passingVerificationReport();
+        const failed = {
+          ...base,
+          result: 'failed' as const,
+          executions: [{ ...base.executions[0]!, kind: 'bootstrap' as const, actualExitCode: 1 }],
+        };
+        yield* appendVerification(fixture.runDirectory, failed).pipe(Effect.provide(Live));
+
+        const route = yield* routeAfterProjectChecks({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          correctionRoundsRemaining: 2,
+        }).pipe(Effect.provide(Live));
+
+        expect(route.route).toBe('blocked');
+        const history = yield* readVerifiedRunHistory({
+          runDirectory: fixture.runDirectory,
+          runId: RUN_ID,
+          createIfMissing: false,
+        }).pipe(Effect.provide(Live));
+        expect(history.derived.state).toBe('blocked');
+        expect(history.derived.findings).toHaveLength(0);
       } finally {
         fixture.cleanup();
       }
