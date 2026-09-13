@@ -25,6 +25,27 @@ Report a required Tester result separately from an explicit plan-authorized
 Tester skip. Keep rejected attempts, discounted evidence, non-blocking
 limitations, and cleanup warnings discoverable even after successful completion.
 
+## Canonical handoff
+
+At `completed` or `completed_no_change`, Foundry writes exactly one
+`.agent/runs/<run-id>/handoff.json`. It is a derived report built only from
+verified canonical history, so rebuilding it for the same history is
+byte-identical and a `resume` of an already-settled run reconciles the same
+document rather than creating a second one.
+
+A change handoff names the frozen source and result commits, the task branch, the
+Git-derived changed-file list, the accepted plan and its criterion coverage, the
+current commit-bound verification checks, the required Tester observation or an
+explicit skip or retained limitation, findings, correction and rejected-attempt
+evidence, limitations, cleanup warnings, the Reviewer outcome and narrative, and
+any recorded authenticated human decision. A no-change handoff explains why the
+verified source already satisfies the request and records no Coder result commit
+and no pull request.
+
+Promised coverage that is unavailable is listed in `missingCoverage` and sets
+`coverageComplete` false rather than presenting a sparse summary as complete.
+The handoff is a report: editing it never changes workflow state.
+
 Reviewer approval completes the run locally. Foundry does not create a PR for
 an ordinary approved result. Teams may consume the commit through a separate
 integration process outside Foundry.

@@ -1,11 +1,12 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer, Schema } from 'effect';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
+import { HANDOFF_FILENAME, HandoffDocumentSchema } from '../src/application/handoff/index.js';
 import { readVerifiedRunHistory } from '../src/application/run-history/index.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
 import { ReadinessHost } from '../src/application/readiness/index.js';
@@ -23,6 +24,16 @@ import { scriptedRoleHostLauncher } from './fixtures/role-host/role-host-launche
 import type { RoleHostLauncher } from '../src/application/role-conversations/index.js';
 
 const ReportEnvelopeJson = Schema.fromJsonString(ReportEnvelope);
+
+const HandoffDocumentJson = Schema.fromJsonString(HandoffDocumentSchema);
+
+function readHandoff(fixture: Fixture, runId: string) {
+  const text = readFileSync(
+    join(fixture.target, '.agent', 'runs', runId, HANDOFF_FILENAME),
+    'utf8',
+  );
+  return Schema.decodeUnknownSync(HandoffDocumentJson)(text);
+}
 
 interface Fixture {
   readonly base: string;
@@ -316,6 +327,16 @@ describe('run owns the first pass through review', () => {
         const final = lifecycles[lifecycles.length - 1];
         expect(final?.cleanup).toBe('disposed');
         expect(final?.stoppedAt).not.toBeNull();
+
+        const handoff = readHandoff(fixture, 'RUN-LIFECYCLE');
+        expect(handoff.kind).toBe('no_change');
+        expect(handoff.outcome).toBe('completed_no_change');
+        expect(handoff.resultCommit).toBeNull();
+        expect(handoff.verifiedCommit).toBe(history.derived.implementation?.baseCommit ?? null);
+        expect(handoff.tester.status).toBe('observed');
+        expect(handoff.reviewer?.outcome).toBe('approved');
+        expect(handoff.publication.created).toBe(false);
+        expect(handoff.coverageComplete).toBe(true);
       } finally {
         fixture.cleanup();
       }
@@ -350,6 +371,14 @@ describe('run owns the first pass through review', () => {
           (report) => report.result === 'passed',
         );
         expect(noChangeVerification?.commit).toBe(sourceCommit);
+
+        const handoff = readHandoff(fixture, 'RUN-ARCH-NOCHANGE');
+        expect(handoff.kind).toBe('no_change');
+        expect(handoff.resultCommit).toBeNull();
+        expect(handoff.verifiedCommit).toBe(sourceCommit);
+        expect(handoff.tester.status).toBe('skipped');
+        expect(handoff.tester.required).toBe(false);
+        expect(handoff.coverageComplete).toBe(true);
       } finally {
         fixture.cleanup();
       }
