@@ -20,6 +20,7 @@ import {
 } from '../../domain/readiness.js';
 import { BRANCH_PROTECTION_NOT_CONFIGURED } from '../../domain/run-locations.js';
 
+import { invalidRedactionPatterns } from '../evidence-limits/index.js';
 import { decodeProjectConfiguration } from '../project-configuration.js';
 import { preflightRoleHostCapabilities } from '../role-conversations/index.js';
 
@@ -461,6 +462,14 @@ export const checkReadiness = Effect.fn('checkReadiness')(function* (
   const configuration = yield* decodeProjectConfiguration(document, dirname(configPath)).pipe(
     Effect.mapError((error) => new ReadinessError({ message: error.message })),
   );
+
+  const invalidPatterns = invalidRedactionPatterns(configuration.artifacts.redactionPatterns);
+  if (invalidPatterns.length > 0) {
+    const first = invalidPatterns[0];
+    return yield* new ReadinessError({
+      message: `Redaction pattern ${JSON.stringify(first?.pattern ?? '')} is not a valid ECMAScript regular expression: ${first?.problem ?? 'invalid pattern'}.`,
+    });
+  }
 
   const repositoryPath = configuration.targetRepository;
   const insideWorkTree = yield* git.run(['rev-parse', '--is-inside-work-tree'], repositoryPath);

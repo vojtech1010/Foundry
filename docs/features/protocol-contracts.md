@@ -367,6 +367,14 @@ cannot be written, the run stops safely as `blocked`.
 Secrets remain outside the evidence contract; redaction is only a final
 accidental-disclosure defense.
 
+The optional-evidence ledger is derived from verified history: retained
+terminal-capture and tracked-mutation bytes recorded for each verification
+execution. A write is admitted only while the ledger plus the incoming retained
+bytes stays within `maxRunBytes`; otherwise the write is refused with a typed
+`run-evidence-limit-reached` reason and no evidence file is created. `doctor`
+rejects a configuration whose `redactionPatterns` include an entry that does not
+compile as an ECMAScript regular expression.
+
 ## Durable-record minimum
 
 The canonical run stream is `.agent/runs/<run-id>/events.jsonl`. Each closed

@@ -599,6 +599,30 @@ describe('readiness check with fake services', () => {
     }),
   );
 
+  it.effect('fails when a redaction pattern is not a valid ECMAScript regular expression', () =>
+    Effect.gen(function* () {
+      const golden = goldenDocument(TARGET);
+      const { check } = checkWith(
+        withTexts(
+          defaultWorld(),
+          new Map([
+            [
+              CONFIG_PATH,
+              JSON.stringify({
+                ...golden,
+                artifacts: { ...golden.artifacts, redactionPatterns: ['(unclosed'] },
+              }),
+            ],
+          ]),
+        ),
+      );
+      const error = yield* check.pipe(Effect.flip);
+      expect(error).toBeInstanceOf(ReadinessError);
+      expect(error.message).toContain('Redaction pattern "(unclosed"');
+      expect(error.message).toContain('not a valid ECMAScript regular expression');
+    }),
+  );
+
   it.effect('names the git operation in progress', () =>
     Effect.gen(function* () {
       const seen = new Set<string>();

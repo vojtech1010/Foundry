@@ -9,6 +9,8 @@ import {
 } from '../src/application/project-commands/index.js';
 import { ReadinessGit } from '../src/application/readiness/index.js';
 
+import type { EvidenceLedger } from '../src/application/evidence-limits/index.js';
+
 interface RepoState {
   head: string;
   status: string;
@@ -96,6 +98,7 @@ function command(overrides?: {
   readonly redactionPatterns?: ReadonlyArray<string>;
   readonly maxLogBytes?: number;
   readonly maxDiffBytes?: number;
+  readonly evidenceLedger?: EvidenceLedger;
 }) {
   return {
     kind: 'gate' as const,
@@ -109,6 +112,7 @@ function command(overrides?: {
     redactionPatterns: overrides?.redactionPatterns ?? [],
     evidenceDirectory: '/target/.agent/runs/RUN/evidence',
     reconstruct: overrides?.reconstruct ?? true,
+    evidenceLedger: overrides?.evidenceLedger,
   };
 }
 
@@ -197,6 +201,46 @@ describe('guarded project commands', () => {
       expect(outcome.log.truncated).toBe(true);
       expect(outcome.log.retainedByteLength).toBeLessThanOrEqual(64);
       expect(outcome.log.byteLength).toBeGreaterThan(64);
+    }),
+  );
+
+  it.effect('refuses optional evidence once the run ledger is full and continues', () =>
+    Effect.gen(function* () {
+      const world = buildWorld([() => Effect.succeed({ exitCode: 0, stdout: 'ok', stderr: '' })]);
+      const outcome = yield* runGuardedProjectCommand(
+        command({ evidenceLedger: { maxRunBytes: 4, usedBytes: 4 } }),
+      ).pipe(Effect.provide(world.layer));
+
+      expect(outcome.exitCode).toBe(0);
+      expect(world.writes).toHaveLength(0);
+      expect(outcome.evidenceRefusals).toEqual([
+        { kind: 'log', reason: 'run-evidence-limit-reached' },
+      ]);
+      expect(outcome.log.retainedByteLength).toBe(0);
+      expect(outcome.log.truncated).toBe(true);
+      expect(outcome.log.byteLength).toBeGreaterThan(0);
+    }),
+  );
+
+  it.effect('redacts configured patterns from tracked mutation diffs before writing', () =>
+    Effect.gen(function* () {
+      const world = buildWorld([
+        (state) =>
+          Effect.sync(() => {
+            state.status = ' M tracked.txt\n';
+            state.diff = 'diff --git a/tracked.txt b/tracked.txt\n+token=secret-token\n';
+            return { exitCode: 0, stdout: '', stderr: '' };
+          }),
+      ]);
+      const outcome = yield* runGuardedProjectCommand(
+        command({ redactionPatterns: ['secret-token'] }),
+      ).pipe(Effect.provide(world.layer));
+
+      expect(outcome.mutation?.diffRedactionCount).toBe(1);
+      expect(outcome.mutationDiff?.redactionCount).toBe(1);
+      const written = new TextDecoder().decode(world.writes[0]?.bytes ?? new Uint8Array());
+      expect(written).not.toContain('secret-token');
+      expect(written).toContain('[REDACTED]');
     }),
   );
 });
