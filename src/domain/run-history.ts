@@ -72,6 +72,7 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'tester-skipped',
   'validation-limitation',
   'runtime-lifecycle',
+  'objective-worker',
 ] as const;
 
 export type RunHistoryEventType = (typeof RUN_HISTORY_EVENT_TYPES)[number];
@@ -370,6 +371,28 @@ export const RuntimeLifecyclePayloadSchema = RuntimeLifecycleRecordSchema;
 
 export type RuntimeLifecyclePayload = RuntimeLifecycleRecord;
 
+export const OBJECTIVE_WORKER_PHASES = ['created', 'settled', 'disposed'] as const;
+
+export type ObjectiveWorkerPhase = (typeof OBJECTIVE_WORKER_PHASES)[number];
+
+/**
+ * Durable worker-record lifecycle for one parallel objective. `created` records
+ * the worker session identity for one attempt, `settled` binds the attempt to
+ * the Git-derived commit it produced (or `null` when no commit was produced),
+ * and `disposed` closes the objective's worker record. A worker commit is
+ * evidence for integration, never a run result by itself.
+ */
+export const ObjectiveWorkerPayloadSchema = Schema.Struct({
+  phase: Schema.Literals(OBJECTIVE_WORKER_PHASES),
+  objectiveId: Schema.NonEmptyString,
+  sessionId: Schema.NonEmptyString,
+  attempt: PositiveCount,
+  generation: PositiveCount,
+  commit: Schema.NullOr(GitCommitId),
+});
+
+export type ObjectiveWorkerPayload = (typeof ObjectiveWorkerPayloadSchema)['Type'];
+
 const RunEventEnvelopeFields = {
   schemaVersion: Schema.Literal(RUN_HISTORY_SCHEMA_VERSION),
   runId: Identifier,
@@ -518,6 +541,12 @@ export const RuntimeLifecycleEventSchema = Schema.Struct({
   payload: RuntimeLifecyclePayloadSchema,
 });
 
+export const ObjectiveWorkerEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('objective-worker'),
+  payload: ObjectiveWorkerPayloadSchema,
+});
+
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
@@ -542,6 +571,7 @@ export const RunEventSchema = Schema.Union([
   TesterSkippedEventSchema,
   ValidationLimitationEventSchema,
   RuntimeLifecycleEventSchema,
+  ObjectiveWorkerEventSchema,
 ]);
 
 export type RunEvent = (typeof RunEventSchema)['Type'];
@@ -599,7 +629,8 @@ export type RunEventDraft =
     }
   | { readonly type: 'tester-skipped'; readonly payload: TesterSkippedPayload }
   | { readonly type: 'validation-limitation'; readonly payload: ValidationLimitationPayload }
-  | { readonly type: 'runtime-lifecycle'; readonly payload: RuntimeLifecyclePayload };
+  | { readonly type: 'runtime-lifecycle'; readonly payload: RuntimeLifecyclePayload }
+  | { readonly type: 'objective-worker'; readonly payload: ObjectiveWorkerPayload };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
 
@@ -629,6 +660,7 @@ export interface RunHistoryDerivedState {
   readonly testerSkips: ReadonlyArray<TesterSkippedPayload>;
   readonly validationLimitations: ReadonlyArray<ValidationLimitationPayload>;
   readonly runtimeLifecycles: ReadonlyArray<RuntimeLifecyclePayload>;
+  readonly objectiveWorkers?: ReadonlyArray<ObjectiveWorkerPayload>;
 }
 
 export type RunHistoryVerification =
@@ -1141,6 +1173,24 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'objective-worker':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          attempt: event.payload.attempt,
+          commit: event.payload.commit,
+          generation: event.payload.generation,
+          objectiveId: event.payload.objectiveId,
+          phase: event.payload.phase,
+          sessionId: event.payload.sessionId,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
   }
 }
 
@@ -1216,6 +1266,8 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'validation-limitation', payload: event.payload };
     case 'runtime-lifecycle':
       return { ...envelope, type: 'runtime-lifecycle', payload: event.payload };
+    case 'objective-worker':
+      return { ...envelope, type: 'objective-worker', payload: event.payload };
   }
 }
 
@@ -1321,6 +1373,7 @@ export function verifyRunHistoryEvents(
   const testerSkips: Array<TesterSkippedPayload> = [];
   const validationLimitations: Array<ValidationLimitationPayload> = [];
   const runtimeLifecycles: Array<RuntimeLifecyclePayload> = [];
+  const objectiveWorkers: Array<ObjectiveWorkerPayload> = [];
   const findings: Array<FindingRecord> = [];
   let acceptedPlan: PlanAcceptedPayload | null = null;
   let implementation: ImplementationAcceptedPayload | null = null;
@@ -2118,6 +2171,72 @@ export function verifyRunHistoryEvents(
         runtimeLifecycles.push(event.payload);
         break;
       }
+      case 'objective-worker': {
+        if (state !== 'coding' && state !== 'correcting') {
+          return {
+            ok: false,
+            problem: `${label} records an objective worker outside the coding stage`,
+          };
+        }
+        const { objectiveId, attempt, phase } = event.payload;
+        const created = objectiveWorkers.some(
+          (worker) =>
+            worker.objectiveId === objectiveId &&
+            worker.attempt === attempt &&
+            worker.phase === 'created',
+        );
+        const settled = objectiveWorkers.some(
+          (worker) =>
+            worker.objectiveId === objectiveId &&
+            worker.attempt === attempt &&
+            worker.phase === 'settled',
+        );
+        const disposed = objectiveWorkers.some(
+          (worker) => worker.objectiveId === objectiveId && worker.phase === 'disposed',
+        );
+        if (phase === 'created') {
+          if (created) {
+            return {
+              ok: false,
+              problem: `${label} re-creates objective worker "${objectiveId}" attempt ${attempt}`,
+            };
+          }
+          if (disposed) {
+            return {
+              ok: false,
+              problem: `${label} creates objective worker "${objectiveId}" after its disposal`,
+            };
+          }
+        } else if (phase === 'settled') {
+          if (!created) {
+            return {
+              ok: false,
+              problem: `${label} settles objective worker "${objectiveId}" attempt ${attempt} without a recorded creation`,
+            };
+          }
+          if (settled) {
+            return {
+              ok: false,
+              problem: `${label} settles objective worker "${objectiveId}" attempt ${attempt} twice`,
+            };
+          }
+        } else {
+          if (!created) {
+            return {
+              ok: false,
+              problem: `${label} disposes objective worker "${objectiveId}" before its creation`,
+            };
+          }
+          if (disposed) {
+            return {
+              ok: false,
+              problem: `${label} disposes objective worker "${objectiveId}" twice`,
+            };
+          }
+        }
+        objectiveWorkers.push(event.payload);
+        break;
+      }
     }
     previousHash = event.eventHash;
   }
@@ -2158,6 +2277,7 @@ export function verifyRunHistoryEvents(
       testerSkips,
       validationLimitations,
       runtimeLifecycles,
+      objectiveWorkers,
     },
   };
 }
