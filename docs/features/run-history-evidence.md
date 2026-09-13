@@ -66,6 +66,13 @@ reason `accepted-head-advanced`, followed by verification attempt 2 against
 invalidation whenever the accepted head changes; the legacy Quality Engineer
 that caused this particular change is not carried over.
 
+Foundry records that retirement as `evidence-invalidated`, naming the reason and
+the exact retired verification or Tester-observation revision so retired
+attempts stay visible. A settled Tester observation is bound to its commit as
+`evidence-bound`, and Reviewer counts required runtime evidence only when the
+observation and a ready `runtime-lifecycle` record belong to the current result
+head.
+
 Applied to [running work](running-work.md#plan-controlled-validation),
 [project setup](project-setup.md#project-commands-and-runtime), and
 [quality gates](quality-and-decisions.md#verification-evidence).

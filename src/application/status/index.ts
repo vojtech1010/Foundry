@@ -191,6 +191,12 @@ function eventDetail(event: RunEvent): string {
           event.payload.commit === null ? '' : ` at ${event.payload.commit}`
         }`,
       );
+    case 'evidence-invalidated':
+      return boundedDetail(
+        `${event.payload.retiredKinds} evidence retired for ${event.payload.retiredCommit}`,
+      );
+    case 'evidence-bound':
+      return boundedDetail(`tester observation bound to ${event.payload.commit}`);
   }
 }
 
