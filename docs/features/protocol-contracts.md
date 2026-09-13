@@ -365,7 +365,11 @@ replays; it never overwrites newer events.
 
 The implemented slice records run creation, the `source-frozen` and
 `worktree-ready` provisioning checkpoints, workflow transitions, retry or
-repair attempts, and cleanup progress. A same-directory
+repair attempts, cleanup progress, and the role-session lifecycle: created
+identity and runtime provenance, the pre-submit baseline with prompt hash,
+generation and idempotency key, the submission-started checkpoint, observed
+progress with any settled narrative and control envelope, and the stop
+disposition. A same-directory
 `events.witness.json` records the last accepted revision and hash as an
 independently durable append-integrity floor: a missing witness, a stream
 without its terminal newline, or a revision, link, or payload discontinuity

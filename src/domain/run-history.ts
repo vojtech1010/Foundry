@@ -2,6 +2,15 @@ import { createHash } from 'node:crypto';
 import { Schema } from 'effect';
 
 import { GuidanceSnapshotFileSchema } from './guidance.js';
+import {
+  ROLE_HOST_DISPOSITIONS,
+  ROLE_HOST_ROLES,
+  ROLE_HOST_STATUSES,
+  ROLE_HOST_SUBMISSIONS,
+  RoleHostControlSchema,
+  RoleHostNarrativeSchema,
+  RoleHostRuntimeIdentitySchema,
+} from './role-host.js';
 import { GitCommitId } from './run-locations.js';
 import { Identifier, Sha256Hex } from './run-identity.js';
 import {
@@ -15,6 +24,7 @@ import {
   isActiveWorkflowState,
 } from './workflow.js';
 
+import type { RoleHostSessionState } from './role-host.js';
 import type { WorkflowAttempt, WorkflowState } from './workflow.js';
 
 export const RUN_HISTORY_SCHEMA_VERSION = 1 as const;
@@ -35,6 +45,11 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'workflow-transition',
   'workflow-attempt',
   'cleanup-progress',
+  'role-session-created',
+  'role-session-submission-requested',
+  'role-session-submission-started',
+  'role-session-observed',
+  'role-session-stopped',
 ] as const;
 
 export type RunHistoryEventType = (typeof RUN_HISTORY_EVENT_TYPES)[number];
@@ -117,6 +132,62 @@ export const CleanupProgressPayloadSchema = Schema.Struct({
 
 export type CleanupProgressPayload = (typeof CleanupProgressPayloadSchema)['Type'];
 
+const PositiveCount = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
+
+export const RoleSessionCreatedPayloadSchema = Schema.Struct({
+  role: Schema.Literals(ROLE_HOST_ROLES),
+  attempt: PositiveCount,
+  generation: PositiveCount,
+  sessionId: Schema.NonEmptyString,
+  ownershipToken: Schema.NonEmptyString,
+  sequence: Schema.Natural,
+  runtimeIdentity: RoleHostRuntimeIdentitySchema,
+  workingDirectory: Schema.NullOr(Schema.NonEmptyString),
+});
+
+export type RoleSessionCreatedPayload = (typeof RoleSessionCreatedPayloadSchema)['Type'];
+
+export const RoleSessionSubmissionRequestedPayloadSchema = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+  generation: PositiveCount,
+  idempotencyKey: Schema.NonEmptyString,
+  promptHash: Sha256Hex,
+  baselineSequence: Schema.Natural,
+});
+
+export type RoleSessionSubmissionRequestedPayload =
+  (typeof RoleSessionSubmissionRequestedPayloadSchema)['Type'];
+
+export const RoleSessionSubmissionStartedPayloadSchema = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+  generation: PositiveCount,
+  idempotencyKey: Schema.NonEmptyString,
+  submission: Schema.Literals(ROLE_HOST_SUBMISSIONS),
+});
+
+export type RoleSessionSubmissionStartedPayload =
+  (typeof RoleSessionSubmissionStartedPayloadSchema)['Type'];
+
+export const RoleSessionObservedPayloadSchema = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+  generation: PositiveCount,
+  status: Schema.Literals(ROLE_HOST_STATUSES),
+  sequence: Schema.Natural,
+  eventCount: Schema.Natural,
+  narrative: Schema.NullOr(RoleHostNarrativeSchema),
+  control: Schema.NullOr(RoleHostControlSchema),
+});
+
+export type RoleSessionObservedPayload = (typeof RoleSessionObservedPayloadSchema)['Type'];
+
+export const RoleSessionStoppedPayloadSchema = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+  generation: PositiveCount,
+  disposition: Schema.Literals(ROLE_HOST_DISPOSITIONS),
+});
+
+export type RoleSessionStoppedPayload = (typeof RoleSessionStoppedPayloadSchema)['Type'];
+
 const RunEventEnvelopeFields = {
   schemaVersion: Schema.Literal(RUN_HISTORY_SCHEMA_VERSION),
   runId: Identifier,
@@ -169,6 +240,36 @@ export const CleanupProgressEventSchema = Schema.Struct({
   payload: CleanupProgressPayloadSchema,
 });
 
+export const RoleSessionCreatedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('role-session-created'),
+  payload: RoleSessionCreatedPayloadSchema,
+});
+
+export const RoleSessionSubmissionRequestedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('role-session-submission-requested'),
+  payload: RoleSessionSubmissionRequestedPayloadSchema,
+});
+
+export const RoleSessionSubmissionStartedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('role-session-submission-started'),
+  payload: RoleSessionSubmissionStartedPayloadSchema,
+});
+
+export const RoleSessionObservedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('role-session-observed'),
+  payload: RoleSessionObservedPayloadSchema,
+});
+
+export const RoleSessionStoppedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('role-session-stopped'),
+  payload: RoleSessionStoppedPayloadSchema,
+});
+
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
@@ -177,6 +278,11 @@ export const RunEventSchema = Schema.Union([
   WorkflowTransitionEventSchema,
   WorkflowAttemptEventSchema,
   CleanupProgressEventSchema,
+  RoleSessionCreatedEventSchema,
+  RoleSessionSubmissionRequestedEventSchema,
+  RoleSessionSubmissionStartedEventSchema,
+  RoleSessionObservedEventSchema,
+  RoleSessionStoppedEventSchema,
 ]);
 
 export type RunEvent = (typeof RunEventSchema)['Type'];
@@ -197,7 +303,18 @@ export type RunEventDraft =
   | { readonly type: 'worktree-ready'; readonly payload: WorktreeReadyPayload }
   | { readonly type: 'workflow-transition'; readonly payload: WorkflowTransitionPayload }
   | { readonly type: 'workflow-attempt'; readonly payload: WorkflowAttemptPayload }
-  | { readonly type: 'cleanup-progress'; readonly payload: CleanupProgressPayload };
+  | { readonly type: 'cleanup-progress'; readonly payload: CleanupProgressPayload }
+  | { readonly type: 'role-session-created'; readonly payload: RoleSessionCreatedPayload }
+  | {
+      readonly type: 'role-session-submission-requested';
+      readonly payload: RoleSessionSubmissionRequestedPayload;
+    }
+  | {
+      readonly type: 'role-session-submission-started';
+      readonly payload: RoleSessionSubmissionStartedPayload;
+    }
+  | { readonly type: 'role-session-observed'; readonly payload: RoleSessionObservedPayload }
+  | { readonly type: 'role-session-stopped'; readonly payload: RoleSessionStoppedPayload };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
 
@@ -217,6 +334,7 @@ export interface RunHistoryDerivedState {
   readonly sourceFrozen: SourceFrozenPayload | null;
   readonly guidanceFrozen: GuidanceFrozenPayload | null;
   readonly worktreeReady: WorktreeReadyPayload | null;
+  readonly roleSessions: ReadonlyArray<RoleHostSessionState>;
 }
 
 export type RunHistoryVerification =
@@ -365,6 +483,98 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'role-session-created':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          attempt: event.payload.attempt,
+          generation: event.payload.generation,
+          ownershipToken: event.payload.ownershipToken,
+          role: event.payload.role,
+          runtimeIdentity: {
+            adapterVersion: event.payload.runtimeIdentity.adapterVersion,
+            model: event.payload.runtimeIdentity.model,
+            provider: event.payload.runtimeIdentity.provider,
+            toolProfile: event.payload.runtimeIdentity.toolProfile,
+          },
+          sequence: event.payload.sequence,
+          sessionId: event.payload.sessionId,
+          workingDirectory: event.payload.workingDirectory,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'role-session-submission-requested':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          baselineSequence: event.payload.baselineSequence,
+          generation: event.payload.generation,
+          idempotencyKey: event.payload.idempotencyKey,
+          promptHash: event.payload.promptHash,
+          sessionId: event.payload.sessionId,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'role-session-submission-started':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          generation: event.payload.generation,
+          idempotencyKey: event.payload.idempotencyKey,
+          sessionId: event.payload.sessionId,
+          submission: event.payload.submission,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'role-session-observed':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          control: event.payload.control,
+          eventCount: event.payload.eventCount,
+          generation: event.payload.generation,
+          narrative: event.payload.narrative,
+          sequence: event.payload.sequence,
+          sessionId: event.payload.sessionId,
+          status: event.payload.status,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'role-session-stopped':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          disposition: event.payload.disposition,
+          generation: event.payload.generation,
+          sessionId: event.payload.sessionId,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
   }
 }
 
@@ -408,6 +618,16 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'workflow-attempt', payload: event.payload };
     case 'cleanup-progress':
       return { ...envelope, type: 'cleanup-progress', payload: event.payload };
+    case 'role-session-created':
+      return { ...envelope, type: 'role-session-created', payload: event.payload };
+    case 'role-session-submission-requested':
+      return { ...envelope, type: 'role-session-submission-requested', payload: event.payload };
+    case 'role-session-submission-started':
+      return { ...envelope, type: 'role-session-submission-started', payload: event.payload };
+    case 'role-session-observed':
+      return { ...envelope, type: 'role-session-observed', payload: event.payload };
+    case 'role-session-stopped':
+      return { ...envelope, type: 'role-session-stopped', payload: event.payload };
   }
 }
 
@@ -470,6 +690,7 @@ export function verifyRunHistoryEvents(
   let guidanceFrozen: GuidanceFrozenPayload | null = null;
   let worktreeReady: WorktreeReadyPayload | null = null;
   const attempts: Array<WorkflowAttempt> = [];
+  const roleSessions = new Map<string, RoleHostSessionState>();
   let previousHash: string | null = null;
 
   for (const [index, event] of events.entries()) {
@@ -631,6 +852,188 @@ export function verifyRunHistoryEvents(
         cleanupProgress = event.payload;
         break;
       }
+      case 'role-session-created': {
+        const { role, attempt, generation, sessionId, ownershipToken } = event.payload;
+        if (roleSessions.has(sessionId)) {
+          return { ok: false, problem: `${label} reuses the role session "${sessionId}"` };
+        }
+        for (const existing of roleSessions.values()) {
+          if (existing.role === role && existing.attempt === attempt) {
+            return {
+              ok: false,
+              problem: `${label} starts a second session for role "${role}" attempt ${attempt}`,
+            };
+          }
+        }
+        roleSessions.set(sessionId, {
+          role,
+          attempt,
+          generation,
+          sessionId,
+          ownershipToken,
+          initialSequence: event.payload.sequence,
+          runtimeIdentity: event.payload.runtimeIdentity,
+          workingDirectory: event.payload.workingDirectory,
+          submission: null,
+          submissionStarted: null,
+          lastObservation: null,
+          stopDisposition: null,
+        });
+        break;
+      }
+      case 'role-session-submission-requested': {
+        const session = roleSessions.get(event.payload.sessionId);
+        if (session === undefined) {
+          return {
+            ok: false,
+            problem: `${label} submits a role turn for an unknown session "${event.payload.sessionId}"`,
+          };
+        }
+        if (session.submission !== null) {
+          return { ok: false, problem: `${label} records a second submission intent` };
+        }
+        if (session.generation !== event.payload.generation) {
+          return {
+            ok: false,
+            problem: `${label} records a submission generation that differs from its session`,
+          };
+        }
+        if (event.payload.baselineSequence < session.initialSequence) {
+          return {
+            ok: false,
+            problem: `${label} records a submission baseline older than the session sequence`,
+          };
+        }
+        roleSessions.set(event.payload.sessionId, {
+          ...session,
+          submission: {
+            idempotencyKey: event.payload.idempotencyKey,
+            promptHash: event.payload.promptHash,
+            baselineSequence: event.payload.baselineSequence,
+          },
+        });
+        break;
+      }
+      case 'role-session-submission-started': {
+        const session = roleSessions.get(event.payload.sessionId);
+        if (session === undefined) {
+          return {
+            ok: false,
+            problem: `${label} starts a submission for an unknown session "${event.payload.sessionId}"`,
+          };
+        }
+        if (session.generation !== event.payload.generation) {
+          return {
+            ok: false,
+            problem: `${label} records a submission generation that differs from its session`,
+          };
+        }
+        if (session.submission === null) {
+          return { ok: false, problem: `${label} starts a submission before recording its intent` };
+        }
+        if (session.submission.idempotencyKey !== event.payload.idempotencyKey) {
+          return { ok: false, problem: `${label} changes the recorded idempotency key` };
+        }
+        if (session.submissionStarted !== null) {
+          return { ok: false, problem: `${label} records a second submission start` };
+        }
+        roleSessions.set(event.payload.sessionId, {
+          ...session,
+          submissionStarted: event.payload.submission,
+        });
+        break;
+      }
+      case 'role-session-observed': {
+        const session = roleSessions.get(event.payload.sessionId);
+        if (session === undefined) {
+          return {
+            ok: false,
+            problem: `${label} observes an unknown session "${event.payload.sessionId}"`,
+          };
+        }
+        if (session.generation !== event.payload.generation) {
+          return {
+            ok: false,
+            problem: `${label} records an observation generation that differs from its session`,
+          };
+        }
+        const previousObservation = session.lastObservation;
+        if (
+          previousObservation !== null &&
+          (previousObservation.status === 'settled' || previousObservation.status === 'lost')
+        ) {
+          return { ok: false, problem: `${label} observes a session after it became terminal` };
+        }
+        const baseline = session.submission?.baselineSequence ?? session.initialSequence;
+        if (event.payload.sequence < baseline) {
+          return { ok: false, problem: `${label} regresses the observed session sequence` };
+        }
+        if (previousObservation !== null && event.payload.sequence < previousObservation.sequence) {
+          return { ok: false, problem: `${label} regresses the observed session sequence` };
+        }
+        if (
+          event.payload.status === 'settled' &&
+          event.payload.sequence <= (previousObservation?.sequence ?? baseline)
+        ) {
+          return {
+            ok: false,
+            problem: `${label} records a settled observation that does not advance the sequence`,
+          };
+        }
+        if (event.payload.status === 'settled') {
+          if (event.payload.narrative === null || event.payload.narrative.trim().length === 0) {
+            return {
+              ok: false,
+              problem: `${label} records a settled observation without a narrative`,
+            };
+          }
+          if (event.payload.control === null) {
+            return {
+              ok: false,
+              problem: `${label} records a settled observation without a control envelope`,
+            };
+          }
+        } else if (event.payload.narrative !== null || event.payload.control !== null) {
+          return {
+            ok: false,
+            problem: `${label} records an unfinished observation with a settled result`,
+          };
+        }
+        roleSessions.set(event.payload.sessionId, {
+          ...session,
+          lastObservation: {
+            status: event.payload.status,
+            sequence: event.payload.sequence,
+            eventCount: event.payload.eventCount,
+            narrative: event.payload.narrative,
+            control: event.payload.control,
+          },
+        });
+        break;
+      }
+      case 'role-session-stopped': {
+        const session = roleSessions.get(event.payload.sessionId);
+        if (session === undefined) {
+          return {
+            ok: false,
+            problem: `${label} stops an unknown session "${event.payload.sessionId}"`,
+          };
+        }
+        if (session.generation !== event.payload.generation) {
+          return {
+            ok: false,
+            problem: `${label} records a stop generation that differs from its session`,
+          };
+        }
+        if (session.stopDisposition !== null) {
+          return { ok: false, problem: `${label} records a second stop disposition` };
+        }
+        roleSessions.set(event.payload.sessionId, {
+          ...session,
+          stopDisposition: event.payload.disposition,
+        });
+        break;
+      }
     }
     previousHash = event.eventHash;
   }
@@ -646,6 +1049,7 @@ export function verifyRunHistoryEvents(
       sourceFrozen,
       guidanceFrozen,
       worktreeReady,
+      roleSessions: [...roleSessions.values()],
     },
   };
 }
