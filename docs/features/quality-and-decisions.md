@@ -114,6 +114,13 @@ correction history but evaluates only current evidence.
 | `human_decision_required` | A reviewable result needs a product/risk choice beyond the request | Push exact commit and create/reuse a draft GitHub PR                 |
 | `blocked`                 | Reviewer cannot safely review or formulate a decision              | Preserve evidence and enter recovery; do not create a speculative PR |
 
+Foundry routes every outcome above automatically; no separate `approve`,
+`reject`, `code`, `test`, or `review` command exists. A `changes_requested`
+outcome is accepted only while a correction round remains; `retest_requested`
+returns to Tester only while a same-commit retry remains; and
+`human_decision_required` enters `publishing` only for an eligible, reviewable
+changed commit, otherwise it blocks for recovery.
+
 Reviewer cannot approve failed deterministic checks or missing/blocked evidence
 from a required Tester stage. It also cannot turn an operational failure into a
 human product choice merely to escape retry limits.
