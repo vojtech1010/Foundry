@@ -161,12 +161,6 @@ interface ValidScenario {
 const validScenarios: ReadonlyArray<ValidScenario> = [
   {
     command: 'resume',
-    argv: ['resume', '--config', 'foundry.config.json', '--run-id', 'RUN-1'],
-    runId: 'RUN-1',
-    taskId: undefined,
-  },
-  {
-    command: 'resume',
     argv: [
       'resume',
       '--config',

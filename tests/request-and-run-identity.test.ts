@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
 import { RunGit } from '../src/application/git-provisioning/index.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
-import { ReadinessGit, ReadinessHost } from '../src/application/readiness/index.js';
+import { ReadinessHost } from '../src/application/readiness/index.js';
 import {
   DuplicateRunId,
   InvalidRunRequest,
@@ -69,13 +69,15 @@ import {
   WorkflowStateDocumentSchema,
   WorkflowStateSchema,
 } from '../src/domain/workflow.js';
-import { ReadinessFilesLive } from '../src/platform/readiness.js';
+import { ReadinessFilesLive, ReadinessGitLive } from '../src/platform/readiness.js';
 import { RunGitLive } from '../src/platform/git-provisioning.js';
 import { GuidanceLive } from '../src/platform/guidance.js';
+import { ProjectCommandsPlatformLive } from '../src/platform/project-commands.js';
 import { RepositoryLeaseLive } from '../src/platform/repository-lease.js';
+import { RoleTurnResourceObserverLive } from '../src/platform/role-permissions.js';
 import { RunHistoryLive } from '../src/platform/run-history.js';
 import { RunIdentityLive } from '../src/platform/run-identity.js';
-import { capableRoleHostLauncher } from './fixtures/role-host/role-host-launcher.js';
+import { scriptedRoleHostLauncher } from './fixtures/role-host/role-host-launcher.js';
 
 import type { WorkflowState, WorkflowTransitionRequest } from '../src/domain/workflow.js';
 import type { RunProgressReport } from '../src/application/run-identity/index.js';
@@ -217,7 +219,7 @@ const LiveFilesAndStore = Layer.mergeAll(
   RunHistoryLive,
   RepositoryLeaseLive,
   GuidanceLive,
-  capableRoleHostLauncher(),
+  scriptedRoleHostLauncher({}),
 );
 
 function unusedRunGit(name: string) {
@@ -296,25 +298,22 @@ const CliLayer = Layer.mergeAll(
     }),
   ),
   ReadinessFilesLive,
-  Layer.succeed(
-    ReadinessGit,
-    ReadinessGit.of({
-      run: (_args: ReadonlyArray<string>, _cwd: string) => dieService('run must not run git'),
-    }),
-  ),
+  ReadinessGitLive,
   Layer.succeed(
     ProjectCommandProcess,
     ProjectCommandProcess.of({
       run: (_options: { readonly command: ReadonlyArray<string>; readonly cwd: string }) =>
-        dieService('run must not run project commands'),
+        Effect.succeed({ exitCode: 0, stdout: '', stderr: '' }),
     }),
   ),
+  ProjectCommandsPlatformLive,
   RunIdentityLive,
   RunHistoryLive,
   RepositoryLeaseLive,
+  RoleTurnResourceObserverLive,
   RunGitLive,
   GuidanceLive,
-  capableRoleHostLauncher(),
+  scriptedRoleHostLauncher({}),
 );
 
 function recordWithLive(options: {
@@ -789,7 +788,7 @@ describe('workflow state through run storage', () => {
           RunIdentityLive,
           Layer.succeed(RunHistoryStorage, failingHistory),
           RepositoryLeaseLive,
-          capableRoleHostLauncher(),
+          scriptedRoleHostLauncher({}),
         );
         const error = yield* recordRunIdentity({
           configArg: fixture.configPath,
@@ -1228,7 +1227,17 @@ describe('run command through the cli envelope', () => {
         expect(data.taskId).toBe('TASK-CLI');
         expect(data.runDirectory).toBe(fixture.runDirectory('RUN-CLI-1'));
         expect(Object.keys(data).sort()).toEqual(
-          ['provenance', 'request', 'runDirectory', 'runId', 'taskId'].sort(),
+          [
+            'outcome',
+            'provenance',
+            'request',
+            'runDirectory',
+            'runId',
+            'stages',
+            'taskId',
+            'testerSkipped',
+            'workflowState',
+          ].sort(),
         );
         expect(Object.keys(data.provenance).sort()).toEqual(
           [
@@ -1411,19 +1420,12 @@ describe('status command through the cli envelope', () => {
       try {
         writeFileSync(fixture.requestPath, 'status ask\n');
         const run = (argv: ReadonlyArray<string>) => runCli(argv).pipe(Effect.provide(CliLayer));
-        const recorded = yield* run([
-          'run',
-          '--config',
-          fixture.configPath,
-          '--request',
-          fixture.requestPath,
-          '--task-id',
-          'TASK-CLI',
-          '--run-id',
-          'RUN-STATUS',
-          '--json',
-        ]);
-        expect(recorded.exitCode).toBe(EXIT_CODES.reported);
+        yield* recordWithLive({
+          configPath: fixture.configPath,
+          requestPath: fixture.requestPath,
+          taskId: 'TASK-CLI',
+          runId: 'RUN-STATUS',
+        });
 
         const transition = (request: WorkflowTransitionRequest) =>
           transitionWorkflow({
@@ -1511,19 +1513,12 @@ describe('status command through the cli envelope', () => {
       try {
         writeFileSync(fixture.requestPath, 'status ask\n');
         const run = (argv: ReadonlyArray<string>) => runCli(argv).pipe(Effect.provide(CliLayer));
-        const recorded = yield* run([
-          'run',
-          '--config',
-          fixture.configPath,
-          '--request',
-          fixture.requestPath,
-          '--task-id',
-          'TASK-CLI',
-          '--run-id',
-          'RUN-INTEGRITY',
-          '--json',
-        ]);
-        expect(recorded.exitCode).toBe(EXIT_CODES.reported);
+        yield* recordWithLive({
+          configPath: fixture.configPath,
+          requestPath: fixture.requestPath,
+          taskId: 'TASK-CLI',
+          runId: 'RUN-INTEGRITY',
+        });
 
         rmSync(join(fixture.runDirectory('RUN-INTEGRITY'), RUN_HISTORY_FILENAME));
         const missing = yield* run([
@@ -1551,18 +1546,12 @@ describe('status command through the cli envelope', () => {
       try {
         writeFileSync(fixture.requestPath, 'status ask\n');
         const run = (argv: ReadonlyArray<string>) => runCli(argv).pipe(Effect.provide(CliLayer));
-        yield* run([
-          'run',
-          '--config',
-          fixture.configPath,
-          '--request',
-          fixture.requestPath,
-          '--task-id',
-          'TASK-CLI',
-          '--run-id',
-          'RUN-NOSTATE',
-          '--json',
-        ]);
+        yield* recordWithLive({
+          configPath: fixture.configPath,
+          requestPath: fixture.requestPath,
+          taskId: 'TASK-CLI',
+          runId: 'RUN-NOSTATE',
+        });
 
         const statePath = statePathOf(fixture, 'RUN-NOSTATE');
         rmSync(statePath);

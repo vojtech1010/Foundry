@@ -277,36 +277,38 @@ function provenanceOfDerived(derived: RunHistoryDerivedState): RunProvenance | n
   return provenanceOf(frozen, ready);
 }
 
-const readRetainedIdentity = Effect.fn('recordRunIdentity.readRetainedIdentity')(function* (
-  store: RunIdentityStore['Service'],
-  identityPath: string,
-  runId: string,
-): Effect.fn.Return<RequestIdentityDocument | null, RunIdentityStorageError> {
-  const status = yield* store.statPath(identityPath);
-  if (!status.exists || !status.isRegularFile) {
-    return null;
-  }
-  const bytes = yield* store.readFileBytes(identityPath);
-  const text = yield* Effect.try({
-    try: () => new TextDecoder('utf-8', { fatal: true }).decode(bytes),
-    catch: () =>
-      new RunIdentityStorageError({
-        message: `Retained run identity at ${identityPath} is not valid UTF-8.`,
-        runId,
-      }),
-  });
-  return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(RequestIdentityDocumentSchema), {
-    onExcessProperty: 'error',
-  })(text).pipe(
-    Effect.mapError(
-      () =>
+export const readRetainedRunIdentity = Effect.fn('recordRunIdentity.readRetainedIdentity')(
+  function* (
+    store: RunIdentityStore['Service'],
+    identityPath: string,
+    runId: string,
+  ): Effect.fn.Return<RequestIdentityDocument | null, RunIdentityStorageError> {
+    const status = yield* store.statPath(identityPath);
+    if (!status.exists || !status.isRegularFile) {
+      return null;
+    }
+    const bytes = yield* store.readFileBytes(identityPath);
+    const text = yield* Effect.try({
+      try: () => new TextDecoder('utf-8', { fatal: true }).decode(bytes),
+      catch: () =>
         new RunIdentityStorageError({
-          message: `Retained run identity at ${identityPath} is not a valid closed record.`,
+          message: `Retained run identity at ${identityPath} is not valid UTF-8.`,
           runId,
         }),
-    ),
-  );
-});
+    });
+    return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(RequestIdentityDocumentSchema), {
+      onExcessProperty: 'error',
+    })(text).pipe(
+      Effect.mapError(
+        () =>
+          new RunIdentityStorageError({
+            message: `Retained run identity at ${identityPath} is not a valid closed record.`,
+            runId,
+          }),
+      ),
+    );
+  },
+);
 
 const ensurePlanningState = Effect.fn('recordRunIdentity.ensurePlanningState')(function* (options: {
   readonly runDirectory: string;
@@ -501,7 +503,7 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   const createRun = Effect.gen(function* () {
     const existing = yield* store.statPath(runDirectory);
     if (existing.exists) {
-      const retained = yield* readRetainedIdentity(store, identityPath, runId);
+      const retained = yield* readRetainedRunIdentity(store, identityPath, runId);
       if (
         retained === null ||
         retained.runId !== runId ||
@@ -734,4 +736,26 @@ export const readRunWorkflowState = Effect.fn('readRunWorkflowState')(function* 
   );
 
   return yield* reconcileRunReports({ runDirectory: runDirectoryOf(configuration, runId), runId });
+});
+
+export interface RunContext {
+  readonly configuration: ProjectConfiguration;
+  readonly runDirectory: string;
+}
+
+export interface ResolveRunContextOptions {
+  readonly configArg: string;
+  readonly cwd: string;
+  readonly runId: string;
+}
+
+export const resolveRunContext = Effect.fn('resolveRunContext')(function* (
+  options: ResolveRunContextOptions,
+): Effect.fn.Return<RunContext, InvalidRunRequest, ReadinessFiles> {
+  const configuration = yield* readRunConfiguration(options.configArg, options.cwd).pipe(
+    Effect.mapError(
+      (error) => new InvalidRunRequest({ message: error.message, runId: options.runId }),
+    ),
+  );
+  return { configuration, runDirectory: runDirectoryOf(configuration, options.runId) };
 });
