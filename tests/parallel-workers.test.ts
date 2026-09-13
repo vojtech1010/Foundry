@@ -1,6 +1,7 @@
 import { describe, expect, it } from '@effect/vitest';
-import { Duration, Effect, Layer } from 'effect';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { Duration, Effect, Layer, Schema } from 'effect';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -11,19 +12,34 @@ import {
   workerRunHash,
   workerWorkspacePath,
 } from '../src/domain/parallel-workers.js';
+import { ReportEnvelope, runCli } from '../src/cli/program.js';
 import { RunGit, RunWorkspaceBlocked } from '../src/application/git-provisioning/index.js';
 import {
   WorkerTurnRunner,
   runObjectiveWorkers,
 } from '../src/application/parallel-workers/index.js';
+import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
+import { ReadinessHost } from '../src/application/readiness/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../src/application/run-history/index.js';
 import { RoleHost, RoleHostLauncher } from '../src/application/role-conversations/index.js';
 import { RoleTurnResourceObserver } from '../src/application/role-permissions/index.js';
+import { GuidanceLive } from '../src/platform/guidance.js';
+import { RunGitLive } from '../src/platform/git-provisioning.js';
+import { ProjectCommandsPlatformLive } from '../src/platform/project-commands.js';
+import { ReadinessFilesLive, ReadinessGitLive } from '../src/platform/readiness.js';
+import { RepositoryLeaseLive } from '../src/platform/repository-lease.js';
+import { RoleTurnResourceObserverLive } from '../src/platform/role-permissions.js';
 import { RunHistoryLive } from '../src/platform/run-history.js';
+import { RunIdentityLive } from '../src/platform/run-identity.js';
+import { goldenConfigurationDocument } from './fixtures/checks-runtime-run.js';
+import { CAPABLE_ROLE_HOST_CAPABILITIES } from './fixtures/role-host/role-host-launcher.js';
 
 import type { PlannedObjective } from '../src/domain/architect-plan.js';
+import type { RoleHostRole } from '../src/domain/role-host.js';
 import type { RunEventDraft } from '../src/domain/run-history.js';
 import type { WorkerTurnOutcome } from '../src/application/parallel-workers/index.js';
+
+const ReportEnvelopeJson = Schema.fromJsonString(ReportEnvelope);
 
 const RUN_ID = 'RUN-PAR';
 
@@ -504,6 +520,221 @@ describe('parallel objective worker orchestration', () => {
           (worker) => worker.phase === 'settled',
         ).length;
         expect(settledAfter).toBe(settledBefore);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+});
+
+interface ParallelFlowFixture {
+  readonly base: string;
+  readonly target: string;
+  readonly configPath: string;
+  readonly requestPath: string;
+  readonly cleanup: () => void;
+}
+
+function gitExec(cwd: string, args: ReadonlyArray<string>): string {
+  return execFileSync('git', [...args], { cwd, encoding: 'utf8' });
+}
+
+function setupParallelFlowFixture(): ParallelFlowFixture {
+  const base = mkdtempSync(join(tmpdir(), 'foundry-parallel-flow-'));
+  const target = join(base, 'target');
+  const remote = join(base, 'remote.git');
+  execFileSync('git', ['init', '--bare', remote], { encoding: 'utf8' });
+  execFileSync('git', ['init', '-b', 'main', target], { encoding: 'utf8' });
+  gitExec(target, ['config', 'user.email', 'parallel@example.com']);
+  gitExec(target, ['config', 'user.name', 'Foundry Parallel']);
+  writeFileSync(join(target, '.gitignore'), '.agent\n');
+  writeFileSync(join(target, 'README.md'), '# target\n');
+  gitExec(target, ['add', '.gitignore', 'README.md']);
+  gitExec(target, ['commit', '-m', 'initial']);
+  gitExec(target, ['remote', 'add', 'origin', remote]);
+  gitExec(target, ['push', '-u', 'origin', 'main']);
+  const configPath = join(base, 'foundry.config.json');
+  writeFileSync(configPath, JSON.stringify(goldenConfigurationDocument(target, false)));
+  const requestPath = join(base, 'request.md');
+  writeFileSync(requestPath, '# Outcome\n\nImplement two independent parts.\n');
+  return {
+    base,
+    target,
+    configPath,
+    requestPath,
+    cleanup: () => rmSync(base, { recursive: true, force: true }),
+  };
+}
+
+function parallelPlanControl(): Schema.JsonObject {
+  return {
+    schemaVersion: 1,
+    outcome: 'plan_ready',
+    acceptanceCriteria: ['the first part works', 'the second part works'],
+    runtimeValidation: 'not_required',
+    execution: 'parallel',
+    objectives: [
+      { title: 'First part', affectedPaths: ['src/first.ts'], criteria: [1] },
+      { title: 'Second part', affectedPaths: ['src/second.ts'], criteria: [2] },
+    ],
+  };
+}
+
+function commitWorkerChange(workingDirectory: string, index: number): void {
+  writeFileSync(join(workingDirectory, `worker-output-${index}.txt`), `worker ${index}\n`);
+  gitExec(workingDirectory, ['add', '--', '.']);
+  gitExec(workingDirectory, ['commit', '-m', `worker ${index}`]);
+}
+
+/**
+ * A live in-process role host for the workflow-seam test. The Architect returns
+ * a compiled parallel plan; every Coder worker turn commits a distinct file in
+ * its own run-owned worktree so the orchestrator can observe a Git-derived
+ * commit for each objective.
+ */
+function parallelFlowRoleHostLauncher(): Layer.Layer<RoleHostLauncher> {
+  const sessions = new Map<
+    string,
+    { readonly role: RoleHostRole; readonly workingDirectory: string | null }
+  >();
+  const counters = new Map<RoleHostRole, number>();
+  let coderIndex = 0;
+  const hostLayer = Layer.succeed(
+    RoleHost,
+    RoleHost.of({
+      capabilities: () => Effect.succeed(CAPABLE_ROLE_HOST_CAPABILITIES),
+      create: (request) =>
+        Effect.sync(() => {
+          const sessionId = `session-${request.role}-${request.attempt}-${request.generation}`;
+          sessions.set(sessionId, {
+            role: request.role,
+            workingDirectory: request.workingDirectory ?? null,
+          });
+          return {
+            schemaVersion: 1 as const,
+            sessionId,
+            ownershipToken: `owner-${sessionId}`,
+            generation: request.generation,
+            sequence: 0,
+            runtimeIdentity: {
+              adapterVersion: 'parallel-flow-1',
+              provider: 'scripted',
+              model: 'scripted',
+              toolProfile: 'scripted',
+            },
+          };
+        }),
+      submit: () => Effect.succeed({ schemaVersion: 1 as const, submission: 'accepted' as const }),
+      observe: (request) =>
+        Effect.sync(() => {
+          const session = sessions.get(request.sessionId);
+          const role: RoleHostRole = session?.role ?? 'architect';
+          const index = counters.get(role) ?? 0;
+          counters.set(role, index + 1);
+          if (role === 'coder' && session !== undefined && session.workingDirectory !== null) {
+            coderIndex += 1;
+            commitWorkerChange(session.workingDirectory, coderIndex);
+          }
+          return {
+            schemaVersion: 1 as const,
+            status: 'settled' as const,
+            sequence: request.afterSequence + 1,
+            events: [],
+            narrative: `${role} settled.`,
+            control:
+              role === 'architect'
+                ? parallelPlanControl()
+                : { schemaVersion: 1, outcome: 'implemented' },
+          };
+        }),
+      stop: () => Effect.succeed({ schemaVersion: 1 as const, disposition: 'disposed' as const }),
+    }),
+  );
+  return Layer.succeed(RoleHostLauncher, RoleHostLauncher.of({ launch: () => hostLayer }));
+}
+
+const parallelFlowCapabilityLayers = Layer.mergeAll(
+  Layer.succeed(
+    ReadinessHost,
+    ReadinessHost.of({
+      platform: Effect.succeed('linux'),
+      nodeVersion: Effect.succeed('v24.0.0'),
+      npmVersion: Effect.succeed('11.0.0'),
+      gitVersionOutput: Effect.succeed('git version 2.45.0'),
+    }),
+  ),
+  ReadinessFilesLive,
+  ReadinessGitLive,
+  Layer.succeed(
+    ProjectCommandProcess,
+    ProjectCommandProcess.of({
+      run: (_options: { readonly command: ReadonlyArray<string>; readonly cwd: string }) =>
+        Effect.succeed({ exitCode: 0, stdout: '', stderr: '' }),
+    }),
+  ),
+  ProjectCommandsPlatformLive,
+  RunIdentityLive,
+  RunHistoryLive,
+  RepositoryLeaseLive,
+  RoleTurnResourceObserverLive,
+  RunGitLive,
+  GuidanceLive,
+);
+
+describe('parallel plan at the workflow seam', () => {
+  it.live('selects parallel objectives and blocks the coding stage awaiting integration', () =>
+    Effect.gen(function* () {
+      const fixture = setupParallelFlowFixture();
+      try {
+        const runId = 'RUN-PARFLOW';
+        const result = yield* runCli([
+          'run',
+          '--config',
+          fixture.configPath,
+          '--request',
+          fixture.requestPath,
+          '--task-id',
+          'TASK-PARFLOW',
+          '--run-id',
+          runId,
+          '--json',
+        ]).pipe(
+          Effect.provide(
+            Layer.mergeAll(parallelFlowCapabilityLayers, parallelFlowRoleHostLauncher()),
+          ),
+        );
+        expect(result.exitCode).toBe(1);
+        const envelope = Schema.decodeUnknownSync(ReportEnvelopeJson)(result.stdout);
+        expect(envelope.ok).toBe(false);
+        if (!envelope.ok) {
+          expect(envelope.error.kind).toBe('blocked');
+        }
+
+        const history = yield* readVerifiedRunHistory({
+          runDirectory: join(fixture.target, '.agent', 'runs', runId),
+          runId,
+          createIfMissing: false,
+        }).pipe(Effect.provide(RunHistoryLive));
+
+        expect(history.derived.acceptedPlan?.execution.mode).toBe('parallel');
+        expect(history.derived.state).toBe('blocked');
+        expect(history.derived.checkpoint).toBe('coding');
+
+        const workers = history.derived.objectiveWorkers ?? [];
+        const settledCommits = workers.filter(
+          (worker) => worker.phase === 'settled' && worker.commit !== null,
+        );
+        expect(settledCommits.map((worker) => worker.objectiveId).sort()).toEqual([
+          'OBJ-001',
+          'OBJ-002',
+        ]);
+        expect(workers.some((worker) => worker.phase === 'created')).toBe(true);
+        expect(workers.some((worker) => worker.phase === 'disposed')).toBe(true);
+
+        const blockRun = history.events.find(
+          (event) => event.type === 'workflow-transition' && event.payload.route === 'block-run',
+        );
+        expect(blockRun).toBeDefined();
       } finally {
         fixture.cleanup();
       }
