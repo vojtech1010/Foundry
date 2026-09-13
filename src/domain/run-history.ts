@@ -30,7 +30,12 @@ import {
 import type { FindingRecord } from './findings.js';
 import type { ProjectVerificationReport, VerificationExecution } from './project-verification.js';
 import type { RuntimeLifecycleRecord } from './project-runtime.js';
-import type { RoleHostControl, RoleHostSessionState } from './role-host.js';
+import type {
+  RoleHostControl,
+  RoleHostObservation,
+  RoleHostSessionState,
+  RoleHostSubmission,
+} from './role-host.js';
 import type { WorkflowAttempt, WorkflowState } from './workflow.js';
 
 export const RUN_HISTORY_SCHEMA_VERSION = 1 as const;
@@ -56,6 +61,9 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'role-session-submission-started',
   'role-session-observed',
   'role-session-stopped',
+  'role-control-rejected',
+  'role-control-repair-requested',
+  'role-control-repair-started',
   'plan-accepted',
   'finding-recorded',
   'role-permission-violation',
@@ -224,6 +232,59 @@ export const RoleSessionStoppedPayloadSchema = Schema.Struct({
 
 export type RoleSessionStoppedPayload = (typeof RoleSessionStoppedPayloadSchema)['Type'];
 
+export const RoleControlRejectedPayloadSchema = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+  generation: PositiveCount,
+  sequence: Schema.Natural,
+  narrativeHash: Sha256Hex,
+  controlHash: Sha256Hex,
+  problem: Schema.NonEmptyString,
+});
+
+export type RoleControlRejectedPayload = (typeof RoleControlRejectedPayloadSchema)['Type'];
+
+export const RoleControlRepairRequestedPayloadSchema = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+  generation: PositiveCount,
+  idempotencyKey: Schema.NonEmptyString,
+  promptHash: Sha256Hex,
+  baselineSequence: Schema.Natural,
+  problem: Schema.NonEmptyString,
+});
+
+export type RoleControlRepairRequestedPayload =
+  (typeof RoleControlRepairRequestedPayloadSchema)['Type'];
+
+export const RoleControlRepairStartedPayloadSchema = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+  generation: PositiveCount,
+  idempotencyKey: Schema.NonEmptyString,
+  submission: Schema.Literals(ROLE_HOST_SUBMISSIONS),
+});
+
+export type RoleControlRepairStartedPayload =
+  (typeof RoleControlRepairStartedPayloadSchema)['Type'];
+
+/**
+ * Durable, resumable evidence of one same-session control repair attempt. A
+ * record begins at rejection, gains its repair intent, then its submission, and
+ * is completed by the repair observation. Retry, repair, and correction budgets
+ * stay separate because this record never creates a new role attempt or commit.
+ */
+export interface RoleControlRepairRecord {
+  readonly sessionId: string;
+  readonly generation: number;
+  readonly sequence: number;
+  readonly narrativeHash: string;
+  readonly controlHash: string;
+  readonly problem: string;
+  readonly idempotencyKey: string;
+  readonly promptHash: string;
+  readonly baselineSequence: number;
+  readonly submission: RoleHostSubmission | null;
+  readonly observation: RoleHostObservation | null;
+}
+
 export const PlanAcceptedCriterionSchema = Schema.Struct({
   id: Schema.NonEmptyString,
   text: Schema.NonEmptyString,
@@ -391,6 +452,24 @@ export const RoleSessionStoppedEventSchema = Schema.Struct({
   payload: RoleSessionStoppedPayloadSchema,
 });
 
+export const RoleControlRejectedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('role-control-rejected'),
+  payload: RoleControlRejectedPayloadSchema,
+});
+
+export const RoleControlRepairRequestedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('role-control-repair-requested'),
+  payload: RoleControlRepairRequestedPayloadSchema,
+});
+
+export const RoleControlRepairStartedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('role-control-repair-started'),
+  payload: RoleControlRepairStartedPayloadSchema,
+});
+
 export const PlanAcceptedEventSchema = Schema.Struct({
   ...RunEventEnvelopeFields,
   type: Schema.Literal('plan-accepted'),
@@ -452,6 +531,9 @@ export const RunEventSchema = Schema.Union([
   RoleSessionSubmissionStartedEventSchema,
   RoleSessionObservedEventSchema,
   RoleSessionStoppedEventSchema,
+  RoleControlRejectedEventSchema,
+  RoleControlRepairRequestedEventSchema,
+  RoleControlRepairStartedEventSchema,
   PlanAcceptedEventSchema,
   FindingRecordedEventSchema,
   RolePermissionViolationEventSchema,
@@ -492,6 +574,15 @@ export type RunEventDraft =
     }
   | { readonly type: 'role-session-observed'; readonly payload: RoleSessionObservedPayload }
   | { readonly type: 'role-session-stopped'; readonly payload: RoleSessionStoppedPayload }
+  | { readonly type: 'role-control-rejected'; readonly payload: RoleControlRejectedPayload }
+  | {
+      readonly type: 'role-control-repair-requested';
+      readonly payload: RoleControlRepairRequestedPayload;
+    }
+  | {
+      readonly type: 'role-control-repair-started';
+      readonly payload: RoleControlRepairStartedPayload;
+    }
   | { readonly type: 'plan-accepted'; readonly payload: PlanAcceptedPayload }
   | { readonly type: 'finding-recorded'; readonly payload: FindingRecordedPayload }
   | {
@@ -529,6 +620,7 @@ export interface RunHistoryDerivedState {
   readonly guidanceFrozen: GuidanceFrozenPayload | null;
   readonly worktreeReady: WorktreeReadyPayload | null;
   readonly roleSessions: ReadonlyArray<RoleHostSessionState>;
+  readonly roleControlRepairs: ReadonlyArray<RoleControlRepairRecord>;
   readonly acceptedPlan: PlanAcceptedPayload | null;
   readonly findings: ReadonlyArray<FindingRecord>;
   readonly implementation: ImplementationAcceptedPayload | null;
@@ -564,6 +656,10 @@ const CHECKPOINTED_TRANSITION_ROUTES: ReadonlySet<string> = new Set([
   'publication-unavailable',
   'publication-unresolved',
 ]);
+
+function sha256Hex(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
 
 function canonicalVerificationExecution(execution: VerificationExecution) {
   return {
@@ -861,6 +957,58 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'role-control-rejected':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          controlHash: event.payload.controlHash,
+          generation: event.payload.generation,
+          narrativeHash: event.payload.narrativeHash,
+          problem: event.payload.problem,
+          sequence: event.payload.sequence,
+          sessionId: event.payload.sessionId,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'role-control-repair-requested':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          baselineSequence: event.payload.baselineSequence,
+          generation: event.payload.generation,
+          idempotencyKey: event.payload.idempotencyKey,
+          problem: event.payload.problem,
+          promptHash: event.payload.promptHash,
+          sessionId: event.payload.sessionId,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'role-control-repair-started':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          generation: event.payload.generation,
+          idempotencyKey: event.payload.idempotencyKey,
+          sessionId: event.payload.sessionId,
+          submission: event.payload.submission,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
     case 'plan-accepted':
       return JSON.stringify({
         eventId: event.eventId,
@@ -1046,6 +1194,12 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'role-session-observed', payload: event.payload };
     case 'role-session-stopped':
       return { ...envelope, type: 'role-session-stopped', payload: event.payload };
+    case 'role-control-rejected':
+      return { ...envelope, type: 'role-control-rejected', payload: event.payload };
+    case 'role-control-repair-requested':
+      return { ...envelope, type: 'role-control-repair-requested', payload: event.payload };
+    case 'role-control-repair-started':
+      return { ...envelope, type: 'role-control-repair-started', payload: event.payload };
     case 'plan-accepted':
       return { ...envelope, type: 'plan-accepted', payload: event.payload };
     case 'finding-recorded':
@@ -1133,6 +1287,21 @@ function hashControl(control: RoleHostControl): string {
   return hashUtf8(JSON.stringify(control));
 }
 
+interface PendingControlRepair {
+  sessionId: string;
+  generation: number;
+  sequence: number;
+  narrativeHash: string;
+  controlHash: string;
+  problem: string;
+  idempotencyKey: string;
+  promptHash: string;
+  baselineSequence: number;
+  submission: RoleHostSubmission | null;
+  observation: RoleHostObservation | null;
+  phase: 'rejected' | 'requested' | 'started';
+}
+
 export function verifyRunHistoryEvents(
   events: ReadonlyArray<RunEvent>,
   runId: string,
@@ -1145,6 +1314,8 @@ export function verifyRunHistoryEvents(
   let worktreeReady: WorktreeReadyPayload | null = null;
   const attempts: Array<WorkflowAttempt> = [];
   const roleSessions = new Map<string, RoleSessionVerification>();
+  const roleControlRepairs: Array<RoleControlRepairRecord> = [];
+  const pendingControlRepairs = new Map<string, PendingControlRepair>();
   const permissionViolations: Array<RolePermissionViolationPayload> = [];
   const verifications: Array<VerificationCompletedPayload> = [];
   const testerSkips: Array<TesterSkippedPayload> = [];
@@ -1511,14 +1682,17 @@ export function verifyRunHistoryEvents(
           };
         }
         const previousObservation = session.state.lastObservation;
+        const pendingRepair = pendingControlRepairs.get(event.payload.sessionId);
+        const repairPending = pendingRepair !== undefined && pendingRepair.phase === 'started';
         const becameTerminal =
           previousObservation !== null &&
           (previousObservation.status === 'settled' || previousObservation.status === 'lost');
-        if (becameTerminal && !session.awaitingObservation) {
+        if (becameTerminal && !session.awaitingObservation && !repairPending) {
           return { ok: false, problem: `${label} observes a session after it became terminal` };
         }
-        const baseline =
-          session.state.submission?.baselineSequence ?? session.state.initialSequence;
+        const baseline = repairPending
+          ? pendingRepair.baselineSequence
+          : (session.state.submission?.baselineSequence ?? session.state.initialSequence);
         if (event.payload.sequence < baseline) {
           return { ok: false, problem: `${label} regresses the observed session sequence` };
         }
@@ -1558,6 +1732,12 @@ export function verifyRunHistoryEvents(
           }
           session.expectedRepairNarrativeHash = null;
           session.awaitingObservation = false;
+          if (repairPending && sha256Hex(event.payload.narrative) !== pendingRepair.narrativeHash) {
+            return {
+              ok: false,
+              problem: `${label} records a control repair that changed the settled narrative`,
+            };
+          }
         } else if (event.payload.narrative !== null || event.payload.control !== null) {
           return {
             ok: false,
@@ -1574,6 +1754,142 @@ export function verifyRunHistoryEvents(
             control: event.payload.control,
           },
         };
+        if (repairPending) {
+          roleControlRepairs.push({
+            sessionId: pendingRepair.sessionId,
+            generation: pendingRepair.generation,
+            sequence: pendingRepair.sequence,
+            narrativeHash: pendingRepair.narrativeHash,
+            controlHash: pendingRepair.controlHash,
+            problem: pendingRepair.problem,
+            idempotencyKey: pendingRepair.idempotencyKey,
+            promptHash: pendingRepair.promptHash,
+            baselineSequence: pendingRepair.baselineSequence,
+            submission: pendingRepair.submission,
+            observation: {
+              status: event.payload.status,
+              sequence: event.payload.sequence,
+              eventCount: event.payload.eventCount,
+              narrative: event.payload.narrative,
+              control: event.payload.control,
+            },
+          });
+          pendingControlRepairs.delete(event.payload.sessionId);
+        }
+        break;
+      }
+      case 'role-control-rejected': {
+        const session = roleSessions.get(event.payload.sessionId);
+        if (session === undefined) {
+          return {
+            ok: false,
+            problem: `${label} rejects a control for an unknown session "${event.payload.sessionId}"`,
+          };
+        }
+        if (session.state.generation !== event.payload.generation) {
+          return {
+            ok: false,
+            problem: `${label} records a rejection generation that differs from its session`,
+          };
+        }
+        if (pendingControlRepairs.has(event.payload.sessionId)) {
+          return {
+            ok: false,
+            problem: `${label} records a control rejection while a repair is already pending`,
+          };
+        }
+        const observation = session.state.lastObservation;
+        if (observation === null || observation.status !== 'settled') {
+          return {
+            ok: false,
+            problem: `${label} rejects a control without a settled observation`,
+          };
+        }
+        if (observation.sequence !== event.payload.sequence || observation.narrative === null) {
+          return {
+            ok: false,
+            problem: `${label} rejects a control for a different settled observation`,
+          };
+        }
+        if (sha256Hex(observation.narrative) !== event.payload.narrativeHash) {
+          return {
+            ok: false,
+            problem: `${label} records a narrative hash that does not match the settled narrative`,
+          };
+        }
+        pendingControlRepairs.set(event.payload.sessionId, {
+          sessionId: event.payload.sessionId,
+          generation: event.payload.generation,
+          sequence: event.payload.sequence,
+          narrativeHash: event.payload.narrativeHash,
+          controlHash: event.payload.controlHash,
+          problem: event.payload.problem,
+          idempotencyKey: '',
+          promptHash: '',
+          baselineSequence: event.payload.sequence,
+          submission: null,
+          observation: null,
+          phase: 'rejected',
+        });
+        break;
+      }
+      case 'role-control-repair-requested': {
+        const pending = pendingControlRepairs.get(event.payload.sessionId);
+        if (pending === undefined) {
+          return {
+            ok: false,
+            problem: `${label} requests a control repair without a recorded rejection`,
+          };
+        }
+        if (pending.generation !== event.payload.generation) {
+          return {
+            ok: false,
+            problem: `${label} records a repair generation that differs from its rejection`,
+          };
+        }
+        if (pending.phase !== 'rejected') {
+          return { ok: false, problem: `${label} records a second control repair request` };
+        }
+        if (event.payload.baselineSequence < pending.sequence) {
+          return {
+            ok: false,
+            problem: `${label} records a repair baseline older than the rejected observation`,
+          };
+        }
+        if (event.payload.problem !== pending.problem) {
+          return {
+            ok: false,
+            problem: `${label} records a repair request that changes the rejection problem`,
+          };
+        }
+        pending.phase = 'requested';
+        pending.idempotencyKey = event.payload.idempotencyKey;
+        pending.promptHash = event.payload.promptHash;
+        pending.baselineSequence = event.payload.baselineSequence;
+        break;
+      }
+      case 'role-control-repair-started': {
+        const pending = pendingControlRepairs.get(event.payload.sessionId);
+        if (pending === undefined) {
+          return {
+            ok: false,
+            problem: `${label} starts a control repair without a recorded request`,
+          };
+        }
+        if (pending.generation !== event.payload.generation) {
+          return {
+            ok: false,
+            problem: `${label} records a repair generation that differs from its request`,
+          };
+        }
+        if (pending.phase !== 'requested') {
+          return { ok: false, problem: `${label} records a second control repair submission` };
+        }
+        if (pending.idempotencyKey !== event.payload.idempotencyKey) {
+          return { ok: false, problem: `${label} changes the recorded repair idempotency key` };
+        }
+        pending.phase = 'started';
+        pending.submission = event.payload.submission;
         break;
       }
       case 'role-session-stopped': {
@@ -1818,6 +2134,22 @@ export function verifyRunHistoryEvents(
       guidanceFrozen,
       worktreeReady,
       roleSessions: [...roleSessions.values()].map((session) => session.state),
+      roleControlRepairs: [
+        ...roleControlRepairs,
+        ...[...pendingControlRepairs.values()].map((pending) => ({
+          sessionId: pending.sessionId,
+          generation: pending.generation,
+          sequence: pending.sequence,
+          narrativeHash: pending.narrativeHash,
+          controlHash: pending.controlHash,
+          problem: pending.problem,
+          idempotencyKey: pending.idempotencyKey,
+          promptHash: pending.promptHash,
+          baselineSequence: pending.baselineSequence,
+          submission: pending.submission,
+          observation: pending.observation,
+        })),
+      ],
       acceptedPlan,
       findings,
       implementation,
