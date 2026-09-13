@@ -135,11 +135,6 @@ export interface ProvisionRunWorkspaceOptions {
   readonly workspace: string;
 }
 
-export interface ProvisionedRunWorkspace {
-  readonly sourceFrozen: SourceFrozenPayload;
-  readonly worktreeReady: WorktreeReadyPayload;
-}
-
 function blocked(runId: string, problem: string, message: string): RunWorkspaceBlocked {
   return new RunWorkspaceBlocked({
     message: `Run "${runId}" cannot own its workspace: ${message} A person must investigate before this run continues.`,
@@ -148,7 +143,7 @@ function blocked(runId: string, problem: string, message: string): RunWorkspaceB
   });
 }
 
-const freezeSource = Effect.fn('provisionRunWorkspace.freezeSource')(function* (
+const freezeSource = Effect.fn('provisionRunSource.freezeSource')(function* (
   options: ProvisionRunWorkspaceOptions,
 ): Effect.fn.Return<
   SourceFrozenPayload,
@@ -192,7 +187,7 @@ const freezeSource = Effect.fn('provisionRunWorkspace.freezeSource')(function* (
   return appended.event.payload;
 });
 
-const verifyFrozenSource = Effect.fn('provisionRunWorkspace.verifyFrozenSource')(function* (
+const verifyFrozenSource = Effect.fn('provisionRunSource.verifyFrozenSource')(function* (
   options: ProvisionRunWorkspaceOptions,
   frozen: SourceFrozenPayload,
 ): Effect.fn.Return<SourceFrozenPayload, RunWorkspaceBlocked, RunGit> {
@@ -230,7 +225,7 @@ const verifyFrozenSource = Effect.fn('provisionRunWorkspace.verifyFrozenSource')
   return frozen;
 });
 
-const ensureWorktree = Effect.fn('provisionRunWorkspace.ensureWorktree')(function* (
+const ensureWorktree = Effect.fn('provisionRunWorktree.ensureWorktree')(function* (
   options: ProvisionRunWorkspaceOptions,
   frozen: SourceFrozenPayload,
 ): Effect.fn.Return<
@@ -324,10 +319,10 @@ const ensureWorktree = Effect.fn('provisionRunWorkspace.ensureWorktree')(functio
   return appended.event.payload;
 });
 
-export const provisionRunWorkspace = Effect.fn('provisionRunWorkspace')(function* (
+export const provisionRunSource = Effect.fn('provisionRunSource')(function* (
   options: ProvisionRunWorkspaceOptions,
 ): Effect.fn.Return<
-  ProvisionedRunWorkspace,
+  SourceFrozenPayload,
   RunWorkspaceBlocked | RunHistoryError,
   RunGit | RunHistoryStorage
 > {
@@ -378,10 +373,25 @@ export const provisionRunWorkspace = Effect.fn('provisionRunWorkspace')(function
     );
   }
 
-  const ready =
-    history.derived.worktreeReady === null
-      ? yield* ensureWorktree(options, frozen)
-      : history.derived.worktreeReady;
+  return frozen;
+});
 
-  return { sourceFrozen: frozen, worktreeReady: ready };
+export const provisionRunWorktree = Effect.fn('provisionRunWorktree')(function* (
+  options: ProvisionRunWorkspaceOptions,
+  frozen: SourceFrozenPayload,
+): Effect.fn.Return<
+  WorktreeReadyPayload,
+  RunWorkspaceBlocked | RunHistoryError,
+  RunGit | RunHistoryStorage
+> {
+  const history = yield* readVerifiedRunHistory({
+    runDirectory: options.runDirectory,
+    runId: options.runId,
+    createIfMissing: false,
+  });
+  const ready = history.derived.worktreeReady;
+  if (ready !== null) {
+    return ready;
+  }
+  return yield* ensureWorktree(options, frozen);
 });

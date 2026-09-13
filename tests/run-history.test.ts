@@ -137,6 +137,21 @@ function seedProvisioning(runDirectory: string) {
       createIfMissing: false,
       build: () =>
         Effect.succeed({
+          type: 'guidance-frozen',
+          payload: {
+            sourceCommit: FROZEN_COMMIT,
+            manifestPath: 'guidance-manifest.json',
+            aggregateHash: 'f'.repeat(64),
+            files: [],
+          },
+        } as const),
+    });
+    yield* appendRunEvent({
+      runDirectory,
+      runId: RUN_ID,
+      createIfMissing: false,
+      build: () =>
+        Effect.succeed({
           type: 'worktree-ready',
           payload: {
             taskBranch: TASK_BRANCH,
@@ -295,9 +310,9 @@ describe('append-only run history with live storage', () => {
         }).pipe(Effect.provide(AppLive));
 
         const events = readEvents(fixture.runDirectory);
-        expect(events.map((event) => event.revision)).toEqual([1, 2, 3, 4, 5]);
+        expect(events.map((event) => event.revision)).toEqual([1, 2, 3, 4, 5, 6]);
         expect(events[0]).toMatchObject({ previousEventHash: null });
-        expect(events[4]).toMatchObject({ previousEventHash: events[3]?.eventHash });
+        expect(events[5]).toMatchObject({ previousEventHash: events[4]?.eventHash });
         expect(verifyRunHistoryEvents(events, RUN_ID).ok).toBe(true);
 
         const witness = Schema.decodeUnknownSync(Schema.fromJsonString(RunHistoryWitnessSchema), {
@@ -306,8 +321,8 @@ describe('append-only run history with live storage', () => {
         expect(witness).toEqual({
           schemaVersion: 1,
           runId: RUN_ID,
-          revision: 5,
-          eventHash: events[4]?.eventHash,
+          revision: 6,
+          eventHash: events[5]?.eventHash,
         });
 
         const before = readFileSync(fixture.streamPath, 'utf8');
@@ -468,13 +483,13 @@ describe('collision handling and interrupted publication', () => {
         expect(report.workflowState).toBe('coding');
 
         const events = readEvents(fixture.runDirectory);
-        expect(events).toHaveLength(6);
-        expect(events.map((event) => event.revision)).toEqual([1, 2, 3, 4, 5, 6]);
-        expect(events[4]).toMatchObject({
+        expect(events).toHaveLength(7);
+        expect(events.map((event) => event.revision)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+        expect(events[5]).toMatchObject({
           type: 'cleanup-progress',
           payload: { outcome: 'warning', detail: 'competing writer' },
         });
-        expect(events[5]).toMatchObject({
+        expect(events[6]).toMatchObject({
           type: 'workflow-transition',
           payload: { route: 'plan-accepted', from: 'planning', to: 'coding' },
         });
@@ -532,8 +547,8 @@ describe('collision handling and interrupted publication', () => {
         expect(refusal.route).toBe('plan-no-change');
 
         const events = readEvents(fixture.runDirectory);
-        expect(events).toHaveLength(5);
-        expect(events[4]).toMatchObject({
+        expect(events).toHaveLength(6);
+        expect(events[5]).toMatchObject({
           type: 'workflow-transition',
           payload: { route: 'plan-accepted', from: 'planning', to: 'coding' },
         });
@@ -566,7 +581,7 @@ describe('collision handling and interrupted publication', () => {
             }),
         }).pipe(Effect.provideService(RunHistoryStorage, conflicting), Effect.flip);
         expect(error).toBeInstanceOf(RunHistoryConflict);
-        expect(readEvents(fixture.runDirectory)).toHaveLength(4);
+        expect(readEvents(fixture.runDirectory)).toHaveLength(5);
       } finally {
         fixture.cleanup();
       }
@@ -607,7 +622,7 @@ describe('collision handling and interrupted publication', () => {
         expect(error).toBeInstanceOf(RunHistoryStorageError);
 
         const events = readEvents(fixture.runDirectory);
-        expect(events).toHaveLength(4);
+        expect(events).toHaveLength(5);
         const integrity = yield* verifyHistory(fixture.runDirectory).pipe(Effect.flip);
         expectIntegrity(integrity, 'witness does not match');
       } finally {
@@ -643,7 +658,7 @@ describe('collision handling and interrupted publication', () => {
         expect(readFileSync(fixture.streamPath, 'utf8')).toBe(before);
 
         const history = yield* verifyHistory(fixture.runDirectory);
-        expect(history.head.revision).toBe(4);
+        expect(history.head.revision).toBe(5);
         expect(history.derived.state).toBe('planning');
       } finally {
         fixture.cleanup();
@@ -738,7 +753,7 @@ describe('collision handling and interrupted publication', () => {
         }).pipe(Effect.provideService(RunHistoryStorage, racing));
 
         expect(progress.workflowState).toBe('coding');
-        expect(progress.revision).toBe(5);
+        expect(progress.revision).toBe(6);
         expect(progress.eventHash).not.toBeNull();
         const document = Schema.decodeUnknownSync(WorkflowProgressDocumentSchema, {
           onExcessProperty: 'error',
@@ -750,7 +765,7 @@ describe('collision handling and interrupted publication', () => {
           checkpoint: null,
           attempts: [],
         });
-        expect(readEvents(fixture.runDirectory)).toHaveLength(5);
+        expect(readEvents(fixture.runDirectory)).toHaveLength(6);
       } finally {
         fixture.cleanup();
       }

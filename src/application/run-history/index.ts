@@ -199,6 +199,7 @@ export const readVerifiedRunHistory = Effect.fn('readVerifiedRunHistory')(functi
         attempts: [],
         cleanupProgress: null,
         sourceFrozen: null,
+        guidanceFrozen: null,
         worktreeReady: null,
       },
       streamBytes: null,

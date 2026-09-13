@@ -274,6 +274,15 @@ export const transitionWorkflow = Effect.fn('transitionWorkflow')(function* (
             missingFact: 'durable source and worktree provisioning checkpoints',
           });
         }
+        if (options.request.route === 'run-created' && history.derived.guidanceFrozen === null) {
+          return yield* transitionRefusal(runId, 'run-created', history.derived.state, {
+            ok: false,
+            to: 'planning',
+            reason:
+              'Run creation to planning requires a durable frozen guidance checkpoint; it is not recorded.',
+            missingFact: 'durable frozen guidance checkpoint',
+          });
+        }
         const request =
           options.request.route === 'implementation-ready'
             ? yield* deriveImplementationRequest(runId, options.request, history)

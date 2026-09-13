@@ -28,7 +28,12 @@ import {
 } from '../../domain/workflow.js';
 import { RUN_HISTORY_FILENAME } from '../../domain/run-history.js';
 import { decodeProjectConfiguration } from '../project-configuration.js';
-import { RunWorkspaceBlocked, provisionRunWorkspace } from '../git-provisioning/index.js';
+import {
+  RunWorkspaceBlocked,
+  provisionRunSource,
+  provisionRunWorktree,
+} from '../git-provisioning/index.js';
+import { ensureGuidanceSnapshot } from '../guidance/index.js';
 import { ReadinessFiles } from '../readiness/index.js';
 import { withRepositoryLease } from '../repository-lease/index.js';
 import {
@@ -44,6 +49,8 @@ import type {
   RunHistoryIntegrityError,
   RunHistoryStorageError,
 } from '../run-history/index.js';
+import type { GuidanceError } from '../guidance/index.js';
+import type { GuidanceGit, GuidanceSnapshotStore } from '../guidance/index.js';
 import type {
   RepositoryHostIdentity,
   RepositoryLeaseError,
@@ -101,6 +108,7 @@ export type RunIdentityError =
   | RunIdentityStorageError
   | RunWorkspaceBlocked
   | RunHistoryError
+  | GuidanceError
   | RepositoryLeaseError;
 
 export interface RunStorageFileStatus {
@@ -323,6 +331,13 @@ const ensurePlanningState = Effect.fn('recordRunIdentity.ensurePlanningState')(f
             problem: 'durable source and worktree provisioning checkpoints are missing',
           });
         }
+        if (current.derived.guidanceFrozen === null) {
+          return yield* new RunWorkspaceBlocked({
+            message: `Run "${options.runId}" cannot enter planning: a durable frozen guidance checkpoint is not recorded.`,
+            runId: options.runId,
+            problem: 'durable frozen guidance checkpoint is missing',
+          });
+        }
         const evaluation = evaluateWorkflowTransition(
           { state: current.derived.state, checkpoint: current.derived.checkpoint },
           {
@@ -361,6 +376,8 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   | RepositoryLeaseStore
   | RepositoryHostIdentity
   | RunGit
+  | GuidanceGit
+  | GuidanceSnapshotStore
 > {
   const store = yield* RunIdentityStore;
   const runId = options.runId;
@@ -530,7 +547,7 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
       yield* persist;
     }
 
-    const provisioned = yield* provisionRunWorkspace({
+    const frozen = yield* provisionRunSource({
       runId,
       runDirectory,
       targetRepository: configuration.targetRepository,
@@ -540,10 +557,31 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
       workspace,
     });
 
+    yield* ensureGuidanceSnapshot({
+      runId,
+      runDirectory,
+      targetRepository: configuration.targetRepository,
+      guidancePaths: configuration.projectProfile.guidancePaths,
+      maxGuidanceBytes: configuration.artifacts.maxGuidanceBytes,
+    });
+
+    const ready = yield* provisionRunWorktree(
+      {
+        runId,
+        runDirectory,
+        targetRepository: configuration.targetRepository,
+        sourceRemote: configuration.sourceRemote,
+        sourceBranch: configuration.sourceBranch,
+        taskBranch,
+        workspace,
+      },
+      frozen,
+    );
+
     yield* ensurePlanningState({ runDirectory, runId });
     yield* reconcileRunReports({ runDirectory, runId });
 
-    return provenanceOf(provisioned.sourceFrozen, provisioned.worktreeReady);
+    return provenanceOf(frozen, ready);
   });
 
   const provenance = yield* withRepositoryLease(

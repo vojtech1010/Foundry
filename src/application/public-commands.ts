@@ -19,6 +19,7 @@ import type {
   RunHistoryStorageError,
 } from './run-history/index.js';
 import type { RunGit, RunWorkspaceBlocked } from './git-provisioning/index.js';
+import type { GuidanceGit, GuidanceSnapshotStore } from './guidance/index.js';
 import type {
   DoctorReport,
   ReadinessError,
@@ -97,6 +98,8 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
   | RepositoryLeaseStore
   | RepositoryHostIdentity
   | RunGit
+  | GuidanceGit
+  | GuidanceSnapshotStore
 > {
   if (invocation.command === 'run') {
     const configArg = invocation.config;

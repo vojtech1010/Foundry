@@ -29,6 +29,7 @@ import {
 import { ReadinessFilesLive } from '../src/platform/readiness.js';
 import { RepositoryLeaseLive } from '../src/platform/repository-lease.js';
 import { RunGitLive } from '../src/platform/git-provisioning.js';
+import { GuidanceLive } from '../src/platform/guidance.js';
 import { RunHistoryLive } from '../src/platform/run-history.js';
 import { RunIdentityLive } from '../src/platform/run-identity.js';
 import { REQUEST_IDENTITY_FILENAME } from '../src/domain/run-identity.js';
@@ -41,6 +42,7 @@ import {
 
 import type { RunEventDraft } from '../src/domain/run-history.js';
 import type { ReadinessFiles } from '../src/application/readiness/index.js';
+import type { GuidanceGit, GuidanceSnapshotStore } from '../src/application/guidance/index.js';
 import type {
   RepositoryHostIdentity,
   RepositoryLeaseStore,
@@ -172,6 +174,7 @@ const AppLive = Layer.mergeAll(
   RunHistoryLive,
   RepositoryLeaseLive,
   RunGitLive,
+  GuidanceLive,
 );
 
 type AppRequirements =
@@ -181,7 +184,9 @@ type AppRequirements =
   | RunHistoryStorage
   | RepositoryLeaseStore
   | RepositoryHostIdentity
-  | RunGit;
+  | RunGit
+  | GuidanceGit
+  | GuidanceSnapshotStore;
 
 function record(
   fixture: RepositoryFixture,
@@ -358,6 +363,7 @@ describe('run-owned workspace provisioning', () => {
           RunHistoryLive,
           RepositoryLeaseLive,
           failingRunGit('createWorktree'),
+          GuidanceLive,
         );
         const error = yield* record(fixture, { runId: 'RUN-OWN-RETRY' }, partial).pipe(Effect.flip);
         expect(error).toBeInstanceOf(RunWorkspaceBlocked);
@@ -406,6 +412,7 @@ describe('run-owned workspace provisioning', () => {
           RunHistoryLive,
           RepositoryLeaseLive,
           failingRunGit('createWorktree'),
+          GuidanceLive,
         );
         yield* record(fixture, { runId: 'RUN-OWN-MOVED' }, partial).pipe(Effect.flip);
 
@@ -586,6 +593,16 @@ const WORKTREE_READY_DRAFT: RunEventDraft = {
   },
 };
 
+const GUIDANCE_FROZEN_DRAFT: RunEventDraft = {
+  type: 'guidance-frozen',
+  payload: {
+    sourceCommit: SOURCE_COMMIT,
+    manifestPath: 'guidance-manifest.json',
+    aggregateHash: 'f'.repeat(64),
+    files: [],
+  },
+};
+
 describe('provisioning progress cannot leak planning', () => {
   function setupPartialFixture(label: string) {
     const base = mkdtempSync(join(tmpdir(), `foundry-partial-${label}-`));
@@ -637,7 +654,10 @@ describe('provisioning progress cannot leak planning', () => {
         expect(durable).toContain('"state": "blocked"');
         expect(durable).not.toContain('"state": "planning"');
 
-        yield* seedPartialHistory(runDirectory, runId, [WORKTREE_READY_DRAFT]);
+        yield* seedPartialHistory(runDirectory, runId, [
+          GUIDANCE_FROZEN_DRAFT,
+          WORKTREE_READY_DRAFT,
+        ]);
         const readyOnly = yield* reconcileRunReports({ runDirectory, runId }).pipe(
           Effect.provide(RunHistoryLive),
         );

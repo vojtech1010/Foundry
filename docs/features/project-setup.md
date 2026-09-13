@@ -224,10 +224,21 @@ coverage explicit rather than inferring it from names such as `lint` or `test`.
 At run creation Foundry snapshots every tracked `AGENTS.md` from the frozen
 source commit, excluding `.git` and `.agent`, plus the tracked files explicitly
 listed in `projectProfile.guidancePaths`. A missing, untracked, escaping, or
-oversized configured path fails preflight. Saved guidance is immutable for the
-run, hashed, size-bounded, and injected through the prompt contract. More deeply
-nested `AGENTS.md` files apply to their subtree using the same precedence as
-normal repository instructions.
+oversized configured path fails preflight. Committed bytes are authoritative:
+a live file that differs, or an untracked live file at a listed path, never
+changes the snapshot. Each file and the aggregate are bounded by
+`artifacts.maxGuidanceBytes`, and invalid UTF-8 text is rejected. Saved guidance
+is immutable for the run, hashed, size-bounded, and injected through the prompt
+contract. More deeply nested `AGENTS.md` files apply to their subtree using the
+same precedence as normal repository instructions.
+
+Foundry verifies these paths before it creates the task branch or worktree and
+retains byte-exact copies with a closed, versioned manifest inside the run
+directory. It records one `guidance-frozen` checkpoint tied to the recorded
+`source-frozen` commit, and a run cannot enter planning without it. On recovery
+Foundry verifies the retained manifest and bytes against that checkpoint;
+missing, changed, or corrupt retained guidance blocks safely instead of being
+reacquired from the live tree.
 
 Recovery never rereads live guidance files. Guidance cannot override schemas,
 Git safety, role permissions, or output requirements. Retain the guidance role,

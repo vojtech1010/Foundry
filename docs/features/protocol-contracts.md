@@ -236,8 +236,10 @@ separator resolves from the configuration directory for adapters and from the
 run-owned worktree for project/runtime commands. Foundry canonicalizes paths
 before containment checks. Configured project and guidance paths may not escape
 the target repository; role-visible paths may not escape their declared roots.
-A request may be any readable regular file, while diagnostic output must satisfy
-the separate rule that it is outside live `.agent` storage.
+Configured guidance paths identify files tracked at the frozen source commit,
+never merely readable live files. A request may be any readable regular file,
+while diagnostic output must satisfy the separate rule that it is outside live
+`.agent` storage.
 
 The request contract is deliberately free-form: a non-empty, bounded UTF-8
 Markdown document with no front matter or required headings. Foundry validates
