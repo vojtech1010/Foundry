@@ -94,6 +94,7 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'publication-reconciled',
   'integration-declared',
   'integration-completed',
+  'evidence-manifest',
 ] as const;
 
 export type RunHistoryEventType = (typeof RUN_HISTORY_EVENT_TYPES)[number];
@@ -519,6 +520,38 @@ export const IntegrationCompletedPayloadSchema = Schema.Struct({
 
 export type IntegrationCompletedPayload = (typeof IntegrationCompletedPayloadSchema)['Type'];
 
+export const EVIDENCE_MANIFEST_KINDS = ['capture', 'log', 'note'] as const;
+
+export type EvidenceManifestKind = (typeof EVIDENCE_MANIFEST_KINDS)[number];
+
+/**
+ * One bounded capture a settled Tester turn offers as observation evidence for
+ * the current result head. A non-null `sha256` proves content; a null hash is a
+ * name-only claim. `criterionIds` links the capture to the accepted-plan
+ * criteria it is offered to support, and `note` marks pre-existing
+ * informational copy/UX observations that can never prove a criterion alone.
+ */
+export const EvidenceManifestEntrySchema = Schema.Struct({
+  sha256: Schema.NullOr(Sha256Hex),
+  byteLength: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  label: Schema.NonEmptyString,
+  kind: Schema.Literals(EVIDENCE_MANIFEST_KINDS),
+  criterionIds: Schema.Array(Schema.NonEmptyString),
+});
+
+export type EvidenceManifestEntry = (typeof EvidenceManifestEntrySchema)['Type'];
+
+/**
+ * The capture inventory for one result head. Two entries with the same sha256
+ * are one observation regardless of their labels; the manifest records what was
+ * captured, never whether a criterion passed.
+ */
+export const EvidenceManifestPayloadSchema = Schema.Struct({
+  entries: Schema.Array(EvidenceManifestEntrySchema),
+});
+
+export type EvidenceManifestPayload = (typeof EvidenceManifestPayloadSchema)['Type'];
+
 const RunEventEnvelopeFields = {
   schemaVersion: Schema.Literal(RUN_HISTORY_SCHEMA_VERSION),
   runId: Identifier,
@@ -721,6 +754,12 @@ export const IntegrationCompletedEventSchema = Schema.Struct({
   payload: IntegrationCompletedPayloadSchema,
 });
 
+export const EvidenceManifestEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('evidence-manifest'),
+  payload: EvidenceManifestPayloadSchema,
+});
+
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
@@ -754,6 +793,7 @@ export const RunEventSchema = Schema.Union([
   PublicationReconciledEventSchema,
   IntegrationDeclaredEventSchema,
   IntegrationCompletedEventSchema,
+  EvidenceManifestEventSchema,
 ]);
 
 export type RunEvent = (typeof RunEventSchema)['Type'];
@@ -832,7 +872,8 @@ export type RunEventDraft =
   | {
       readonly type: 'integration-completed';
       readonly payload: IntegrationCompletedPayload;
-    };
+    }
+  | { readonly type: 'evidence-manifest'; readonly payload: EvidenceManifestPayload };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
 
@@ -868,6 +909,7 @@ export interface RunHistoryDerivedState {
   readonly decisionApplieds: ReadonlyArray<DecisionAppliedPayload>;
   readonly integrationDeclared?: IntegrationDeclaredPayload | null;
   readonly integrationCompleted?: IntegrationCompletedPayload | null;
+  readonly evidenceManifests: ReadonlyArray<EvidenceManifestPayload>;
 }
 
 export type RunHistoryVerification =
@@ -1530,6 +1572,25 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'evidence-manifest':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          entries: event.payload.entries.map((entry) => ({
+            byteLength: entry.byteLength,
+            criterionIds: entry.criterionIds,
+            kind: entry.kind,
+            label: entry.label,
+            sha256: entry.sha256,
+          })),
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
   }
 }
 
@@ -1623,6 +1684,8 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'integration-declared', payload: event.payload };
     case 'integration-completed':
       return { ...envelope, type: 'integration-completed', payload: event.payload };
+    case 'evidence-manifest':
+      return { ...envelope, type: 'evidence-manifest', payload: event.payload };
   }
 }
 
@@ -1735,6 +1798,7 @@ export function verifyRunHistoryEvents(
   const openedDecisionIds = new Set<string>();
   let integrationDeclared: IntegrationDeclaredPayload | null = null;
   let integrationCompleted: IntegrationCompletedPayload | null = null;
+  const evidenceManifests: Array<EvidenceManifestPayload> = [];
   const retiredRevisions = new Set<number>();
   const findings: Array<FindingRecord> = [];
   let acceptedPlan: PlanAcceptedPayload | null = null;
@@ -2888,6 +2952,29 @@ export function verifyRunHistoryEvents(
         integrationCompleted = completion;
         break;
       }
+      case 'evidence-manifest': {
+        if (state !== 'testing') {
+          return {
+            ok: false,
+            problem: `${label} records a Tester evidence manifest outside the testing stage`,
+          };
+        }
+        if (acceptedPlan !== null) {
+          const knownCriterionIds = new Set(acceptedPlan.criteria.map((criterion) => criterion.id));
+          for (const entry of event.payload.entries) {
+            for (const criterionId of entry.criterionIds) {
+              if (!knownCriterionIds.has(criterionId)) {
+                return {
+                  ok: false,
+                  problem: `${label} links a Tester evidence manifest entry to the unknown criterion "${criterionId}"`,
+                };
+              }
+            }
+          }
+        }
+        evidenceManifests.push(event.payload);
+        break;
+      }
     }
     previousHash = event.eventHash;
   }
@@ -2934,6 +3021,7 @@ export function verifyRunHistoryEvents(
       decisionApplieds,
       integrationDeclared,
       integrationCompleted,
+      evidenceManifests,
     },
   };
 }

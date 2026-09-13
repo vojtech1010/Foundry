@@ -119,6 +119,17 @@ Approval can still be justified by independent evidence permitted by the plan;
 otherwise the affected criterion remains unproven. This is evidence-integrity
 review, not a mandatory screenshot or named-variant gate.
 
+**Implemented:** A settled Tester turn records an `evidence-manifest` naming
+each offered capture's `sha256`, byte length, label, kind, and the accepted-plan
+criteria it supports. A null hash is a name-only claim, `note` is informational
+copy or UX feedback, and identical content under different labels is one
+observation. Inspection lists hashed captures as `verified`, reports duplicated
+content hashes, and handoff `captures` marks each entry `hashed` and
+`duplicated`. A criterion whose only manifest support is name-only,
+informational, or duplicated is reported unproven in `missingCoverage` with
+`coverageComplete: false`; an absent gallery never fails an otherwise proven
+result, and informational notes cannot hide an unmet required criterion.
+
 ## Human-decision report
 
 When state is `human_decision_required`, inspection exposes the exact question

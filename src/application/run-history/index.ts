@@ -214,6 +214,7 @@ export const readVerifiedRunHistory = Effect.fn('readVerifiedRunHistory')(functi
         evidenceInvalidations: [],
         evidenceBindings: [],
         decisionApplieds: [],
+        evidenceManifests: [],
       },
       streamBytes: null,
       witnessBytes: null,

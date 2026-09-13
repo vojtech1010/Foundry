@@ -7,6 +7,7 @@ import { transitionWorkflow, recordWorkflowAttempt } from '../workflow-transitio
 
 import type { Schema } from 'effect';
 
+import type { EvidenceManifestEntry } from '../../domain/run-history.js';
 import type { RunGit, RunWorkspaceBlocked } from '../git-provisioning/index.js';
 import type { RunHistoryError, RunHistoryStorage } from '../run-history/index.js';
 import type { RunStateUnavailable } from '../run-identity/index.js';
@@ -36,6 +37,13 @@ export interface HandleTesterTurnOptions {
   readonly commit: string;
   readonly testerRetriesRemaining: number;
   readonly retryReason: string;
+  /**
+   * Captures the settled Tester turn offers as observations of the current
+   * result head. Foundry records them as an `evidence-manifest` so a hashed
+   * capture stays distinguishable from a name-only claim and identical content
+   * under different labels is one observation.
+   */
+  readonly captures?: ReadonlyArray<EvidenceManifestEntry>;
 }
 
 /**
@@ -66,6 +74,24 @@ export const handleTesterTurn = Effect.fn('handleTesterTurn')(function* (
         runDirectory: options.runDirectory,
         runId: options.runId,
         commit: options.commit,
+      });
+      yield* appendRunEvent({
+        runDirectory: options.runDirectory,
+        runId: options.runId,
+        createIfMissing: false,
+        build: () =>
+          Effect.succeed({
+            type: 'evidence-manifest',
+            payload: {
+              entries: (options.captures ?? []).map((entry) => ({
+                sha256: entry.sha256,
+                byteLength: entry.byteLength,
+                label: entry.label,
+                kind: entry.kind,
+                criterionIds: [...entry.criterionIds],
+              })),
+            },
+          } as const),
       });
       yield* transitionWorkflow({
         runDirectory: options.runDirectory,

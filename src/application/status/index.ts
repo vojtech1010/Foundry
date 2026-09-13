@@ -217,6 +217,12 @@ function eventDetail(event: RunEvent): string {
             : ` (order deviation: ${event.payload.deviationReason})`
         }`,
       );
+    case 'evidence-manifest':
+      return boundedDetail(
+        `tester capture manifest recorded with ${event.payload.entries.length} entr${
+          event.payload.entries.length === 1 ? 'y' : 'ies'
+        }`,
+      );
   }
 }
 

@@ -11,6 +11,7 @@ import {
 import { RoleHostRuntimeIdentitySchema } from '../../domain/role-host.js';
 import {
   CleanupProgressPayloadSchema,
+  EVIDENCE_MANIFEST_KINDS,
   RolePermissionViolationPayloadSchema,
   UtcInstant,
   ValidationLimitationPayloadSchema,
@@ -98,6 +99,16 @@ const HandoffTesterSchema = Schema.Struct({
   runtime: Schema.NullOr(RuntimeLifecycleRecordSchema),
 });
 
+const HandoffCaptureSchema = Schema.Struct({
+  label: Schema.NonEmptyString,
+  kind: Schema.Literals(EVIDENCE_MANIFEST_KINDS),
+  sha256: Schema.NullOr(Schema.NonEmptyString),
+  byteLength: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  criterionIds: Schema.Array(Schema.NonEmptyString),
+  hashed: Schema.Boolean,
+  duplicated: Schema.Boolean,
+});
+
 const HandoffReviewerSchema = Schema.Struct({
   outcome: Schema.NullOr(Schema.Literals(REVIEWER_TURN_OUTCOMES)),
   attempt: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
@@ -145,6 +156,7 @@ export const HandoffDocumentSchema = Schema.Struct({
   changedFiles: Schema.Array(Schema.NonEmptyString),
   plan: Schema.NullOr(HandoffPlanSchema),
   checks: Schema.Array(VerificationExecutionSchema),
+  captures: Schema.Array(HandoffCaptureSchema),
   tester: HandoffTesterSchema,
   reviewer: Schema.NullOr(HandoffReviewerSchema),
   findings: Schema.Array(FindingRecordSchema),
@@ -459,6 +471,76 @@ function warningsOf(derived: RunHistoryDerivedState): ReadonlyArray<string> {
   return warnings;
 }
 
+function latestManifest(
+  derived: RunHistoryDerivedState,
+): RunHistoryDerivedState['evidenceManifests'][number] | null {
+  const manifests = derived.evidenceManifests ?? [];
+  return manifests[manifests.length - 1] ?? null;
+}
+
+function contentHashCounts(
+  entries: RunHistoryDerivedState['evidenceManifests'][number]['entries'],
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const entry of entries) {
+    if (entry.sha256 !== null) {
+      counts.set(entry.sha256, (counts.get(entry.sha256) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+/**
+ * Projects the latest settled Tester capture manifest into the handoff. A
+ * hashed capture is distinguished from a name-only claim, and identical content
+ * under different labels is marked duplicated so it counts as one observation.
+ */
+function capturesOf(derived: RunHistoryDerivedState): HandoffDocument['captures'] {
+  const manifest = latestManifest(derived);
+  if (manifest === null) {
+    return [];
+  }
+  const counts = contentHashCounts(manifest.entries);
+  return manifest.entries.map((entry) => ({
+    label: entry.label,
+    kind: entry.kind,
+    sha256: entry.sha256,
+    byteLength: entry.byteLength,
+    criterionIds: [...entry.criterionIds],
+    hashed: entry.sha256 !== null,
+    duplicated: entry.sha256 !== null && (counts.get(entry.sha256) ?? 0) > 1,
+  }));
+}
+
+/**
+ * Criteria whose only manifest support is discounted: a name-only claim, an
+ * informational note, or content that is duplicated under another label. Such a
+ * criterion has no independent evidence even though a capture names it, so it
+ * is reported unproven. A criterion with no manifest entry is left alone:
+ * captures are optional, and their absence never fails an otherwise proven
+ * result.
+ */
+function discountedCriterionIds(derived: RunHistoryDerivedState): ReadonlyArray<string> {
+  const manifest = latestManifest(derived);
+  if (manifest === null) {
+    return [];
+  }
+  const counts = contentHashCounts(manifest.entries);
+  const named = new Set<string>();
+  const independentlyProven = new Set<string>();
+  for (const entry of manifest.entries) {
+    const independent =
+      entry.sha256 !== null && entry.kind !== 'note' && (counts.get(entry.sha256) ?? 0) === 1;
+    for (const criterionId of entry.criterionIds) {
+      named.add(criterionId);
+      if (independent) {
+        independentlyProven.add(criterionId);
+      }
+    }
+  }
+  return [...named].filter((criterionId) => !independentlyProven.has(criterionId)).sort();
+}
+
 /**
  * Builds the deterministic handoff document for a completed run. Every field is
  * derived from verified canonical history, never from a Coder-reported file
@@ -514,6 +596,13 @@ export function buildHandoff(
       'An authenticated human decision is recorded as applied, but its evidence is not retained in the canonical event stream.',
     );
   }
+  for (const criterionId of discountedCriterionIds(derived)) {
+    missingCoverage.push(
+      `Criterion ${criterionId} is supported only by discounted captures (name-only, informational, or duplicated content) with no independent evidence.`,
+    );
+  }
+
+  const captures = capturesOf(derived);
 
   const publication = {
     created: false,
@@ -535,6 +624,7 @@ export function buildHandoff(
     changedFiles: implementation === null ? [] : [...implementation.changedFiles],
     plan,
     checks: [...checks],
+    captures,
     tester,
     reviewer,
     findings: derived.findings.map((finding) => ({ ...finding, evidence: [...finding.evidence] })),
