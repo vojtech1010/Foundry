@@ -322,6 +322,12 @@ const RecordedRunReportData = Schema.Struct({
   request: RecordedRequestData,
 });
 
+const RunWorkflowDecisionData = Schema.Struct({
+  applied: Schema.NullOr(Schema.Literals(['accept', 'correct', 'abandon'])),
+  waiting: Schema.Boolean,
+  draftPrUrl: Schema.NullOr(Schema.String),
+});
+
 const RunWorkflowReportData = Schema.Struct({
   runId: Schema.String,
   taskId: Schema.String,
@@ -332,6 +338,7 @@ const RunWorkflowReportData = Schema.Struct({
   outcome: WorkflowStateSchema,
   stages: Schema.Array(WorkflowStateSchema),
   testerSkipped: Schema.Boolean,
+  decision: Schema.optional(RunWorkflowDecisionData),
 });
 
 const StatusMeasureData = Schema.Struct({
@@ -879,6 +886,13 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
           `data.stages: ${data.stages.join(' ')}`,
           `data.testerSkipped: ${data.testerSkipped}`,
         );
+        if (data.decision !== undefined) {
+          lines.push(
+            `data.decision.applied: ${data.decision.applied ?? 'none'}`,
+            `data.decision.waiting: ${data.decision.waiting}`,
+            `data.decision.draftPrUrl: ${data.decision.draftPrUrl ?? 'none'}`,
+          );
+        }
       }
     } else if ('sections' in data) {
       lines.push(...renderInspectHuman(data));
@@ -1148,7 +1162,7 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       normalizedPromptHash: report.request.normalizedPromptHash,
     };
     if ('workflowState' in report) {
-      return {
+      const workflowReport = {
         runId: report.runId,
         taskId: report.taskId,
         runDirectory: report.runDirectory,
@@ -1158,6 +1172,17 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
         outcome: report.outcome,
         stages: [...report.stages],
         testerSkipped: report.testerSkipped,
+      };
+      if (report.decision === undefined) {
+        return workflowReport;
+      }
+      return {
+        ...workflowReport,
+        decision: {
+          applied: report.decision.applied,
+          waiting: report.decision.waiting,
+          draftPrUrl: report.decision.draftPrUrl,
+        },
       };
     }
     return {

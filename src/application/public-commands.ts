@@ -74,6 +74,16 @@ export interface StubCommandReport {
   readonly taskId?: string | undefined;
 }
 
+/**
+ * The authenticated human-decision outcome of a resume, included in the
+ * success report only when no integrity problem was recorded.
+ */
+export interface RunWorkflowDecision {
+  readonly applied: 'accept' | 'correct' | 'abandon' | null;
+  readonly waiting: boolean;
+  readonly draftPrUrl: string | null;
+}
+
 export interface RunWorkflowReport {
   readonly runId: string;
   readonly taskId: string;
@@ -84,6 +94,7 @@ export interface RunWorkflowReport {
   readonly outcome: WorkflowState;
   readonly stages: ReadonlyArray<WorkflowState>;
   readonly testerSkipped: boolean;
+  readonly decision?: RunWorkflowDecision;
 }
 
 export type PublicCommandReport =
@@ -259,6 +270,14 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
     if (terminalFailure !== null) {
       return yield* terminalFailure;
     }
+    const decision = outcome.decision;
+    if (decision !== null && decision.problem !== null) {
+      return yield* new RunWorkflowError({
+        message: `Run "${runId}" stopped for human recovery: ${decision.problem}`,
+        runId,
+        kind: 'blocked',
+      });
+    }
     const progress = yield* reconcileRunReports({ runDirectory: context.runDirectory, runId });
     if (progress.provenance === null) {
       return yield* new RunStateUnavailable({
@@ -266,7 +285,7 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
         runId,
       });
     }
-    return {
+    const report: RunWorkflowReport = {
       runId,
       taskId: identity.taskId,
       runDirectory: context.runDirectory,
@@ -276,7 +295,18 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       outcome: outcome.workflowState,
       stages: outcome.stages,
       testerSkipped: outcome.testerSkipped,
-    } satisfies RunWorkflowReport;
+    };
+    if (decision === null) {
+      return report;
+    }
+    return {
+      ...report,
+      decision: {
+        applied: decision.applied,
+        waiting: decision.waiting,
+        draftPrUrl: decision.draftPrUrl,
+      },
+    };
   }
   if (invocation.command === 'status') {
     const configArg = invocation.config;

@@ -2,11 +2,14 @@ import { createHash } from 'node:crypto';
 import { Schema } from 'effect';
 
 import {
+  DecisionId,
   DecisionOpenedPayloadSchema,
+  DecisionOptionId,
   PUBLICATION_CHECKPOINT_STAGES,
   PublicationCheckpointPayloadSchema,
 } from './decision-publication.js';
 import { FindingRecordSchema } from './findings.js';
+import { REVIEWER_DECISION_ACTIONS } from './reviewer-outcomes.js';
 import { GuidanceSnapshotFileSchema } from './guidance.js';
 import {
   ROLE_HOST_DISPOSITIONS,
@@ -87,6 +90,7 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'objective-worker',
   'evidence-invalidated',
   'evidence-bound',
+  'decision-applied',
 ] as const;
 
 export type RunHistoryEventType = (typeof RUN_HISTORY_EVENT_TYPES)[number];
@@ -439,6 +443,33 @@ export const EvidenceBoundPayloadSchema = Schema.Struct({
 
 export type EvidenceBoundPayload = (typeof EvidenceBoundPayloadSchema)['Type'];
 
+/**
+ * The permissions that authenticate a decision command. A maintain or admin
+ * repository permission is required, and the observed value is retained so the
+ * applied choice stays auditable even if permission changes later.
+ */
+export const DECISION_PERMISSION_SNAPSHOTS = ['admin', 'maintain'] as const;
+
+export type DecisionPermissionSnapshot = (typeof DECISION_PERMISSION_SNAPSHOTS)[number];
+
+/**
+ * Durable evidence that one exact authenticated command selected a labelled
+ * option. The comment body is never stored; its hash plus the comment id,
+ * author, and permission snapshot make later edits or deletion unable to undo
+ * the recorded decision.
+ */
+export const DecisionAppliedPayloadSchema = Schema.Struct({
+  decisionId: DecisionId,
+  optionId: DecisionOptionId,
+  action: Schema.Literals(REVIEWER_DECISION_ACTIONS),
+  commentId: Schema.NonEmptyString,
+  author: Schema.NonEmptyString,
+  bodyHash: Sha256Hex,
+  permissionSnapshot: Schema.Literals(DECISION_PERMISSION_SNAPSHOTS),
+});
+
+export type DecisionAppliedPayload = (typeof DecisionAppliedPayloadSchema)['Type'];
+
 const RunEventEnvelopeFields = {
   schemaVersion: Schema.Literal(RUN_HISTORY_SCHEMA_VERSION),
   runId: Identifier,
@@ -617,6 +648,12 @@ export const EvidenceBoundEventSchema = Schema.Struct({
   payload: EvidenceBoundPayloadSchema,
 });
 
+export const DecisionAppliedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('decision-applied'),
+  payload: DecisionAppliedPayloadSchema,
+});
+
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
@@ -646,6 +683,7 @@ export const RunEventSchema = Schema.Union([
   ObjectiveWorkerEventSchema,
   EvidenceInvalidatedEventSchema,
   EvidenceBoundEventSchema,
+  DecisionAppliedEventSchema,
 ]);
 
 export type RunEvent = (typeof RunEventSchema)['Type'];
@@ -711,7 +749,8 @@ export type RunEventDraft =
       readonly type: 'evidence-invalidated';
       readonly payload: EvidenceInvalidatedPayload;
     }
-  | { readonly type: 'evidence-bound'; readonly payload: EvidenceBoundPayload };
+  | { readonly type: 'evidence-bound'; readonly payload: EvidenceBoundPayload }
+  | { readonly type: 'decision-applied'; readonly payload: DecisionAppliedPayload };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
 
@@ -744,6 +783,7 @@ export interface RunHistoryDerivedState {
   readonly objectiveWorkers?: ReadonlyArray<ObjectiveWorkerPayload>;
   readonly evidenceInvalidations: ReadonlyArray<EvidenceInvalidatedPayload>;
   readonly evidenceBindings: ReadonlyArray<EvidenceBoundPayload>;
+  readonly decisionApplieds: ReadonlyArray<DecisionAppliedPayload>;
 }
 
 export type RunHistoryVerification =
@@ -1343,6 +1383,25 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'decision-applied':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          action: event.payload.action,
+          author: event.payload.author,
+          bodyHash: event.payload.bodyHash,
+          commentId: event.payload.commentId,
+          decisionId: event.payload.decisionId,
+          optionId: event.payload.optionId,
+          permissionSnapshot: event.payload.permissionSnapshot,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
   }
 }
 
@@ -1428,6 +1487,8 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'evidence-invalidated', payload: event.payload };
     case 'evidence-bound':
       return { ...envelope, type: 'evidence-bound', payload: event.payload };
+    case 'decision-applied':
+      return { ...envelope, type: 'decision-applied', payload: event.payload };
   }
 }
 
@@ -1536,12 +1597,15 @@ export function verifyRunHistoryEvents(
   const objectiveWorkers: Array<ObjectiveWorkerPayload> = [];
   const evidenceInvalidations: Array<EvidenceInvalidatedPayload> = [];
   const evidenceBindings: Array<EvidenceBoundPayload> = [];
+  const decisionApplieds: Array<DecisionAppliedPayload> = [];
+  const openedDecisionIds = new Set<string>();
   const retiredRevisions = new Set<number>();
   const findings: Array<FindingRecord> = [];
   let acceptedPlan: PlanAcceptedPayload | null = null;
   let implementation: ImplementationAcceptedPayload | null = null;
   let previousHash: string | null = null;
   let decisionOpened: DecisionOpenedPayload | null = null;
+  let decisionApplied: DecisionAppliedPayload | null = null;
   let lastPublicationCheckpoint: PublicationCheckpointStage | null = null;
 
   const currentResultCommit = (): string | null =>
@@ -2343,9 +2407,6 @@ export function verifyRunHistoryEvents(
             problem: `${label} records an opened decision outside the publishing stage`,
           };
         }
-        if (decisionOpened !== null) {
-          return { ok: false, problem: `${label} opens a second decision for this run` };
-        }
         const resultCommit = currentResultCommit();
         if (resultCommit === null || event.payload.resultCommit !== resultCommit) {
           return {
@@ -2359,7 +2420,19 @@ export function verifyRunHistoryEvents(
             problem: `${label} records a decision with fewer than two labelled options`,
           };
         }
+        if (openedDecisionIds.has(event.payload.decisionId)) {
+          return { ok: false, problem: `${label} re-opens a decision id for this run` };
+        }
+        if (decisionOpened !== null && decisionOpened.resultCommit === event.payload.resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} opens a second decision for the same result head`,
+          };
+        }
+        openedDecisionIds.add(event.payload.decisionId);
         decisionOpened = event.payload;
+        decisionApplied = null;
+        lastPublicationCheckpoint = null;
         break;
       }
       case 'publication-checkpoint': {
@@ -2527,6 +2600,41 @@ export function verifyRunHistoryEvents(
         evidenceBindings.push(event.payload);
         break;
       }
+      case 'decision-applied': {
+        if (state !== 'human_decision_required') {
+          return {
+            ok: false,
+            problem: `${label} applies a human decision outside the waiting state`,
+          };
+        }
+        if (decisionOpened === null || event.payload.decisionId !== decisionOpened.decisionId) {
+          return {
+            ok: false,
+            problem: `${label} applies a decision that is not the open decision`,
+          };
+        }
+        const option = decisionOpened.options.find(
+          (candidate) => candidate.id === event.payload.optionId,
+        );
+        if (option === undefined) {
+          return { ok: false, problem: `${label} applies an unknown decision option` };
+        }
+        if (option.action !== event.payload.action) {
+          return {
+            ok: false,
+            problem: `${label} records an action that differs from the labelled decision option`,
+          };
+        }
+        if (decisionApplied !== null) {
+          return {
+            ok: false,
+            problem: `${label} applies a second decision to the same opened decision`,
+          };
+        }
+        decisionApplied = event.payload;
+        decisionApplieds.push(event.payload);
+        break;
+      }
     }
     previousHash = event.eventHash;
   }
@@ -2570,6 +2678,7 @@ export function verifyRunHistoryEvents(
       objectiveWorkers,
       evidenceInvalidations,
       evidenceBindings,
+      decisionApplieds,
     },
   };
 }

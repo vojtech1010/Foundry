@@ -419,9 +419,14 @@ function humanDecisionOf(
   completion: HandoffCompletion,
 ): HandoffDocument['humanDecision'] {
   let appliedRoute: 'human-accepted' | 'human-corrected' | null = null;
-  for (const { payload } of transitionEvents(events)) {
-    if (payload.route === 'human-accepted' || payload.route === 'human-corrected') {
-      appliedRoute = payload.route;
+  let evidenceRetained = false;
+  for (const event of events) {
+    if (event.type === 'workflow-transition') {
+      if (event.payload.route === 'human-accepted' || event.payload.route === 'human-corrected') {
+        appliedRoute = event.payload.route;
+      }
+    } else if (event.type === 'decision-applied') {
+      evidenceRetained = true;
     }
   }
   const applied = appliedRoute !== null || completion.route === 'human-accepted';
@@ -429,9 +434,11 @@ function humanDecisionOf(
   return {
     applied,
     route,
-    evidenceRetained: false,
+    evidenceRetained: applied && evidenceRetained,
     detail: applied
-      ? 'An authenticated human decision was applied; the canonical event stream does not retain the decision comment evidence.'
+      ? evidenceRetained
+        ? 'An authenticated human decision was applied; the canonical event stream retains its comment, author, body hash, and permission snapshot.'
+        : 'An authenticated human decision was applied; the canonical event stream does not retain the decision comment evidence.'
       : 'No authenticated human decision was applied; Reviewer approval completed the run locally.',
   };
 }
