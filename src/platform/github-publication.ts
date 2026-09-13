@@ -7,7 +7,10 @@ import {
 } from '../application/decision-publication/index.js';
 
 import type {
+  GitHubCollaboratorPermission,
   GitHubCreatePullRequestOptions,
+  GitHubIssueComment,
+  GitHubIssueCommentPage,
   GitHubPullRequest,
   GitHubPullRequestLookup,
   GitHubPullRequestLookupRequest,
@@ -48,6 +51,22 @@ const GitHubPullRequestSchema = Schema.Struct({
 const GitHubPullRequestListSchema = Schema.Array(GitHubPullRequestSchema);
 
 type GitHubPullRequestDocument = (typeof GitHubPullRequestSchema)['Type'];
+
+const GitHubIssueCommentSchema = Schema.Struct({
+  id: Schema.Number,
+  user: Schema.Struct({
+    login: Schema.String,
+    type: Schema.String,
+  }),
+  body: Schema.String,
+  created_at: Schema.String,
+});
+
+const GitHubIssueCommentListSchema = Schema.Array(GitHubIssueCommentSchema);
+
+const GitHubPermissionSchema = Schema.Struct({
+  permission: Schema.String,
+});
 
 function failure(operation: string, repository: string, detail: string): GitHubPublicationError {
   return new GitHubPublicationError({
@@ -387,6 +406,95 @@ const pushTaskBranch = Effect.fn('githubPublication.pushTaskBranch')(function* (
   }
 });
 
+const listIssueCommentsAfter = Effect.fn('githubPublication.listIssueCommentsAfter')(
+  function* (options: {
+    readonly repository: string;
+    readonly pullRequestNumber: number;
+    readonly after: string;
+  }): Effect.fn.Return<GitHubIssueCommentPage, GitHubPublicationError> {
+    const token = githubToken();
+    if (token.length === 0) {
+      return yield* failure(
+        'issue-comment-lookup',
+        options.repository,
+        'GITHUB_TOKEN is not set for the configured publication remote',
+      );
+    }
+    const query = new URLSearchParams({ per_page: String(GITHUB_PAGE_SIZE) });
+    const response = yield* requestGitHub(
+      'issue-comment-lookup',
+      options.repository,
+      `/repos/${options.repository}/issues/${options.pullRequestNumber}/comments?${query.toString()}`,
+      { method: 'GET', token },
+    );
+    if (response.status !== 200) {
+      return yield* failure(
+        'issue-comment-lookup',
+        options.repository,
+        `issue comment lookup returned status ${response.status}`,
+      );
+    }
+    const documents = yield* decodeDocument(
+      'issue-comment-lookup',
+      options.repository,
+      GitHubIssueCommentListSchema,
+      response.body,
+      'issue comment list',
+    );
+    const comments: Array<GitHubIssueComment> = [];
+    for (const document of documents) {
+      if (document.created_at <= options.after) {
+        continue;
+      }
+      comments.push({
+        commentId: String(document.id),
+        author: document.user.login,
+        authorType: document.user.type === 'Bot' ? 'Bot' : 'User',
+        body: document.body,
+        createdAt: document.created_at,
+      });
+    }
+    return { comments, truncated: documents.length >= GITHUB_PAGE_SIZE };
+  },
+);
+
+const collaboratorPermission = Effect.fn('githubPublication.collaboratorPermission')(
+  function* (options: {
+    readonly repository: string;
+    readonly username: string;
+  }): Effect.fn.Return<GitHubCollaboratorPermission, GitHubPublicationError> {
+    const token = githubToken();
+    if (token.length === 0) {
+      return yield* failure(
+        'collaborator-permission',
+        options.repository,
+        'GITHUB_TOKEN is not set for the configured publication remote',
+      );
+    }
+    const response = yield* requestGitHub(
+      'collaborator-permission',
+      options.repository,
+      `/repos/${options.repository}/collaborators/${encodeURIComponent(options.username)}/permission`,
+      { method: 'GET', token },
+    );
+    if (response.status !== 200) {
+      return yield* failure(
+        'collaborator-permission',
+        options.repository,
+        `collaborator permission lookup returned status ${response.status}`,
+      );
+    }
+    const document = yield* decodeDocument(
+      'collaborator-permission',
+      options.repository,
+      GitHubPermissionSchema,
+      response.body,
+      'collaborator permission',
+    );
+    return { permission: document.permission };
+  },
+);
+
 export const GitHubPublicationLive: Layer.Layer<GitHubPublication> = Layer.succeed(
   GitHubPublication,
   GitHubPublication.of({
@@ -395,5 +503,7 @@ export const GitHubPublicationLive: Layer.Layer<GitHubPublication> = Layer.succe
     createDraftPullRequest,
     refreshOwnedDraftPullRequestBody,
     pushTaskBranch,
+    listIssueCommentsAfter,
+    collaboratorPermission,
   }),
 );

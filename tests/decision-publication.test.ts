@@ -348,6 +348,8 @@ function githubHarness(lookup: GitHubPullRequestLookup = { kind: 'absent' }): Gi
         calls.push.push(options);
         return Effect.void;
       },
+      listIssueCommentsAfter: () => Effect.succeed({ comments: [], truncated: false }),
+      collaboratorPermission: () => Effect.succeed({ permission: 'maintain' }),
     }),
   );
   return { layer, calls };

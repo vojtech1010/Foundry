@@ -197,6 +197,10 @@ function eventDetail(event: RunEvent): string {
       );
     case 'evidence-bound':
       return boundedDetail(`tester observation bound to ${event.payload.commit}`);
+    case 'decision-applied':
+      return boundedDetail(
+        `decision ${event.payload.decisionId} applied ${event.payload.action} (${event.payload.optionId}) by ${event.payload.author}`,
+      );
   }
 }
 
@@ -232,10 +236,7 @@ function activeAttemptFor(
 function countCorrections(events: ReadonlyArray<RunEvent>): number {
   let corrections = 0;
   for (const event of events) {
-    if (
-      event.type === 'workflow-transition' &&
-      (event.payload.route === 'correction-required' || event.payload.route === 'human-corrected')
-    ) {
+    if (event.type === 'workflow-transition' && event.payload.route === 'correction-required') {
       corrections += 1;
     }
   }

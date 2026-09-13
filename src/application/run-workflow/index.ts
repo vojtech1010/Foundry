@@ -17,6 +17,7 @@ import {
   handleCoderTurn,
   validateCoderTurnControl,
 } from '../coder-result/index.js';
+import { applyDecision, scanForDecision } from '../decision-commands/index.js';
 import { GitHubPublication, publishDecisionDraftPr } from '../decision-publication/index.js';
 import { bootstrapRoleGuidance } from '../guidance/index.js';
 import { reconcileHandoff } from '../handoff/index.js';
@@ -69,10 +70,23 @@ export interface AdvanceRunOptions {
   readonly allowResume: boolean;
 }
 
+/**
+ * The decision outcome of a resume that found a run waiting for a human. A
+ * non-null `problem` is an integrity stop: the durable state is unchanged and
+ * the problem is reported instead of guessing.
+ */
+export interface RunWorkflowDecisionReport {
+  readonly applied: 'accept' | 'correct' | 'abandon' | null;
+  readonly waiting: boolean;
+  readonly draftPrUrl: string | null;
+  readonly problem: string | null;
+}
+
 export interface RunWorkflowOutcome {
   readonly workflowState: WorkflowState;
   readonly stages: ReadonlyArray<WorkflowState>;
   readonly testerSkipped: boolean;
+  readonly decision: RunWorkflowDecisionReport | null;
 }
 
 function errorMessage(error: { readonly message: string }): string {
@@ -112,6 +126,7 @@ function summaryOf(history: VerifiedRunHistory): RunWorkflowOutcome {
     workflowState: history.derived.state ?? 'blocked',
     stages: stagesOf(history),
     testerSkipped: history.derived.testerSkips.length > 0,
+    decision: null,
   };
 }
 
@@ -134,13 +149,15 @@ function repairsUsed(
   ).length;
 }
 
-function correctionRoundsUsed(history: VerifiedRunHistory): number {
+/**
+ * Automatic correction rounds are consumed only by Reviewer `changes_requested`
+ * (`correction-required`). A human-directed `correct` decision reruns the gates
+ * without spending an automatic round, so it never affects this budget.
+ */
+export function correctionRoundsUsed(history: VerifiedRunHistory): number {
   let used = 0;
   for (const event of history.events) {
-    if (
-      event.type === 'workflow-transition' &&
-      (event.payload.route === 'correction-required' || event.payload.route === 'human-corrected')
-    ) {
+    if (event.type === 'workflow-transition' && event.payload.route === 'correction-required') {
       used += 1;
     }
   }
@@ -758,6 +775,73 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     );
   });
 
+  /**
+   * Resumes a run waiting for an authenticated human decision. Only a resume
+   * scans the owned decision pull request; an integrity problem or a still
+   * waiting decision returns a typed report without changing durable state.
+   * `correct` is routed to `correcting` so the body loop reruns every later
+   * gate; `accept` and `abandon` settle the run.
+   */
+  const runDecisionResume = Effect.fn('advanceRun.runDecisionResume')(function* () {
+    const unavailable = {
+      applied: null,
+      waiting: false,
+      draftPrUrl: null,
+      problem: 'GitHub decision publication is not available for this run.',
+    } satisfies RunWorkflowDecisionReport;
+    const github = yield* Effect.serviceOption(GitHubPublication);
+    if (Option.isNone(github)) {
+      return unavailable;
+    }
+    const scan = yield* scanForDecision({ runDirectory, runId, configuration }).pipe(
+      Effect.provideService(GitHubPublication, github.value),
+      Effect.result,
+    );
+    if (Result.isFailure(scan)) {
+      return {
+        applied: null,
+        waiting: false,
+        draftPrUrl: null,
+        problem: errorMessage(scan.failure),
+      } satisfies RunWorkflowDecisionReport;
+    }
+    const outcome = scan.success;
+    if (outcome.kind === 'waiting') {
+      return {
+        applied: null,
+        waiting: true,
+        draftPrUrl: outcome.draftPrUrl,
+        problem: null,
+      } satisfies RunWorkflowDecisionReport;
+    }
+    if (outcome.kind !== 'applied') {
+      return {
+        applied: null,
+        waiting: false,
+        draftPrUrl: outcome.draftPrUrl,
+        problem: outcome.problem,
+      } satisfies RunWorkflowDecisionReport;
+    }
+    const applied = yield* applyDecision(
+      { runDirectory, runId },
+      { decisionId: outcome.decisionId, option: outcome.option, evidence: outcome.evidence },
+    ).pipe(Effect.result);
+    if (Result.isFailure(applied)) {
+      return {
+        applied: null,
+        waiting: false,
+        draftPrUrl: outcome.draftPrUrl,
+        problem: errorMessage(applied.failure),
+      } satisfies RunWorkflowDecisionReport;
+    }
+    return {
+      applied: outcome.option.action,
+      waiting: false,
+      draftPrUrl: outcome.draftPrUrl,
+      problem: null,
+    } satisfies RunWorkflowDecisionReport;
+  });
+
   const runStage = Effect.fn('advanceRun.runStage')(function* (
     state: WorkflowState,
     history: VerifiedRunHistory,
@@ -852,6 +936,24 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
           continue;
         }
         return summaryOf(history);
+      }
+      if (state === 'human_decision_required') {
+        if (!options.allowResume) {
+          return summaryOf(history);
+        }
+        const decision = yield* runDecisionResume();
+        if (decision.problem !== null || decision.applied === null) {
+          return { ...summaryOf(history), decision };
+        }
+        if (decision.applied === 'correct') {
+          continue;
+        }
+        const after = yield* readVerifiedRunHistory({
+          runDirectory,
+          runId,
+          createIfMissing: false,
+        });
+        return { ...summaryOf(after), decision };
       }
       if (!isActiveWorkflowState(state)) {
         return summaryOf(history);
