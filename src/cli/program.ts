@@ -13,6 +13,7 @@ import {
 } from '../domain/public-commands.js';
 import { PUBLICATION_CAPABILITIES } from '../domain/readiness.js';
 import { RunInspectReportSchema } from '../domain/inspection.js';
+import { DiagnosticBundleReportSchema } from '../domain/diagnostic-bundle.js';
 import { Identifier } from '../domain/run-identity.js';
 import {
   CLEANUP_OUTCOMES,
@@ -22,6 +23,7 @@ import {
 
 import type { PublicCommand, PublicCommandInvocation } from '../domain/public-commands.js';
 import type { ReportFailureKind } from '../domain/public-commands.js';
+import type { DiagnosticBundleReport } from '../domain/diagnostic-bundle.js';
 import type { PublicCommandError, PublicCommandReport } from '../application/public-commands.js';
 import type { RunInspectReport } from '../application/inspect/index.js';
 import type { RunGit } from '../application/git-provisioning/index.js';
@@ -183,6 +185,7 @@ const Invocation = Schema.Union([
   Schema.Struct({
     command: Schema.Literal('diagnostic-bundle'),
     config: PathValue,
+    runId: Identifier,
     output: PathValue,
   }),
   Schema.Struct({
@@ -391,6 +394,8 @@ const RunStatusReportData = Schema.Struct({
 
 const InspectReportData = RunInspectReportSchema;
 
+const DiagnosticBundleReportData = DiagnosticBundleReportSchema;
+
 const ReportData = Schema.Union([
   StubReportData,
   DoctorReportData,
@@ -400,6 +405,7 @@ const ReportData = Schema.Union([
   RecordedRunReportData,
   RunStatusReportData,
   InspectReportData,
+  DiagnosticBundleReportData,
 ]);
 
 const SuccessEnvelope = Schema.Struct({
@@ -797,6 +803,23 @@ function renderInspectHuman(data: RunInspectReport): ReadonlyArray<string> {
   return lines;
 }
 
+function renderDiagnosticBundleHuman(data: DiagnosticBundleReport): ReadonlyArray<string> {
+  const lines: Array<string> = [
+    `data.runId: ${data.runId}`,
+    `data.destination: ${data.destination}`,
+    `data.manifestPath: ${data.manifestPath}`,
+    `data.manifest.schemaVersion: ${data.manifest.schemaVersion}`,
+    `data.manifest.entryCount: ${data.manifest.entryCount}`,
+    `data.manifest.totalByteLength: ${data.manifest.totalByteLength}`,
+  ];
+  for (const entry of data.manifest.entries) {
+    lines.push(
+      `data.manifest.entries: ${entry.path} source=${entry.source} bytes=${entry.byteLength} originalBytes=${entry.originalByteLength} sha256=${entry.sha256} redactions=${entry.redactionCount} truncated=${entry.truncated}`,
+    );
+  }
+  return lines;
+}
+
 function renderHuman(envelope: ReportEnvelopeValue): string {
   const lines = [
     `schemaVersion: ${envelope.schemaVersion}`,
@@ -880,6 +903,8 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
           `data.testerSkipped: ${data.testerSkipped}`,
         );
       }
+    } else if ('manifest' in data) {
+      lines.push(...renderDiagnosticBundleHuman(data));
     } else if ('sections' in data) {
       lines.push(...renderInspectHuman(data));
     } else if ('workflowState' in data) {
@@ -961,6 +986,7 @@ function failureKindFor(error: PublicCommandError): ReportFailureKind {
     case 'RunHistoryIntegrityError':
     case 'RunHistoryStorageError':
     case 'RunHistoryConflict':
+    case 'DiagnosticBundleRefused':
     case 'RepositoryLeaseOwnershipLost':
     case 'RepositoryLeaseStorageError':
     case 'RoleHostCapabilityError':
@@ -1034,7 +1060,13 @@ function toDomainInvocation(
       return { command: 'profile-check', config: invocation.config, cwd };
     }
     case 'diagnostic-bundle': {
-      return { command: 'diagnostic-bundle', config: invocation.config, cwd };
+      return {
+        command: 'diagnostic-bundle',
+        runId: invocation.runId,
+        config: invocation.config,
+        output: invocation.output,
+        cwd,
+      };
     }
     case 'cleanup': {
       if ('runId' in invocation) {
@@ -1167,6 +1199,9 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       provenance: { ...report.provenance },
       request,
     };
+  }
+  if ('manifest' in report) {
+    return Schema.decodeUnknownSync(DiagnosticBundleReportData)(report);
   }
   if ('sections' in report) {
     return Schema.decodeUnknownSync(InspectReportData)(report);

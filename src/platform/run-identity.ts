@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 
 import { Effect, Layer } from 'effect';
 
@@ -110,6 +110,18 @@ const removeDirectory = Effect.fn('runIdentity.removeDirectory')(function* (
   });
 });
 
+const readDirectory = Effect.fn('runIdentity.readDirectory')(function* (
+  path: string,
+): Effect.fn.Return<ReadonlyArray<string>, RunIdentityStorageError> {
+  return yield* Effect.try({
+    try: () => readdirSync(path),
+    catch: (cause) =>
+      new RunIdentityStorageError({
+        message: `Cannot read directory at ${path}: ${boundCause(cause)}.`,
+      }),
+  });
+});
+
 export const RunIdentityLive: Layer.Layer<RunIdentityStore> = Layer.succeed(
   RunIdentityStore,
   RunIdentityStore.of({
@@ -119,5 +131,6 @@ export const RunIdentityLive: Layer.Layer<RunIdentityStore> = Layer.succeed(
     createRunDirectoryExclusive,
     writeFileBytes,
     removeDirectory,
+    readDirectory,
   }),
 );

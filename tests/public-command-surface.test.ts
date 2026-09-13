@@ -106,6 +106,7 @@ const UntouchedReadiness = Layer.mergeAll(
       writeFileBytes: (_path: string, _bytes: Uint8Array) =>
         untouchedReadiness('runIdentity.writeFileBytes'),
       removeDirectory: (_path: string) => untouchedReadiness('runIdentity.removeDirectory'),
+      readDirectory: (_path: string) => untouchedReadiness('runIdentity.readDirectory'),
     }),
   ),
   Layer.succeed(
@@ -172,12 +173,6 @@ const validScenarios: ReadonlyArray<ValidScenario> = [
       'superseded by a new request',
     ],
     runId: 'RUN-1',
-    taskId: undefined,
-  },
-  {
-    command: 'diagnostic-bundle',
-    argv: ['diagnostic-bundle', '--config', 'foundry.config.json', '--output', 'bundle'],
-    runId: undefined,
     taskId: undefined,
   },
   {
@@ -441,24 +436,17 @@ describe('public command surface', () => {
 
   it.effect('accepts --json before the command name', () =>
     Effect.gen(function* () {
-      const result = yield* runStubCli([
-        '--json',
-        'diagnostic-bundle',
-        '--config',
-        'cfg.json',
-        '--output',
-        'bundle',
-      ]);
+      const result = yield* runStubCli(['--json', 'cleanup', '--list', '--config', 'cfg.json']);
       expect(result.exitCode).toBe(EXIT_CODES.reported);
       const { envelope, data } = expectStubEnvelope(result.stdout);
-      expect(envelope.command).toBe('diagnostic-bundle');
+      expect(envelope.command).toBe('cleanup');
       expect(data.availability).toBe(NOT_AVAILABLE);
     }),
   );
 
   it.effect('presents the same facts in human output as in JSON output', () =>
     Effect.gen(function* () {
-      const argv = ['diagnostic-bundle', '--config', 'cfg.json', '--output', 'bundle'];
+      const argv = ['cleanup', '--list', '--config', 'cfg.json'];
       const jsonResult = yield* runStubCli([...argv, '--json']);
       const humanResult = yield* runStubCli(argv);
       expect(jsonResult.exitCode).toBe(EXIT_CODES.reported);
@@ -479,20 +467,14 @@ describe('public command surface', () => {
 
   it.effect('renders human success and failure reports without a JSON prefix', () =>
     Effect.gen(function* () {
-      const success = yield* runStubCli([
-        'diagnostic-bundle',
-        '--config',
-        'cfg.json',
-        '--output',
-        'bundle',
-      ]);
+      const success = yield* runStubCli(['cleanup', '--list', '--config', 'cfg.json']);
       expect(success.stdout).toBe(
         [
           'schemaVersion: 1',
-          'command: diagnostic-bundle',
+          'command: cleanup',
           'ok: true',
           `data.availability: ${NOT_AVAILABLE}`,
-          'data.message: Foundry diagnostic-bundle is not available yet.',
+          'data.message: Foundry cleanup is not available yet.',
           '',
         ].join('\n'),
       );
@@ -510,14 +492,7 @@ describe('public command surface', () => {
 
   it.effect('writes exactly one JSON envelope per invocation', () =>
     Effect.gen(function* () {
-      const result = yield* runStubCli([
-        'diagnostic-bundle',
-        '--config',
-        'cfg.json',
-        '--output',
-        'bundle',
-        '--json',
-      ]);
+      const result = yield* runStubCli(['cleanup', '--list', '--config', 'cfg.json', '--json']);
       expect(result.stdout.startsWith('{')).toBe(true);
       expect(result.stdout.trimEnd().includes('\n')).toBe(false);
       expect(result.stdout.endsWith('\n')).toBe(true);
@@ -530,17 +505,10 @@ describe('public command surface', () => {
       const output = join(tmpdir(), `foundry-public-surface-output-${process.pid}`);
       expect(existsSync(output)).toBe(false);
 
-      const result = yield* runStubCli([
-        'diagnostic-bundle',
-        '--config',
-        missingConfig,
-        '--output',
-        output,
-        '--json',
-      ]);
+      const result = yield* runStubCli(['cleanup', '--list', '--config', missingConfig, '--json']);
       expect(result.exitCode).toBe(EXIT_CODES.reported);
       const { envelope, data } = expectStubEnvelope(result.stdout);
-      expect(envelope.command).toBe('diagnostic-bundle');
+      expect(envelope.command).toBe('cleanup');
       expect(data.availability).toBe(NOT_AVAILABLE);
       expect(existsSync(output)).toBe(false);
     }),

@@ -167,6 +167,7 @@ A diagnostic bundle is a bounded, redacted support snapshot:
 ```powershell
 node dist/cli/index.js diagnostic-bundle `
   --config .\.agent\foundry.config.json `
+  --run-id RUN-EXAMPLE-001 `
   --output .\diagnostic-bundle `
   --json
 ```
@@ -174,6 +175,12 @@ node dist/cli/index.js diagnostic-bundle `
 The output must be new or empty and outside live `.agent` storage. The manifest
 records included entries, byte counts, hashes, redaction counts, and truncation.
 A bundle is not a complete archive and is not automatically safe to publish.
+
+The command is implemented. It reads one run's verified history and retained
+bounded artifacts without appending events or rewriting derived reports, refuses
+a non-empty or in-`.agent` destination before writing anything, and applies the
+configured redaction patterns and artifact bounds before each entry is written
+and hashed.
 
 All JSON CLI output uses the single versioned success/error envelope in
 [protocol contracts](protocol-contracts.md#cli-result-contract). Human-readable
