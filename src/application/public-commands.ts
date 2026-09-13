@@ -11,6 +11,7 @@ import { PRODUCT_NAME } from '../domain/workflow.js';
 import { checkProjectProfile } from './profile-check/index.js';
 import { checkReadiness } from './readiness/index.js';
 import { previewRunLocations } from './preview-run-locations/index.js';
+import { createDiagnosticBundle } from './diagnostic-bundle/index.js';
 import { readRunInspect } from './inspect/index.js';
 import { readRetentionCleanupList, runRetentionCleanup } from './retention-cleanup/index.js';
 import type { RetentionCleanupError } from './retention-cleanup/index.js';
@@ -66,6 +67,10 @@ import type {
 } from './run-identity/index.js';
 import type { RunStatusReport } from './status/index.js';
 import type { RunInspectError, RunInspectReport } from './inspect/index.js';
+import type {
+  CreateDiagnosticBundleError,
+  DiagnosticBundleReport,
+} from './diagnostic-bundle/index.js';
 import type { RepositoryHostIdentity, RepositoryLeaseStore } from './repository-lease/index.js';
 import type { RoleHostCapabilityError, RoleHostLauncher } from './role-conversations/index.js';
 import type { RoleTurnResourceObserver } from './role-permissions/index.js';
@@ -110,7 +115,8 @@ export type PublicCommandReport =
   | RunInspectReport
   | RunWorkflowReport
   | CleanupListReport
-  | CleanupRunReport;
+  | CleanupRunReport
+  | DiagnosticBundleReport;
 
 export type PublicCommandError =
   | ReadinessError
@@ -122,6 +128,7 @@ export type PublicCommandError =
   | RoleHostCapabilityError
   | RunWorkflowError
   | RunInspectError
+  | CreateDiagnosticBundleError
   | RunHistoryIntegrityError
   | RunHistoryStorageError
   | RunHistoryConflict
@@ -331,6 +338,21 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       return stubReport(invocation);
     }
     return yield* readRunInspect({ configArg, cwd, runId });
+  }
+  if (invocation.command === 'diagnostic-bundle') {
+    const configArg = invocation.config;
+    const cwd = invocation.cwd;
+    const runId = invocation.runId;
+    const output = invocation.output;
+    if (
+      configArg === undefined ||
+      cwd === undefined ||
+      runId === undefined ||
+      output === undefined
+    ) {
+      return stubReport(invocation);
+    }
+    return yield* createDiagnosticBundle({ configArg, cwd, runId, output });
   }
   if (invocation.command === 'doctor') {
     const configArg = invocation.config;

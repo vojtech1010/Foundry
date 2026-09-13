@@ -293,6 +293,7 @@ function buildProfileWorld(options: {
           mustNotTouchRunStorage('writeFileBytes'),
         removeDirectory: (_path: string) => mustNotTouchRunStorage('removeDirectory'),
         listRuns: (_runsRoot: string) => mustNotTouchRunStorage('listRuns'),
+        readDirectory: (_path: string) => mustNotTouchRunStorage('readDirectory'),
       }),
     ),
     Layer.succeed(

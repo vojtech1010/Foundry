@@ -126,6 +126,18 @@ const listRuns = Effect.fn('runIdentity.listRuns')(function* (
     .sort();
 });
 
+const readDirectory = Effect.fn('runIdentity.readDirectory')(function* (
+  path: string,
+): Effect.fn.Return<ReadonlyArray<string>, RunIdentityStorageError> {
+  return yield* Effect.try({
+    try: () => readdirSync(path),
+    catch: (cause) =>
+      new RunIdentityStorageError({
+        message: `Cannot read directory at ${path}: ${boundCause(cause)}.`,
+      }),
+  });
+});
+
 export const RunIdentityLive: Layer.Layer<RunIdentityStore> = Layer.succeed(
   RunIdentityStore,
   RunIdentityStore.of({
@@ -136,5 +148,6 @@ export const RunIdentityLive: Layer.Layer<RunIdentityStore> = Layer.succeed(
     writeFileBytes,
     removeDirectory,
     listRuns,
+    readDirectory,
   }),
 );

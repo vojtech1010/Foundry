@@ -142,6 +142,9 @@ export class RunIdentityStore extends Context.Service<
     readonly listRuns: (
       runsRoot: string,
     ) => Effect.Effect<ReadonlyArray<string>, RunIdentityStorageError>;
+    readonly readDirectory: (
+      path: string,
+    ) => Effect.Effect<ReadonlyArray<string>, RunIdentityStorageError>;
   }
 >()('foundry/application/run-identity/Store') {}
 

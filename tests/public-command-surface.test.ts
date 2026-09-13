@@ -107,6 +107,7 @@ const UntouchedReadiness = Layer.mergeAll(
         untouchedReadiness('runIdentity.writeFileBytes'),
       removeDirectory: (_path: string) => untouchedReadiness('runIdentity.removeDirectory'),
       listRuns: (_runsRoot: string) => untouchedReadiness('runIdentity.listRuns'),
+      readDirectory: (_path: string) => untouchedReadiness('runIdentity.readDirectory'),
     }),
   ),
   Layer.succeed(
@@ -173,12 +174,6 @@ const validScenarios: ReadonlyArray<ValidScenario> = [
       'superseded by a new request',
     ],
     runId: 'RUN-1',
-    taskId: undefined,
-  },
-  {
-    command: 'diagnostic-bundle',
-    argv: ['diagnostic-bundle', '--config', 'foundry.config.json', '--output', 'bundle'],
-    runId: undefined,
     taskId: undefined,
   },
 ];
@@ -432,22 +427,34 @@ describe('public command surface', () => {
     Effect.gen(function* () {
       const result = yield* runStubCli([
         '--json',
-        'diagnostic-bundle',
+        'resume',
         '--config',
         'cfg.json',
-        '--output',
-        'bundle',
+        '--run-id',
+        'RUN-1',
+        '--abandon',
+        '--reason',
+        'superseded by a new request',
       ]);
       expect(result.exitCode).toBe(EXIT_CODES.reported);
       const { envelope, data } = expectStubEnvelope(result.stdout);
-      expect(envelope.command).toBe('diagnostic-bundle');
+      expect(envelope.command).toBe('resume');
       expect(data.availability).toBe(NOT_AVAILABLE);
     }),
   );
 
   it.effect('presents the same facts in human output as in JSON output', () =>
     Effect.gen(function* () {
-      const argv = ['diagnostic-bundle', '--config', 'cfg.json', '--output', 'bundle'];
+      const argv = [
+        'resume',
+        '--config',
+        'cfg.json',
+        '--run-id',
+        'RUN-1',
+        '--abandon',
+        '--reason',
+        'superseded by a new request',
+      ];
       const jsonResult = yield* runStubCli([...argv, '--json']);
       const humanResult = yield* runStubCli(argv);
       expect(jsonResult.exitCode).toBe(EXIT_CODES.reported);
@@ -469,19 +476,23 @@ describe('public command surface', () => {
   it.effect('renders human success and failure reports without a JSON prefix', () =>
     Effect.gen(function* () {
       const success = yield* runStubCli([
-        'diagnostic-bundle',
+        'resume',
         '--config',
         'cfg.json',
-        '--output',
-        'bundle',
+        '--run-id',
+        'RUN-1',
+        '--abandon',
+        '--reason',
+        'superseded by a new request',
       ]);
       expect(success.stdout).toBe(
         [
           'schemaVersion: 1',
-          'command: diagnostic-bundle',
+          'command: resume',
           'ok: true',
           `data.availability: ${NOT_AVAILABLE}`,
-          'data.message: Foundry diagnostic-bundle is not available yet.',
+          'data.message: Foundry resume is not available yet.',
+          'data.runId: RUN-1',
           '',
         ].join('\n'),
       );
@@ -500,11 +511,14 @@ describe('public command surface', () => {
   it.effect('writes exactly one JSON envelope per invocation', () =>
     Effect.gen(function* () {
       const result = yield* runStubCli([
-        'diagnostic-bundle',
+        'resume',
         '--config',
         'cfg.json',
-        '--output',
-        'bundle',
+        '--run-id',
+        'RUN-1',
+        '--abandon',
+        '--reason',
+        'superseded by a new request',
         '--json',
       ]);
       expect(result.stdout.startsWith('{')).toBe(true);
@@ -520,16 +534,19 @@ describe('public command surface', () => {
       expect(existsSync(output)).toBe(false);
 
       const result = yield* runStubCli([
-        'diagnostic-bundle',
+        'resume',
         '--config',
         missingConfig,
-        '--output',
-        output,
+        '--run-id',
+        'RUN-1',
+        '--abandon',
+        '--reason',
+        'superseded by a new request',
         '--json',
       ]);
       expect(result.exitCode).toBe(EXIT_CODES.reported);
       const { envelope, data } = expectStubEnvelope(result.stdout);
-      expect(envelope.command).toBe('diagnostic-bundle');
+      expect(envelope.command).toBe('resume');
       expect(data.availability).toBe(NOT_AVAILABLE);
       expect(existsSync(output)).toBe(false);
     }),
