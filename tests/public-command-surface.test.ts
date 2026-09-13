@@ -175,12 +175,6 @@ const validScenarios: ReadonlyArray<ValidScenario> = [
     taskId: undefined,
   },
   {
-    command: 'inspect',
-    argv: ['inspect', '--config', 'foundry.config.json', '--run-id', 'RUN-1'],
-    runId: 'RUN-1',
-    taskId: undefined,
-  },
-  {
     command: 'diagnostic-bundle',
     argv: ['diagnostic-bundle', '--config', 'foundry.config.json', '--output', 'bundle'],
     runId: undefined,
@@ -449,22 +443,22 @@ describe('public command surface', () => {
     Effect.gen(function* () {
       const result = yield* runStubCli([
         '--json',
-        'inspect',
+        'diagnostic-bundle',
         '--config',
         'cfg.json',
-        '--run-id',
-        'RUN-1',
+        '--output',
+        'bundle',
       ]);
       expect(result.exitCode).toBe(EXIT_CODES.reported);
       const { envelope, data } = expectStubEnvelope(result.stdout);
-      expect(envelope.command).toBe('inspect');
+      expect(envelope.command).toBe('diagnostic-bundle');
       expect(data.availability).toBe(NOT_AVAILABLE);
     }),
   );
 
   it.effect('presents the same facts in human output as in JSON output', () =>
     Effect.gen(function* () {
-      const argv = ['inspect', '--config', 'cfg.json', '--run-id', 'RUN-PARITY'];
+      const argv = ['diagnostic-bundle', '--config', 'cfg.json', '--output', 'bundle'];
       const jsonResult = yield* runStubCli([...argv, '--json']);
       const humanResult = yield* runStubCli(argv);
       expect(jsonResult.exitCode).toBe(EXIT_CODES.reported);
@@ -485,15 +479,20 @@ describe('public command surface', () => {
 
   it.effect('renders human success and failure reports without a JSON prefix', () =>
     Effect.gen(function* () {
-      const success = yield* runStubCli(['inspect', '--config', 'cfg.json', '--run-id', 'RUN-1']);
+      const success = yield* runStubCli([
+        'diagnostic-bundle',
+        '--config',
+        'cfg.json',
+        '--output',
+        'bundle',
+      ]);
       expect(success.stdout).toBe(
         [
           'schemaVersion: 1',
-          'command: inspect',
+          'command: diagnostic-bundle',
           'ok: true',
           `data.availability: ${NOT_AVAILABLE}`,
-          'data.message: Foundry inspect is not available yet.',
-          'data.runId: RUN-1',
+          'data.message: Foundry diagnostic-bundle is not available yet.',
           '',
         ].join('\n'),
       );
@@ -512,11 +511,11 @@ describe('public command surface', () => {
   it.effect('writes exactly one JSON envelope per invocation', () =>
     Effect.gen(function* () {
       const result = yield* runStubCli([
-        'inspect',
+        'diagnostic-bundle',
         '--config',
         'cfg.json',
-        '--run-id',
-        'RUN-1',
+        '--output',
+        'bundle',
         '--json',
       ]);
       expect(result.stdout.startsWith('{')).toBe(true);
