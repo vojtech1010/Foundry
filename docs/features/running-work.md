@@ -69,17 +69,22 @@ parallel implementation may help, but the accepted plan controls execution.
    mutating application data. Runtime startup and cleanup remain Foundry
    responsibilities.
 6. **Review.** Reviewer evaluates the current commit and evidence.
-7. **Route automatically.** Approval completes the run; actionable findings
-   enter a bounded Coder correction loop; a genuine product decision creates a
-   draft GitHub PR and enters `human_decision_required`.
+7. **Route automatically.** Foundry routes the outcome without another command:
+   approval completes the run; actionable findings enter a bounded Coder
+   correction loop; another required observation returns to Tester while its
+   retry budget remains; a genuine product decision enters `publishing`.
 8. **Clean up.** Foundry releases owned runtime and worktree resources while
    preserving the result and bounded evidence.
 
-A single `run` invocation completes steps 1 through 6 and reaches the first
-Reviewer outcome; the operator never approves or invokes an individual stage.
-Post-review routing and decision publication are separate slices: an ordinary
-Reviewer approval completes the run locally, while a genuine human decision is
-recorded for later publication rather than guessed from free-form activity.
+A single `run` invocation carries the request through steps 1 through 7 and
+reaches the routed outcome: ordinary approval completes the run locally as
+`completed`, a verified no-change approval completes as `completed_no_change`,
+requested changes return to Coder within budget, and a blocked or failed
+outcome stops with evidence preserved. The operator never approves or invokes
+an individual stage. A genuine product decision is the one branch that does not
+finish locally: Foundry records the decision and enters `publishing` for the
+decision-publication slice rather than guessing the outcome from free-form
+activity. Cleanup of owned resources follows every terminal result.
 
 A request already satisfied by the source may complete as
 `completed_no_change`. It has no implementation commit and cannot require a
