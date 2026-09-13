@@ -1,20 +1,38 @@
 import { describe, expect, it } from '@effect/vitest';
-import { Effect, Layer } from 'effect';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { Effect, Layer, Schema } from 'effect';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { Schema } from 'effect';
-
+import { runCli } from '../src/cli/program.js';
 import { RunGit } from '../src/application/git-provisioning/index.js';
-import { buildHandoff } from '../src/application/handoff/index.js';
+import {
+  HANDOFF_FILENAME,
+  HandoffDocumentSchema,
+  buildHandoff,
+} from '../src/application/handoff/index.js';
 import { buildRunInspectReport } from '../src/application/inspect/index.js';
+import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
+import { ReadinessHost } from '../src/application/readiness/index.js';
 import { buildRolePacket } from '../src/application/role-packets/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../src/application/run-history/index.js';
 import { handleTesterTurn } from '../src/application/tester-validation/index.js';
+import { GuidanceLive } from '../src/platform/guidance.js';
+import { RunGitLive } from '../src/platform/git-provisioning.js';
+import { ProjectCommandsPlatformLive } from '../src/platform/project-commands.js';
+import { ReadinessFilesLive, ReadinessGitLive } from '../src/platform/readiness.js';
+import { RepositoryLeaseLive } from '../src/platform/repository-lease.js';
+import { RoleTurnResourceObserverLive } from '../src/platform/role-permissions.js';
 import { sealRunEvent, verifyRunHistoryEvents } from '../src/domain/run-history.js';
 import { RunHistoryLive } from '../src/platform/run-history.js';
-import { RUN_ID, seedVerifyingRun } from './fixtures/checks-runtime-run.js';
+import { RunIdentityLive } from '../src/platform/run-identity.js';
+import {
+  goldenConfigurationDocument,
+  RUN_ID,
+  seedVerifyingRun,
+} from './fixtures/checks-runtime-run.js';
+import { scriptedRoleHostLauncher } from './fixtures/role-host/role-host-launcher.js';
 
 import type { VerifiedRunHistory } from '../src/application/run-history/index.js';
 import type { ProjectConfiguration } from '../src/domain/project-configuration.js';
@@ -682,6 +700,161 @@ describe('the settled Tester turn records the capture manifest', () => {
         const after = yield* readHistory(fixture.runDirectory);
         expect(after.derived.evidenceManifests).toHaveLength(1);
         expect(after.derived.evidenceManifests[0]?.entries).toEqual([]);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+});
+
+const LIVE_RUN_ID = 'RUN-CAPTURES-LIVE';
+
+interface LiveFixture {
+  readonly base: string;
+  readonly target: string;
+  readonly remote: string;
+  readonly configPath: string;
+  readonly requestPath: string;
+  readonly cleanup: () => void;
+}
+
+function gitExec(cwd: string, args: ReadonlyArray<string>): string {
+  return execFileSync('git', [...args], { cwd, encoding: 'utf8' });
+}
+
+function setupLiveFixture(): LiveFixture {
+  const base = mkdtempSync(join(tmpdir(), 'foundry-captures-live-'));
+  const target = join(base, 'target');
+  const remote = join(base, 'remote.git');
+  execFileSync('git', ['init', '--bare', remote], { encoding: 'utf8' });
+  execFileSync('git', ['init', '-b', 'main', target], { encoding: 'utf8' });
+  gitExec(target, ['config', 'user.email', 'captures@example.com']);
+  gitExec(target, ['config', 'user.name', 'Foundry Captures']);
+  writeFileSync(join(target, '.gitignore'), '.agent\n');
+  writeFileSync(join(target, 'README.md'), '# target\n');
+  gitExec(target, ['add', '.gitignore', 'README.md']);
+  gitExec(target, ['commit', '-m', 'initial']);
+  gitExec(target, ['remote', 'add', 'origin', remote]);
+  gitExec(target, ['push', '-u', 'origin', 'main']);
+  const configPath = join(base, 'foundry.config.json');
+  writeFileSync(configPath, JSON.stringify(goldenConfigurationDocument(target, true)));
+  const requestPath = join(base, 'request.md');
+  writeFileSync(requestPath, '# Outcome\n\nMake the app observable.\n');
+  return {
+    base,
+    target,
+    remote,
+    configPath,
+    requestPath,
+    cleanup: () => rmSync(base, { recursive: true, force: true }),
+  };
+}
+
+const liveCapabilityLayers = Layer.mergeAll(
+  Layer.succeed(
+    ReadinessHost,
+    ReadinessHost.of({
+      platform: Effect.succeed('linux'),
+      nodeVersion: Effect.succeed('v24.0.0'),
+      npmVersion: Effect.succeed('11.0.0'),
+      gitVersionOutput: Effect.succeed('git version 2.45.0'),
+    }),
+  ),
+  ReadinessFilesLive,
+  ReadinessGitLive,
+  Layer.succeed(
+    ProjectCommandProcess,
+    ProjectCommandProcess.of({
+      run: (_options: { readonly command: ReadonlyArray<string>; readonly cwd: string }) =>
+        Effect.succeed({ exitCode: 0, stdout: '', stderr: '' }),
+    }),
+  ),
+  ProjectCommandsPlatformLive,
+  RunIdentityLive,
+  RunHistoryLive,
+  RepositoryLeaseLive,
+  RoleTurnResourceObserverLive,
+  RunGitLive,
+  GuidanceLive,
+);
+
+function runCapturedLifecycle(fixture: LiveFixture) {
+  const roleHost = scriptedRoleHostLauncher({
+    architect: {
+      narrative: 'The plan requires runtime validation.',
+      control: {
+        schemaVersion: 1,
+        outcome: 'plan_ready',
+        acceptanceCriteria: ['the app is observable'],
+        runtimeValidation: 'required',
+        execution: 'sequential',
+      },
+    },
+    coder: {
+      narrative: 'No implementation change is required.',
+      control: { schemaVersion: 1, outcome: 'no_change_candidate' },
+    },
+    tester: {
+      narrative: 'Observed the prepared application read-only.',
+      control: { schemaVersion: 1, outcome: 'observed' },
+    },
+    reviewer: {
+      narrative: 'The verified source already satisfies the request.',
+      control: { schemaVersion: 1, outcome: 'approved' },
+    },
+  });
+  return runCli([
+    'run',
+    '--config',
+    fixture.configPath,
+    '--request',
+    fixture.requestPath,
+    '--task-id',
+    'TASK-CAPTURES-LIVE',
+    '--run-id',
+    LIVE_RUN_ID,
+    '--json',
+  ]).pipe(Effect.provide(Layer.mergeAll(liveCapabilityLayers, roleHost)));
+}
+
+describe('the live Tester turn records a content-addressed manifest', () => {
+  it.live('records a manifest for a settled Tester turn and collapses same-content captures', () =>
+    Effect.gen(function* () {
+      const fixture = setupLiveFixture();
+      try {
+        const result = yield* runCapturedLifecycle(fixture);
+        expect(result.exitCode).toBe(0);
+
+        const runDirectory = join(fixture.target, '.agent', 'runs', LIVE_RUN_ID);
+        const history = yield* readVerifiedRunHistory({
+          runDirectory,
+          runId: LIVE_RUN_ID,
+          createIfMissing: false,
+        }).pipe(Effect.provide(RunHistoryLive));
+
+        expect(history.derived.evidenceManifests.length).toBeGreaterThanOrEqual(1);
+        const manifest =
+          history.derived.evidenceManifests[history.derived.evidenceManifests.length - 1];
+        expect(manifest).toBeDefined();
+        if (manifest === undefined) {
+          return;
+        }
+        expect(manifest.entries.length).toBeGreaterThanOrEqual(2);
+        const countByHash = new Map<string, number>();
+        for (const entry of manifest.entries) {
+          if (entry.sha256 !== null) {
+            countByHash.set(entry.sha256, (countByHash.get(entry.sha256) ?? 0) + 1);
+          }
+        }
+        expect([...countByHash.values()].some((count) => count > 1)).toBe(true);
+
+        const handoffText = readFileSync(join(runDirectory, HANDOFF_FILENAME), 'utf8');
+        const handoff = Schema.decodeUnknownSync(Schema.fromJsonString(HandoffDocumentSchema))(
+          handoffText,
+        );
+        expect(handoff.captures).toHaveLength(manifest.entries.length);
+        expect(handoff.captures.some((capture) => capture.duplicated)).toBe(true);
+        expect(handoff.coverageComplete).toBe(true);
       } finally {
         fixture.cleanup();
       }

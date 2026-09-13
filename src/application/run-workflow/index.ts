@@ -47,7 +47,7 @@ import type { ProjectConfiguration } from '../../domain/project-configuration.js
 import type { PlannedObjective } from '../../domain/architect-plan.js';
 import type { RoleHostControl, RoleHostSessionState } from '../../domain/role-host.js';
 import type { RoleTurnLocations } from '../../domain/role-permissions.js';
-import type { RunHistoryDerivedState } from '../../domain/run-history.js';
+import type { EvidenceManifestEntry, RunHistoryDerivedState } from '../../domain/run-history.js';
 import type { WorkflowRole, WorkflowState } from '../../domain/workflow.js';
 import type { WorkerTurnTarget } from '../parallel-workers/index.js';
 import type { HeldApplicationRuntime } from '../project-runtime/index.js';
@@ -166,6 +166,75 @@ function latestSettledTester(history: RunHistoryDerivedState): RoleHostSessionSt
     }
   }
   return latest;
+}
+
+const CAPTURE_SHA256_REFERENCE = /sha256:([0-9a-f]{64})/u;
+
+const CAPTURE_BYTES_REFERENCE = /bytes:(\d+)/u;
+
+/**
+ * Captures the settled Tester turn observed for the current result head. Foundry
+ * already retains the content-bound evidence the Tester consumes: every
+ * commit-bound verification log and tracked-mutation diff is content-addressed
+ * by its `sha256`, while finding evidence references stay name-only unless they
+ * carry a content hash. Entries keep history order, so identical content under
+ * different labels is recorded twice and then counted as one observation
+ * downstream by its shared hash.
+ */
+function observedCaptureEntries(
+  derived: RunHistoryDerivedState,
+  commit: string,
+): ReadonlyArray<EvidenceManifestEntry> {
+  const entries: Array<EvidenceManifestEntry> = [];
+  const seen = new Set<string>();
+  const add = (entry: EvidenceManifestEntry): void => {
+    const key = `${entry.sha256 ?? ''}\u0000${entry.kind}\u0000${entry.label}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    entries.push(entry);
+  };
+  for (const report of derived.verifications) {
+    if (report.commit !== commit) {
+      continue;
+    }
+    for (const execution of report.executions) {
+      add({
+        sha256: execution.log.sha256,
+        byteLength: execution.log.byteLength,
+        label: `${execution.name} ${execution.log.path}`,
+        kind: 'log',
+        criterionIds: [],
+      });
+      if (execution.trackedMutation !== null) {
+        add({
+          sha256: execution.trackedMutation.diff.sha256,
+          byteLength: execution.trackedMutation.diff.byteLength,
+          label: `${execution.name} ${execution.trackedMutation.diff.path}`,
+          kind: 'log',
+          criterionIds: [],
+        });
+      }
+    }
+  }
+  for (const finding of derived.findings) {
+    if (finding.commit !== commit) {
+      continue;
+    }
+    for (const evidence of finding.evidence) {
+      const sha256 = CAPTURE_SHA256_REFERENCE.exec(evidence)?.[1] ?? null;
+      const bytesMatch = CAPTURE_BYTES_REFERENCE.exec(evidence)?.[1];
+      add({
+        sha256,
+        byteLength: bytesMatch === undefined ? null : Number.parseInt(bytesMatch, 10),
+        label: evidence,
+        kind: 'capture',
+        criterionIds: [],
+      });
+    }
+  }
+  return entries;
 }
 
 const decodeRequestText = Effect.fn('advanceRun.decodeRequestText')(function* (
@@ -660,6 +729,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     if (outcome === 'observed' || outcome === 'blocked') {
       yield* disposeRuntime();
     }
+    const captures = observedCaptureEntries(history.derived, commit);
     const disposition = yield* handleTesterTurn({
       runDirectory,
       runId,
@@ -667,6 +737,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       commit,
       testerRetriesRemaining: retriesRemaining,
       retryReason: 'Tester requested another independent observation of the same commit.',
+      captures,
     });
     if (disposition.kind === 'control-invalid') {
       yield* recordControlRetry('tester', disposition.problem);
