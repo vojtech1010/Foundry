@@ -15,7 +15,10 @@ import {
   ReadinessFiles,
   ReadinessGit,
   ReadinessHost,
+  branchProtectionEvidenceFromProbeResult,
   checkReadiness,
+  describePublicationReadiness,
+  resolveBranchProtectionEvidence,
 } from '../src/application/readiness/index.js';
 import {
   GIT_OPERATION_MARKERS,
@@ -28,6 +31,7 @@ import {
   parseGitVersion,
   publicationRepositoryScope,
 } from '../src/domain/readiness.js';
+import { BRANCH_PROTECTION_NOT_CONFIGURED } from '../src/domain/run-locations.js';
 import { EXIT_CODES } from '../src/domain/public-commands.js';
 import { ReadinessFilesLive, ReadinessGitLive } from '../src/platform/readiness.js';
 import {
@@ -146,6 +150,7 @@ function eligibleObservation(
     collaboratorPermission: 'maintain',
     issueCommentReadable: true,
     tokenScopes: null,
+    protectedBranches: [],
     limitations: [],
     ...overrides,
   };
@@ -342,6 +347,9 @@ function buildWorld(
               return world.git.insideWorkTree
                 ? { stdout: 'true\n', exitCode: 0 }
                 : { stdout: 'fatal: not a git repository\n', exitCode: 128 };
+            }
+            if (head === 'remote' && args[1] === 'get-url') {
+              return { stdout: world.git.remoteUrlStdout, exitCode: world.git.remoteUrlExit };
             }
             if (head === 'remote' && args[1] === 'get-url') {
               return { stdout: world.git.remoteUrlStdout, exitCode: world.git.remoteUrlExit };
@@ -1064,6 +1072,96 @@ describe('publication readiness with fake services', () => {
       expect(report.publication.eligible).toBe(false);
       expect(report.publication.repository).toBe('foundry/target');
       expect(report.publication.reason).toContain('probe is unavailable');
+    }),
+  );
+});
+
+describe('publication branch protection evidence', () => {
+  it('maps publication configuration and probe observations to branch protection evidence', () => {
+    expect(
+      branchProtectionEvidenceFromProbeResult({
+        publicationConfigured: false,
+        observation: null,
+        probeUnavailableReason: null,
+      }),
+    ).toEqual(BRANCH_PROTECTION_NOT_CONFIGURED);
+
+    expect(
+      branchProtectionEvidenceFromProbeResult({
+        publicationConfigured: true,
+        observation: eligibleObservation({ protectedBranches: ['main', 'release'] }),
+        probeUnavailableReason: null,
+      }),
+    ).toEqual({ _tag: 'Known', protectedBranches: ['main', 'release'] });
+
+    expect(
+      branchProtectionEvidenceFromProbeResult({
+        publicationConfigured: true,
+        observation: eligibleObservation({ protectedBranches: null }),
+        probeUnavailableReason: null,
+      })._tag,
+    ).toBe('Uncertain');
+
+    expect(
+      branchProtectionEvidenceFromProbeResult({
+        publicationConfigured: true,
+        observation: null,
+        probeUnavailableReason: 'GitHub API is unreachable.',
+      }),
+    ).toEqual({
+      _tag: 'Uncertain',
+      reason: 'GitHub API is unreachable.',
+    });
+  });
+
+  it.effect(
+    'resolves known protected branches from the publication probe without an override',
+    () =>
+      Effect.gen(function* () {
+        const { built } = checkWith(
+          publicationWorld({
+            observation: eligibleObservation({ protectedBranches: ['main', 'release'] }),
+          }),
+        );
+        const evidence = yield* resolveBranchProtectionEvidence(
+          { remote: 'origin', draft: true, maintainersCanModify: false },
+          TARGET,
+        ).pipe(Effect.provide(built.layer));
+
+        expect(evidence).toEqual({ _tag: 'Known', protectedBranches: ['main', 'release'] });
+      }),
+  );
+
+  it.effect('fails closed when the probe cannot establish protected branch names', () =>
+    Effect.gen(function* () {
+      const { built } = checkWith(
+        publicationWorld({
+          observation: eligibleObservation({ protectedBranches: null }),
+        }),
+      );
+      const evidence = yield* resolveBranchProtectionEvidence(
+        { remote: 'origin', draft: true, maintainersCanModify: false },
+        TARGET,
+      ).pipe(Effect.provide(built.layer));
+
+      expect(evidence._tag).toBe('Uncertain');
+    }),
+  );
+
+  it.effect('treats configured but doctor-ineligible publication as not publication-eligible', () =>
+    Effect.gen(function* () {
+      const { built } = checkWith(
+        publicationWorld({
+          observation: eligibleObservation({ tokenPresent: false, protectedBranches: null }),
+        }),
+      );
+      const report = yield* describePublicationReadiness(
+        { remote: 'origin', draft: true, maintainersCanModify: false },
+        TARGET,
+      ).pipe(Effect.provide(built.layer));
+
+      expect(report.configured).toBe(true);
+      expect(report.eligible).toBe(false);
     }),
   );
 });

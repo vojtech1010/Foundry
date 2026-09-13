@@ -35,6 +35,7 @@ import type {
   RepositoryLeaseStore,
 } from '../application/repository-lease/index.js';
 import type {
+  PublicationProbe,
   ReadinessFiles,
   ReadinessGit,
   ReadinessHost,
@@ -1017,6 +1018,7 @@ export const runCli = Effect.fn('runCli')(function* (
   | ReadinessHost
   | ReadinessFiles
   | ReadinessGit
+  | PublicationProbe
   | ProjectCommandProcess
   | ProjectEvidenceStore
   | OwnedProjectProcess

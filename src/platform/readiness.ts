@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 
-import { Effect, Layer, Schema } from 'effect';
+import { Effect, Layer, Result, Schema } from 'effect';
 
 import {
   PublicationProbe,
@@ -120,6 +120,12 @@ const GitHubCollaboratorPermissionSchema = Schema.Struct({
   permission: Schema.Literals(['admin', 'maintain', 'write', 'triage', 'read', 'none']),
 });
 
+const GitHubProtectedBranchSchema = Schema.Array(
+  Schema.Struct({
+    name: Schema.String,
+  }),
+);
+
 interface GitHubHttpResponse {
   readonly status: number;
   readonly scopes: ReadonlyArray<string> | null;
@@ -199,6 +205,7 @@ const observePublication = Effect.fn('publicationProbe.observe')(function* (
       collaboratorPermission: null,
       issueCommentReadable: null,
       tokenScopes: null,
+      protectedBranches: null,
       limitations: [],
     };
   }
@@ -211,6 +218,7 @@ const observePublication = Effect.fn('publicationProbe.observe')(function* (
       collaboratorPermission: null,
       issueCommentReadable: null,
       tokenScopes: lookup.scopes,
+      protectedBranches: null,
       limitations: [`GitHub repository lookup failed with status ${lookup.status}.`],
     };
   }
@@ -251,6 +259,23 @@ const observePublication = Effect.fn('publicationProbe.observe')(function* (
     limitations.push(`Issue comment read failed with status ${comments.status}.`);
   }
 
+  let protectedBranches: ReadonlyArray<string> | null = null;
+  const protectedList = yield* requestGitHub(
+    `/repos/${request.repository}/branches?protected=true&per_page=100`,
+    token,
+  );
+  if (protectedList.status === 200) {
+    const decoded = yield* decodeGitHubDocument(
+      GitHubProtectedBranchSchema,
+      protectedList.body,
+      'protected branches',
+    ).pipe(Effect.result);
+    if (Result.isSuccess(decoded)) {
+      protectedBranches =
+        decoded.success.length >= 100 ? null : decoded.success.map((branch) => branch.name);
+    }
+  }
+
   return {
     repository: repository.full_name,
     tokenPresent: true,
@@ -258,6 +283,7 @@ const observePublication = Effect.fn('publicationProbe.observe')(function* (
     collaboratorPermission,
     issueCommentReadable,
     tokenScopes: lookup.scopes,
+    protectedBranches,
     limitations,
   };
 });

@@ -5,15 +5,23 @@ import { TASK_ID_PLACEHOLDER } from '../../domain/project-configuration.js';
 import { RUN_STORAGE_DIRECTORY_NAME } from '../../domain/readiness.js';
 import {
   RUNS_DIRECTORY_NAME,
-  branchProtectionEvidenceForPublication,
   preflightTaskBranch,
   renderTaskBranch,
   renderWorkspacePath,
 } from '../../domain/run-locations.js';
-import { checkReadiness, ReadinessFiles } from '../readiness/index.js';
+import {
+  checkReadiness,
+  ReadinessFiles,
+  resolveBranchProtectionEvidence,
+} from '../readiness/index.js';
 import { decodeProjectConfiguration } from '../project-configuration.js';
 
-import type { ReadinessError, ReadinessGit, ReadinessHost } from '../readiness/index.js';
+import type {
+  ReadinessError,
+  ReadinessGit,
+  ReadinessHost,
+  PublicationProbe,
+} from '../readiness/index.js';
 import type { RoleHostCapabilityError, RoleHostLauncher } from '../role-conversations/index.js';
 import type { CommandVector } from '../../domain/project-configuration.js';
 import type { BranchProtectionEvidence } from '../../domain/run-locations.js';
@@ -65,7 +73,7 @@ export const previewRunLocations = Effect.fn('previewRunLocations')(function* (
 ): Effect.fn.Return<
   PreviewLocationsReport,
   PreviewLocationsError | ReadinessError | RoleHostCapabilityError,
-  ReadinessHost | ReadinessFiles | ReadinessGit | RoleHostLauncher
+  ReadinessHost | ReadinessFiles | ReadinessGit | PublicationProbe | RoleHostLauncher
 > {
   const readiness = yield* checkReadiness({ configArg: options.configArg, cwd: options.cwd });
 
@@ -89,7 +97,10 @@ export const previewRunLocations = Effect.fn('previewRunLocations')(function* (
   const branch = renderTaskBranch(configuration.taskBranchPolicy, options.taskId);
   const protection =
     options.protection ??
-    branchProtectionEvidenceForPublication(configuration.decisionPublication !== null);
+    (yield* resolveBranchProtectionEvidence(
+      configuration.decisionPublication,
+      configuration.targetRepository,
+    ).pipe(Effect.mapError((error) => new PreviewLocationsError({ message: error.message }))));
   const preflight = preflightTaskBranch({
     taskBranch: branch,
     sourceBranch: configuration.sourceBranch,

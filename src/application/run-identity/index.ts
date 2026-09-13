@@ -5,7 +5,6 @@ import { dirname, join, resolve } from 'node:path';
 import { RUN_STORAGE_DIRECTORY_NAME } from '../../domain/readiness.js';
 import {
   RUNS_DIRECTORY_NAME,
-  branchProtectionEvidenceForPublication,
   isPathInside,
   preflightTaskBranch,
   renderTaskBranch,
@@ -35,7 +34,7 @@ import {
   provisionRunWorktree,
 } from '../git-provisioning/index.js';
 import { ensureGuidanceSnapshot } from '../guidance/index.js';
-import { ReadinessFiles } from '../readiness/index.js';
+import { ReadinessFiles, resolveBranchProtectionEvidence } from '../readiness/index.js';
 import { withRepositoryLease } from '../repository-lease/index.js';
 import { preflightRoleHostCapabilities } from '../role-conversations/index.js';
 import {
@@ -67,6 +66,7 @@ import type {
   WorktreeReadyPayload,
 } from '../../domain/run-history.js';
 import type { ProjectConfiguration } from '../../domain/project-configuration.js';
+import type { ReadinessError, ReadinessGit, PublicationProbe } from '../readiness/index.js';
 import type { BranchProtectionEvidence } from '../../domain/run-locations.js';
 import type { RequestIdentityDocument } from '../../domain/run-identity.js';
 import type { RunGit } from '../git-provisioning/index.js';
@@ -114,7 +114,8 @@ export type RunIdentityError =
   | RunHistoryError
   | GuidanceError
   | RoleHostCapabilityError
-  | RepositoryLeaseError;
+  | RepositoryLeaseError
+  | ReadinessError;
 
 export interface RunStorageFileStatus {
   readonly exists: boolean;
@@ -383,6 +384,8 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   RecordedRunIdentityReport,
   RunIdentityError,
   | ReadinessFiles
+  | ReadinessGit
+  | PublicationProbe
   | RunIdentityStore
   | RunHistoryStorage
   | RepositoryLeaseStore
@@ -463,7 +466,10 @@ export const recordRunIdentity = Effect.fn('recordRunIdentity')(function* (
   const taskBranch = renderTaskBranch(configuration.taskBranchPolicy, options.taskId);
   const protection =
     options.protection ??
-    branchProtectionEvidenceForPublication(configuration.decisionPublication !== null);
+    (yield* resolveBranchProtectionEvidence(
+      configuration.decisionPublication,
+      configuration.targetRepository,
+    ).pipe(Effect.mapError((error) => new InvalidRunRequest({ message: error.message, runId }))));
   const branchPreflight = preflightTaskBranch({
     taskBranch,
     sourceBranch: configuration.sourceBranch,

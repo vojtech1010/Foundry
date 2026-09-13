@@ -37,6 +37,7 @@ import type { RunGit, RunWorkspaceBlocked } from './git-provisioning/index.js';
 import type { GuidanceGit, GuidanceSnapshotStore } from './guidance/index.js';
 import type {
   DoctorReport,
+  PublicationProbe,
   ReadinessError,
   ReadinessFiles,
   ReadinessGit,
@@ -160,6 +161,7 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
   | ReadinessHost
   | ReadinessFiles
   | ReadinessGit
+  | PublicationProbe
   | ProjectCommandProcess
   | ProjectEvidenceStore
   | OwnedProjectProcess

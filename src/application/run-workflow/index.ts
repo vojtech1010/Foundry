@@ -23,6 +23,7 @@ import { buildRolePacket } from '../role-packets/index.js';
 import { startGovernedRoleTurn } from '../role-permissions/index.js';
 import { handleReviewerTurn } from '../reviewer-outcomes/index.js';
 import { RoleHostLauncher } from '../role-conversations/index.js';
+import { describePublicationReadiness } from '../readiness/index.js';
 import { RunIdentityStore, RunIdentityStorageError } from '../run-identity/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../run-history/index.js';
 import { handleTesterTurn, validateTesterTurnControl } from '../tester-validation/index.js';
@@ -547,6 +548,10 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
         (record) => record.commit === commit && record.outcome === 'ready',
       );
     const testerRequired = plan?.runtimeValidationRequired ?? false;
+    const publicationReport = yield* describePublicationReadiness(
+      configuration.decisionPublication,
+      configuration.targetRepository,
+    );
     const assessment = {
       reviewableCommit:
         implementation !== null && !implementation.noChangeCandidate ? implementation.commit : null,
@@ -563,7 +568,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
         0,
         configuration.retryBudgets.tester - retriesUsed(history.derived, 'tester'),
       ),
-      publicationEligible: configuration.decisionPublication !== null,
+      publicationEligible: publicationReport.eligible,
     };
     const prompt = yield* promptFor('reviewer', history);
     const attempt = countSessions(history.derived, 'reviewer') + 1;

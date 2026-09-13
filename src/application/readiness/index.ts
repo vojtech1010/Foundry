@@ -18,6 +18,7 @@ import {
   publicationRepositoryScope,
   renderGitHubRepository,
 } from '../../domain/readiness.js';
+import { BRANCH_PROTECTION_NOT_CONFIGURED } from '../../domain/run-locations.js';
 
 import { decodeProjectConfiguration } from '../project-configuration.js';
 import { preflightRoleHostCapabilities } from '../role-conversations/index.js';
@@ -28,6 +29,7 @@ import type {
   PublicationRepositoryScope,
 } from '../../domain/readiness.js';
 import type { DecisionPublicationConfiguration } from '../../domain/project-configuration.js';
+import type { BranchProtectionEvidence } from '../../domain/run-locations.js';
 import type { RoleHostCapabilityError, RoleHostLauncher } from '../role-conversations/index.js';
 
 export class ReadinessError extends Schema.TaggedError<ReadinessError>()('ReadinessError', {
@@ -97,6 +99,7 @@ export interface PublicationProbeObservation {
   readonly collaboratorPermission: PublicationCollaboratorPermission | null;
   readonly issueCommentReadable: boolean | null;
   readonly tokenScopes: ReadonlyArray<string> | null;
+  readonly protectedBranches: ReadonlyArray<string> | null;
   readonly limitations: ReadonlyArray<string>;
 }
 
@@ -279,7 +282,86 @@ function summarizePublicationObservation(
   };
 }
 
-const describePublicationReadiness = Effect.fn('describePublicationReadiness')(function* (
+export function branchProtectionEvidenceFromProbeResult(input: {
+  readonly publicationConfigured: boolean;
+  readonly observation: PublicationProbeObservation | null;
+  readonly probeUnavailableReason: string | null;
+}): BranchProtectionEvidence {
+  if (!input.publicationConfigured) {
+    return BRANCH_PROTECTION_NOT_CONFIGURED;
+  }
+  if (input.observation === null) {
+    return {
+      _tag: 'Uncertain',
+      reason:
+        input.probeUnavailableReason ??
+        'GitHub protected branch evidence could not be resolved for the configured publication repository.',
+    };
+  }
+  if (input.observation.protectedBranches === null) {
+    return {
+      _tag: 'Uncertain',
+      reason:
+        'GitHub protected branch names could not be established for the configured publication repository.',
+    };
+  }
+  return { _tag: 'Known', protectedBranches: input.observation.protectedBranches };
+}
+
+export const resolveBranchProtectionEvidence = Effect.fn('resolveBranchProtectionEvidence')(
+  function* (
+    publication: DecisionPublicationConfiguration | null,
+    repositoryPath: string,
+  ): Effect.fn.Return<BranchProtectionEvidence, ReadinessError, ReadinessGit | PublicationProbe> {
+    if (publication === null) {
+      return BRANCH_PROTECTION_NOT_CONFIGURED;
+    }
+    const git = yield* ReadinessGit;
+    const remoteUrlResult = yield* git.run(
+      ['remote', 'get-url', publication.remote],
+      repositoryPath,
+    );
+    if (remoteUrlResult.exitCode !== 0 || remoteUrlResult.stdout.trim().length === 0) {
+      return branchProtectionEvidenceFromProbeResult({
+        publicationConfigured: true,
+        observation: null,
+        probeUnavailableReason: `Cannot resolve publication remote "${publication.remote}" in target repository at ${repositoryPath}.`,
+      });
+    }
+    const reference = parseGitHubRepositoryRemote(remoteUrlResult.stdout);
+    if (reference === undefined) {
+      return branchProtectionEvidenceFromProbeResult({
+        publicationConfigured: true,
+        observation: null,
+        probeUnavailableReason: `Publication remote "${publication.remote}" is not a GitHub repository.`,
+      });
+    }
+    const repository = renderGitHubRepository(reference);
+    const probe = yield* Effect.serviceOption(PublicationProbe);
+    if (Option.isNone(probe)) {
+      return branchProtectionEvidenceFromProbeResult({
+        publicationConfigured: true,
+        observation: null,
+        probeUnavailableReason: `GitHub publication probe is unavailable for remote "${publication.remote}".`,
+      });
+    }
+    const observed = yield* probe.value.observe({ repository }).pipe(Effect.result);
+    if (Result.isFailure(observed)) {
+      return branchProtectionEvidenceFromProbeResult({
+        publicationConfigured: true,
+        observation: null,
+        probeUnavailableReason: observed.failure.message,
+      });
+    }
+    return branchProtectionEvidenceFromProbeResult({
+      publicationConfigured: true,
+      observation: observed.success,
+      probeUnavailableReason: null,
+    });
+  },
+);
+
+export const describePublicationReadiness = Effect.fn('describePublicationReadiness')(function* (
   publication: DecisionPublicationConfiguration | null,
   repositoryPath: string,
 ): Effect.fn.Return<DoctorPublicationReport, ReadinessError, ReadinessGit> {

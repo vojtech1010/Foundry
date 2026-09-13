@@ -11,7 +11,7 @@ import {
   branchProtectionEvidenceForPublication,
   preflightTaskBranch,
 } from '../src/domain/run-locations.js';
-import { ReadinessFilesLive } from '../src/platform/readiness.js';
+import { ReadinessFilesLive, ReadinessGitLive } from '../src/platform/readiness.js';
 import { RunGitLive } from '../src/platform/git-provisioning.js';
 import { GuidanceLive } from '../src/platform/guidance.js';
 import { RepositoryLeaseLive } from '../src/platform/repository-lease.js';
@@ -210,6 +210,7 @@ function setupLiveFixture(publicationConfigured: boolean): LiveFixture {
 
 const LiveLayers = Layer.mergeAll(
   ReadinessFilesLive,
+  ReadinessGitLive,
   RunIdentityLive,
   RunHistoryLive,
   RepositoryLeaseLive,

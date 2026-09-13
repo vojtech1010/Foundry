@@ -230,10 +230,6 @@ function latestSettledSession(
   return latest;
 }
 
-const ReviewerOutcomeProbe = Schema.Struct({
-  outcome: Schema.Literals(REVIEWER_TURN_OUTCOMES),
-});
-
 function reviewerOutcomeOf(
   control: RunHistoryDerivedState['roleSessions'][number]['lastObservation'],
 ): (typeof REVIEWER_TURN_OUTCOMES)[number] | null {
@@ -241,13 +237,7 @@ function reviewerOutcomeOf(
     return null;
   }
   const decoded = decodeReviewerTurnControl(control.control);
-  if (decoded.ok) {
-    return decoded.control.outcome;
-  }
-  const probed = Schema.decodeUnknownResult(ReviewerOutcomeProbe, { onExcessProperty: 'ignore' })(
-    control.control,
-  );
-  return Result.isSuccess(probed) ? probed.success.outcome : null;
+  return decoded.ok ? decoded.control.outcome : null;
 }
 
 function testerOutcomeOf(

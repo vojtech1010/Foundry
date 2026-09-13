@@ -594,3 +594,126 @@ describe('handoff completeness diagnostics', () => {
     }),
   );
 });
+
+describe('handoff role summaries', () => {
+  const completion = {
+    state: 'completed' as const,
+    route: 'review-approved' as const,
+    from: 'reviewing' as const,
+    at: '2026-01-01T00:00:00.000Z',
+  };
+
+  const implementation = {
+    taskBranch: TASK_BRANCH,
+    baseCommit: SOURCE_COMMIT,
+    commit: RESULT_COMMIT,
+    changedFiles: ['src/domain/thing.ts'],
+    noChangeCandidate: false,
+  };
+
+  const reviewerSession = {
+    role: 'reviewer' as const,
+    attempt: 1,
+    generation: 1,
+    sessionId: 'session-reviewer-1',
+    ownershipToken: 'owner-session-reviewer-1',
+    initialSequence: 0,
+    runtimeIdentity: {
+      adapterVersion: 'scripted-1',
+      provider: 'scripted',
+      model: 'scripted',
+      toolProfile: 'scripted',
+    },
+    workingDirectory: null,
+    submission: null,
+    submissionStarted: null,
+    stopDisposition: null,
+    lastObservation: {
+      status: 'settled' as const,
+      sequence: 1,
+      eventCount: 1,
+      narrative: 'Reviewer prose without a valid control envelope.',
+      control: { outcome: 'approved' },
+    },
+  };
+
+  it.effect('keeps reviewer narrative but not outcome when control decoding fails', () =>
+    Effect.sync(() => {
+      const document = buildHandoff(
+        RUN_ID,
+        {
+          ...emptyDerived(),
+          acceptedPlan: CHANGE_PLAN,
+          implementation,
+          roleSessions: [reviewerSession],
+        },
+        completion,
+        [],
+      );
+
+      expect(document.reviewer?.outcome).toBeNull();
+      expect(document.reviewer?.narrative).toBe('Reviewer prose without a valid control envelope.');
+    }),
+  );
+
+  it.effect('records tester limitation evidence for the verified commit', () =>
+    Effect.sync(() => {
+      const document = buildHandoff(
+        RUN_ID,
+        {
+          ...emptyDerived(),
+          acceptedPlan: { ...CHANGE_PLAN, runtimeValidationRequired: true },
+          implementation,
+          validationLimitations: [
+            {
+              reason: 'The prepared application runtime could not be observed read-only.',
+              commit: RESULT_COMMIT,
+            },
+          ],
+        },
+        completion,
+        [],
+      );
+
+      expect(document.tester.status).toBe('limitation');
+      expect(document.tester.detail).toContain('could not be observed read-only');
+      expect(document.tester.commit).toBe(RESULT_COMMIT);
+    }),
+  );
+
+  it.effect('distinguishes required-tester missing evidence from an explicit skip', () =>
+    Effect.sync(() => {
+      const missing = buildHandoff(
+        RUN_ID,
+        {
+          ...emptyDerived(),
+          acceptedPlan: { ...CHANGE_PLAN, runtimeValidationRequired: true },
+          implementation,
+        },
+        completion,
+        [],
+      );
+      expect(missing.tester.status).toBe('missing');
+      expect(missing.tester.detail).toContain('required live application validation');
+
+      const skipped = buildHandoff(
+        RUN_ID,
+        {
+          ...emptyDerived(),
+          acceptedPlan: CHANGE_PLAN,
+          implementation,
+          testerSkips: [
+            {
+              reason: 'The accepted plan does not require live application validation.',
+              verificationCommit: RESULT_COMMIT,
+            },
+          ],
+        },
+        completion,
+        [],
+      );
+      expect(skipped.tester.status).toBe('skipped');
+      expect(skipped.tester.detail).toContain('does not require live application validation');
+    }),
+  );
+});
