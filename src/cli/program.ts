@@ -28,6 +28,7 @@ import type { ReportFailureKind } from '../domain/public-commands.js';
 import type { DiagnosticBundleReport } from '../domain/diagnostic-bundle.js';
 import type { PublicCommandError, PublicCommandReport } from '../application/public-commands.js';
 import type { RunInspectReport } from '../application/inspect/index.js';
+import type { GitHubPublication } from '../application/decision-publication/index.js';
 import type { RunGit } from '../application/git-provisioning/index.js';
 import type { GuidanceGit, GuidanceSnapshotStore } from '../application/guidance/index.js';
 import type { ProjectCommandProcess } from '../application/profile-check/index.js';
@@ -1408,6 +1409,7 @@ export const runCli = Effect.fn('runCli')(function* (
   | OwnedProjectProcess
   | RunIdentityStore
   | RunHistoryStorage
+  | GitHubPublication
   | RepositoryLeaseStore
   | RepositoryHostIdentity
   | RoleHostLauncher

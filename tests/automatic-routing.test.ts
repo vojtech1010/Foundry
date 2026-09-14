@@ -290,6 +290,7 @@ interface RoutingOverrides {
 interface RoutingGitHubCalls {
   readonly open: Array<GitHubCreatePullRequestOptions>;
   readonly push: Array<GitHubPushTaskBranchOptions>;
+  readonly draft: Array<GitHubCreatePullRequestOptions>;
 }
 
 interface RoutingGitHubHarness {
@@ -304,7 +305,7 @@ interface RoutingGitHubHarness {
  * repository so the publication can confirm the exact accepted commit.
  */
 function routingGitHubPublication(fixture: Fixture): RoutingGitHubHarness {
-  const calls: RoutingGitHubCalls = { open: [], push: [] };
+  const calls: RoutingGitHubCalls = { open: [], push: [], draft: [] };
   const pullRequestNumber = 42;
   const layer = Layer.succeed(
     GitHubPublication,
@@ -344,6 +345,68 @@ function routingGitHubPublication(fixture: Fixture): RoutingGitHubHarness {
   return { layer, calls };
 }
 
+/**
+ * A stand-in for the GitHub publication adapter for routing walks whose
+ * configured publication is never reached. It answers the repository identity
+ * so readiness never guesses and refuses every reachable mutation loudly; a
+ * walk that would publish overrides it with a purpose-built harness.
+ */
+function routingDefaultPublication(): Layer.Layer<GitHubPublication> {
+  return Layer.succeed(
+    GitHubPublication,
+    GitHubPublication.of({
+      lookupRepositoryIdentity: (options) => Effect.succeed({ repository: options.repository }),
+      lookupExactPullRequest: () => Effect.die(new Error('no draft PR is expected for this run')),
+      createDraftPullRequest: () => Effect.die(new Error('no draft PR is expected for this run')),
+      openResultPullRequest: () => Effect.die(new Error('no result PR is expected for this run')),
+      refreshOwnedDraftPullRequestBody: () =>
+        Effect.die(new Error('no draft PR is expected for this run')),
+      pushTaskBranch: () => Effect.die(new Error('no push is expected for this run')),
+      listIssueCommentsAfter: () => Effect.succeed({ comments: [], truncated: false }),
+      collaboratorPermission: () => Effect.succeed({ permission: 'maintain' }),
+    }),
+  );
+}
+
+/**
+ * A deterministic GitHub publication adapter for an eligible human decision. It
+ * records the non-force push, reports no exact open draft PR, and creates the
+ * one draft pull request for the task branch so the publishing stage can
+ * reconcile the exact URL in place.
+ */
+function routingDraftPrPublication(): RoutingGitHubHarness {
+  const calls: RoutingGitHubCalls = { open: [], push: [], draft: [] };
+  const pullRequestNumber = 7;
+  const layer = Layer.succeed(
+    GitHubPublication,
+    GitHubPublication.of({
+      lookupRepositoryIdentity: (options) => Effect.succeed({ repository: options.repository }),
+      lookupExactPullRequest: () => Effect.succeed({ kind: 'absent' }),
+      createDraftPullRequest: (options) => {
+        calls.draft.push(options);
+        return Effect.succeed({
+          number: pullRequestNumber,
+          url: `${PUBLICATION_REMOTE_URL.replace(/\.git$/u, '')}/pull/${pullRequestNumber}`,
+          draft: true,
+          headBranch: options.headBranch,
+          headCommit: options.headBranch,
+          baseBranch: options.baseBranch,
+        } satisfies GitHubPullRequest);
+      },
+      openResultPullRequest: () => Effect.die(new Error('result publication must not open a PR')),
+      refreshOwnedDraftPullRequestBody: () =>
+        Effect.die(new Error('result publication must not refresh a draft PR')),
+      pushTaskBranch: (options) => {
+        calls.push.push(options);
+        return Effect.void;
+      },
+      listIssueCommentsAfter: () => Effect.succeed({ comments: [], truncated: false }),
+      collaboratorPermission: () => Effect.succeed({ permission: 'maintain' }),
+    }),
+  );
+  return { layer, calls };
+}
+
 function runRouting(
   fixture: Fixture,
   runId: string,
@@ -368,7 +431,7 @@ function runRouting(
         capabilityLayers,
         routingRoleHostLauncher(turns, { commitOnCoder }),
         overrides.runGit ?? RunGitLive,
-        overrides.github ?? Layer.empty,
+        overrides.github ?? routingDefaultPublication(),
       ),
     ),
   );
@@ -641,11 +704,12 @@ describe('automatic routing after review', () => {
     }),
   );
 
-  it.live('routes an eligible human_decision_required into publishing', () =>
+  it.live('publishes an eligible human_decision_required into the waiting state', () =>
     Effect.gen(function* () {
       const fixture = setupFixture('human');
       try {
         const runId = 'RUN-ROUTE-HUMAN';
+        const github = routingDraftPrPublication();
         const result = yield* runRouting(
           fixture,
           runId,
@@ -671,15 +735,28 @@ describe('automatic routing after review', () => {
             },
           },
           true,
+          { runGit: publicationRunGit(), github: github.layer },
         );
-        // The eligible decision routes into the publishing stage in the same
-        // invocation; the publication transaction itself is a later slice.
+        // The eligible decision publishes the draft PR and continues the same
+        // invocation to the waiting state instead of stopping at `publishing`.
         expect(result.exitCode).toBe(0);
-        expect(workflowStateOf(result.stdout)).toBe('publishing');
+        expect(workflowStateOf(result.stdout)).toBe('human_decision_required');
 
         const history = yield* readHistory(fixture, runId);
+        expect(history.derived.state).toBe('human_decision_required');
         expectRoute(history, 'human-decision-required', 'publishing');
+        expectRoute(history, 'draft-pr-reconciled', 'human_decision_required');
         expect(routesOf(history)).not.toContain('publication-unavailable');
+        expect(github.calls.draft).toHaveLength(1);
+        expect(github.calls.push).toHaveLength(1);
+        expect(
+          history.events.some(
+            (event) =>
+              event.type === 'publication-checkpoint' &&
+              event.payload.stage === 'url-recorded' &&
+              event.payload.draftPrUrl !== null,
+          ),
+        ).toBe(true);
       } finally {
         fixture.cleanup();
       }
