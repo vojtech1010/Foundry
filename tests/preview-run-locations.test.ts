@@ -123,16 +123,6 @@ function goldenDocument(
     },
     runtimeProfile: null,
     decisionPublication: null,
-    artifacts: {
-      retentionDays: 30,
-      maxRequestBytes: 262144,
-      maxGuidanceBytes: 1048576,
-      maxRoleHandoffBytes: 262144,
-      maxEvidenceBytes: 26214400,
-      maxTerminalCaptureBytes: 10485760,
-      maxRunBytes: 104857600,
-      redactionPatterns: [],
-    },
     ...overrides,
   };
 }
@@ -458,8 +448,34 @@ describe('preview run locations with fake services', () => {
         protocol: 'foundry-role-host-v1',
         command: ['foundry-role-host'],
       });
-      expect(report.artifacts).toEqual({ root: '/target/.agent/runs' });
+      expect(report.artifacts).toEqual({
+        root: '/target/.agent/runs',
+        retentionDays: 30,
+        maxRequestBytes: 262144,
+        maxGuidanceBytes: 1048576,
+        maxRoleHandoffBytes: 262144,
+        maxEvidenceBytes: 26214400,
+        maxTerminalCaptureBytes: 10485760,
+        maxRunBytes: 104857600,
+        redactionPatterns: [],
+      });
       expectReadOnlyGitCalls(built.gitCalls);
+    }),
+  );
+
+  it.effect('reports the hardcoded artifact bounds in the preview', () =>
+    Effect.gen(function* () {
+      const { preview } = previewWith(defaultWorld());
+      const report = yield* preview;
+
+      expect(report.artifacts.retentionDays).toBe(30);
+      expect(report.artifacts.maxRequestBytes).toBe(262144);
+      expect(report.artifacts.maxGuidanceBytes).toBe(1048576);
+      expect(report.artifacts.maxRoleHandoffBytes).toBe(262144);
+      expect(report.artifacts.maxEvidenceBytes).toBe(26214400);
+      expect(report.artifacts.maxTerminalCaptureBytes).toBe(10485760);
+      expect(report.artifacts.maxRunBytes).toBe(104857600);
+      expect(report.artifacts.redactionPatterns).toEqual([]);
     }),
   );
 
@@ -653,7 +669,17 @@ describe('preview run locations with fake services', () => {
       expect(data.taskId).toBe(TASK_ID);
       expect(data.branch).toBe('foundry/example-change');
       expect(data.workspace).toBe('/target/.agent/worktrees/example-change');
-      expect(data.artifacts).toEqual({ root: '/target/.agent/runs' });
+      expect(data.artifacts).toEqual({
+        root: '/target/.agent/runs',
+        retentionDays: 30,
+        maxRequestBytes: 262144,
+        maxGuidanceBytes: 1048576,
+        maxRoleHandoffBytes: 262144,
+        maxEvidenceBytes: 26214400,
+        maxTerminalCaptureBytes: 10485760,
+        maxRunBytes: 104857600,
+        redactionPatterns: [],
+      });
       expect(Object.keys(data).sort()).toEqual(
         ['artifacts', 'branch', 'roleHarness', 'source', 'taskId', 'workspace'].sort(),
       );
@@ -697,6 +723,15 @@ describe('preview run locations with fake services', () => {
         `data.roleHarness.protocol: ${data.roleHarness.protocol}`,
       );
       expect(humanResult.stdout).toContain(`data.artifacts.root: ${data.artifacts.root}`);
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.retentionDays: ${data.artifacts.retentionDays}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.maxRequestBytes: ${data.artifacts.maxRequestBytes}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.maxRunBytes: ${data.artifacts.maxRunBytes}`,
+      );
       expect(humanResult.stdout.endsWith('\n')).toBe(true);
     }),
   );

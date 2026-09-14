@@ -153,6 +153,17 @@ export interface DoctorRoleHostReport {
   readonly networkProfiles: ReadonlyArray<string>;
 }
 
+export interface DoctorArtifactsReport {
+  readonly retentionDays: number;
+  readonly maxRequestBytes: number;
+  readonly maxGuidanceBytes: number;
+  readonly maxRoleHandoffBytes: number;
+  readonly maxEvidenceBytes: number;
+  readonly maxTerminalCaptureBytes: number;
+  readonly maxRunBytes: number;
+  readonly redactionPatterns: ReadonlyArray<string>;
+}
+
 export interface DoctorPublicationCapabilityReport {
   readonly capability: PublicationCapability;
   readonly state: PublicationCapabilityState;
@@ -175,6 +186,7 @@ export interface DoctorReport {
   readonly repository: DoctorRepositoryReport;
   readonly roleHost: DoctorRoleHostReport;
   readonly publication: DoctorPublicationReport;
+  readonly artifacts: DoctorArtifactsReport;
 }
 
 export interface CheckReadinessOptions {
@@ -616,5 +628,15 @@ export const checkReadiness = Effect.fn('checkReadiness')(function* (
       networkProfiles: [...capabilities.capabilityProfiles.network],
     },
     publication,
+    artifacts: {
+      retentionDays: configuration.artifacts.retentionDays,
+      maxRequestBytes: configuration.artifacts.maxRequestBytes,
+      maxGuidanceBytes: configuration.artifacts.maxGuidanceBytes,
+      maxRoleHandoffBytes: configuration.artifacts.maxRoleHandoffBytes,
+      maxEvidenceBytes: configuration.artifacts.maxEvidenceBytes,
+      maxTerminalCaptureBytes: configuration.artifacts.maxTerminalCaptureBytes,
+      maxRunBytes: configuration.artifacts.maxRunBytes,
+      redactionPatterns: [...configuration.artifacts.redactionPatterns],
+    },
   };
 });

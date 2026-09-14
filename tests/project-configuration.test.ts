@@ -9,6 +9,7 @@ import {
   decodeProjectConfiguration,
 } from '../src/application/project-configuration.js';
 import {
+  HARDCODED_ARTIFACT_BOUNDS,
   PROJECT_CONFIGURATION_SCHEMA_VERSION,
   PUBLICATION_DRAFT,
   PUBLICATION_MAINTAINERS_CAN_MODIFY,
@@ -85,16 +86,6 @@ const exampleConfiguration = {
     draft: true,
     maintainersCanModify: false,
   },
-  artifacts: {
-    retentionDays: 30,
-    maxRequestBytes: 262144,
-    maxGuidanceBytes: 1048576,
-    maxRoleHandoffBytes: 262144,
-    maxEvidenceBytes: 26214400,
-    maxTerminalCaptureBytes: 10485760,
-    maxRunBytes: 104857600,
-    redactionPatterns: [],
-  },
 } as const;
 
 interface InvalidCase {
@@ -116,7 +107,6 @@ const sections: ReadonlyArray<readonly [string, Record<string, Schema.Json>]> = 
   ['projectProfile', exampleConfiguration.projectProfile],
   ['runtimeProfile', exampleConfiguration.runtimeProfile],
   ['decisionPublication', exampleConfiguration.decisionPublication],
-  ['artifacts', exampleConfiguration.artifacts],
 ];
 
 function expectInvalidConfiguration(document: Schema.Json, label: string) {
@@ -234,12 +224,12 @@ const unknownFieldCases: ReadonlyArray<InvalidCase> = [
     field: 'decisionPublication.labels',
   },
   {
-    label: 'unknown artifact field',
+    label: 'artifacts block is not part of the configuration document',
     document: {
       ...exampleConfiguration,
-      artifacts: { ...exampleConfiguration.artifacts, maxCommentBytes: 65536 },
+      artifacts: { ...HARDCODED_ARTIFACT_BOUNDS },
     },
-    field: 'artifacts.maxCommentBytes',
+    field: 'artifacts',
   },
 ];
 
@@ -486,38 +476,6 @@ const mistypedFieldCases: ReadonlyArray<InvalidCase> = [
     },
     field: 'runtimeProfile.stop',
   },
-  {
-    label: 'negative retention days',
-    document: {
-      ...exampleConfiguration,
-      artifacts: { ...exampleConfiguration.artifacts, retentionDays: -1 },
-    },
-    field: 'artifacts.retentionDays',
-  },
-  {
-    label: 'zero artifact byte bound',
-    document: {
-      ...exampleConfiguration,
-      artifacts: { ...exampleConfiguration.artifacts, maxRunBytes: 0 },
-    },
-    field: 'artifacts.maxRunBytes',
-  },
-  {
-    label: 'fractional artifact byte bound',
-    document: {
-      ...exampleConfiguration,
-      artifacts: { ...exampleConfiguration.artifacts, maxRequestBytes: 1.5 },
-    },
-    field: 'artifacts.maxRequestBytes',
-  },
-  {
-    label: 'redaction patterns as string',
-    document: {
-      ...exampleConfiguration,
-      artifacts: { ...exampleConfiguration.artifacts, redactionPatterns: 'secret' },
-    },
-    field: 'artifacts.redactionPatterns',
-  },
 ];
 
 describe('project configuration contract', () => {
@@ -554,7 +512,35 @@ describe('project configuration contract', () => {
       expect(decoded.projectProfile.commands).toEqual(exampleConfiguration.projectProfile.commands);
       expect(decoded.runtimeProfile).toEqual(exampleConfiguration.runtimeProfile);
       expect(decoded.decisionPublication).toEqual(exampleConfiguration.decisionPublication);
-      expect(decoded.artifacts).toEqual(exampleConfiguration.artifacts);
+      expect(decoded.artifacts).toEqual({ ...HARDCODED_ARTIFACT_BOUNDS });
+    }),
+  );
+
+  it.effect('injects the immutable hardcoded artifact bounds', () =>
+    Effect.gen(function* () {
+      const decoded = yield* decodeProjectConfiguration(exampleConfiguration, configDirectory);
+
+      expect(decoded.artifacts).toEqual({
+        retentionDays: 30,
+        maxRequestBytes: 262144,
+        maxGuidanceBytes: 1048576,
+        maxRoleHandoffBytes: 262144,
+        maxEvidenceBytes: 26214400,
+        maxTerminalCaptureBytes: 10485760,
+        maxRunBytes: 104857600,
+        redactionPatterns: [],
+      });
+      expect(decoded.artifacts).toEqual({ ...HARDCODED_ARTIFACT_BOUNDS });
+    }),
+  );
+
+  it.effect('rejects a document carrying the removed artifacts block', () =>
+    Effect.gen(function* () {
+      const error = yield* expectInvalidConfiguration(
+        { ...exampleConfiguration, artifacts: { ...HARDCODED_ARTIFACT_BOUNDS } },
+        'artifacts block',
+      );
+      expect(error.field).toBe('artifacts');
     }),
   );
 
@@ -572,7 +558,6 @@ describe('project configuration contract', () => {
           },
           runtimeProfile: null,
           decisionPublication: null,
-          artifacts: { ...exampleConfiguration.artifacts, retentionDays: 0 },
         },
         configDirectory,
       );
@@ -592,7 +577,8 @@ describe('project configuration contract', () => {
         maxCorrectionRounds: 0,
         maxControlRepairsPerAttempt: 0,
       });
-      expect(decoded.artifacts.retentionDays).toBe(0);
+      expect(decoded.artifacts).toEqual({ ...HARDCODED_ARTIFACT_BOUNDS });
+      expect(decoded.artifacts.retentionDays).toBe(30);
     }),
   );
 
