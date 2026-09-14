@@ -91,6 +91,26 @@ export function bundledExecutableCandidates(
 }
 
 /**
+ * Reports whether a resolved bundled executable needs a shell to start
+ * on the given platform. Only executable resolution varies by platform;
+ * argv, catalogs, and routing stay identical. On Windows, vendor shims may
+ * install as `.cmd`/`.bat`, which `CreateProcess` cannot start directly,
+ * so the launcher spawns the resolved absolute path through a shell while
+ * `.exe` and bare names keep `shell: false`. Pure and platform-explicit so
+ * Windows ordering is covered deterministically without platform-skipping.
+ */
+export function requiresShellForBundledExecutable(
+  resolvedPath: string,
+  platform: NodeJS.Platform,
+): boolean {
+  if (platform !== 'win32') {
+    return false;
+  }
+  const lower = resolvedPath.toLowerCase();
+  return lower.endsWith('.cmd') || lower.endsWith('.bat');
+}
+
+/**
  * Adapter-owned launch details per harness: the exact argv to spawn and the
  * model catalog the harness may serve. Configuration only names a harness
  * and model; this table is the only place argv and catalog membership live.
@@ -251,6 +271,25 @@ function waitForClose(
   });
 }
 
+const resolveBundledExecutablePath = Effect.fn('roleHost.resolveBundledExecutablePath')(function* (
+  harness: RoleHarnessName,
+  executable: string,
+  operation: RoleHostOperation,
+): Effect.fn.Return<string, RoleHostOperationalError> {
+  const candidates = bundledExecutableCandidates(harness, process.platform);
+  const directories = (process.env.PATH ?? '').split(delimiter);
+  const found = yield* Effect.sync(() =>
+    findBundledExecutable(candidates, directories, join, isExecutableFile),
+  );
+  if (found !== null) {
+    return found;
+  }
+  return yield* new RoleHostOperationalError({
+    message: `Cannot start role host "${executable}": bundled executable (${candidates.join(', ')}) was not found on the process PATH.`,
+    operation,
+  });
+});
+
 const runOperation = Effect.fn('roleHost.runOperation')(function* <
   ResponseSchema extends ResponseDocumentSchema,
 >(
@@ -261,16 +300,22 @@ const runOperation = Effect.fn('roleHost.runOperation')(function* <
 ): Effect.fn.Return<ResponseSchema['Type'], RoleHostOperationalError> {
   const command = yield* resolveEffectiveCommand(options, operation);
   const [executable, ...args] = command;
+  const resolvedExecutable = yield* resolveBundledExecutablePath(
+    options.harness,
+    executable,
+    operation,
+  );
+  const useShell = requiresShellForBundledExecutable(resolvedExecutable, process.platform);
   const environment = forwardedEnvironment(options.environmentAllowlist);
   const stdout = yield* Effect.scoped(
     Effect.gen(function* () {
       const child = yield* Effect.acquireRelease(
         Effect.try({
           try: () =>
-            spawn(executable, [...args, operation], {
+            spawn(resolvedExecutable, [...args, operation], {
               cwd: options.cwd,
               env: environment,
-              shell: false,
+              shell: useShell,
               stdio: ['pipe', 'pipe', 'pipe'],
             }),
           catch: (cause) =>

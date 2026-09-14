@@ -10,10 +10,12 @@ export interface BundledHarnessShim {
 /**
  * Installs a `codex` executable shim forwarding to the fake role-host
  * fixture, so bundled catalog launches resolve without an explicit command.
- * The shim forwards the scenario, log path, and the appended operation to
- * the fixture. POSIX writes an sh shim; Windows writes a `.cmd` shim for
- * PATHEXT resolution. `restore` returns the previous PATH and removes the
- * shim directory.
+ * The shim forwards the scenario, log path, and every appended catalog arg
+ * (currently the single role-host operation) to the fixture. POSIX writes
+ * an sh shim; Windows writes a `.cmd` shim for PATHEXT resolution, which the
+ * launcher spawns through a shell while `.exe` and bare names keep
+ * `shell: false`. `restore` returns the previous PATH and removes the shim
+ * directory.
  */
 export function installBundledHarnessShim(
   fakePath: string,
@@ -24,13 +26,13 @@ export function installBundledHarnessShim(
   if (process.platform === 'win32') {
     writeFileSync(
       join(directory, 'codex.cmd'),
-      `@echo off\r\n"${process.execPath}" "${fakePath}" ${scenario} "${logPath}" "%~1"\r\n`,
+      `@echo off\r\n"${process.execPath}" "${fakePath}" ${scenario} "${logPath}" %*\r\n`,
     );
   } else {
     const shim = join(directory, 'codex');
     writeFileSync(
       shim,
-      `#!/bin/sh\nexec "${process.execPath}" "${fakePath}" ${scenario} "${logPath}" "$1"\n`,
+      `#!/bin/sh\nexec "${process.execPath}" "${fakePath}" ${scenario} "${logPath}" "$@"\n`,
     );
     chmodSync(shim, 0o755);
   }

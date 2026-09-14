@@ -34,6 +34,55 @@ export function isPathInside(parent: string, candidate: string): boolean {
   );
 }
 
+/**
+ * Normalizes a canonical filesystem path for identity comparison only.
+ *
+ * Converts separators to `/`, strips a `\\\\?\\` extended prefix, trims one
+ * trailing slash, and lowercases on Windows where the filesystem aliases
+ * drive-letter case, separator style, and short (`RUNNER~1`) versus long
+ * (`runneradmin`) spellings of the same directory. Short-versus-long
+ * expansion itself comes from `realpath` before this helper runs; this
+ * function only makes the resulting strings comparable.
+ *
+ * Never use this for containment or security decisions: `isPathInside`
+ * stays strict so alias folding cannot widen access.
+ */
+export function normalizePathIdentity(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const slashed = path.trim().replace(/\\/gu, '/');
+  let normalized = slashed;
+  if (normalized.startsWith('//?/')) {
+    normalized = normalized.slice('//?/'.length);
+    if (normalized.startsWith('UNC/')) {
+      normalized = `/${normalized.slice('UNC/'.length)}`;
+    }
+  }
+  if (normalized.length > 1 && normalized.endsWith('/') && !/^[A-Za-z]:\/$/u.test(normalized)) {
+    normalized = normalized.slice(0, -1);
+  }
+  if (platform === 'win32') {
+    return normalized.toLowerCase();
+  }
+  return normalized;
+}
+
+/**
+ * Reports whether two canonical paths name the same filesystem location
+ * for identity purposes (repository roots, worktree registrations).
+ * Comparison folds Windows separator, extended-prefix, trailing-slash, and
+ * case aliases via `normalizePathIdentity`. Containment checks must keep
+ * using `isPathInside`, never this helper.
+ */
+export function isSamePathIdentity(
+  left: string,
+  right: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return normalizePathIdentity(left, platform) === normalizePathIdentity(right, platform);
+}
+
 function hasControlOrSpace(name: string): boolean {
   for (const character of name) {
     if (character === ' ') {

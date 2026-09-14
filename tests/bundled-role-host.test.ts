@@ -19,6 +19,7 @@ import {
   RoleHostBinaryResolverLive,
   bundledExecutableCandidates,
   findBundledExecutable,
+  requiresShellForBundledExecutable,
 } from '../src/platform/role-host.js';
 
 describe('bundled role-host executable candidates', () => {
@@ -40,6 +41,17 @@ describe('bundled role-host executable candidates', () => {
       'opencode.cmd',
       'opencode.bat',
     ]);
+  });
+});
+
+describe('bundled executable shell routing', () => {
+  it('spawns Windows script shims through a shell without changing POSIX launches', () => {
+    expect(requiresShellForBundledExecutable('C:\\tools\\codex.cmd', 'win32')).toBe(true);
+    expect(requiresShellForBundledExecutable('C:\\tools\\codex.BAT', 'win32')).toBe(true);
+    expect(requiresShellForBundledExecutable('C:\\tools\\codex.exe', 'win32')).toBe(false);
+    expect(requiresShellForBundledExecutable('C:\\tools\\codex', 'win32')).toBe(false);
+    expect(requiresShellForBundledExecutable('/tools/codex.cmd', 'linux')).toBe(false);
+    expect(requiresShellForBundledExecutable('/tools/codex', 'darwin')).toBe(false);
   });
 });
 
