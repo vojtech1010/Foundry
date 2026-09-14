@@ -2,6 +2,7 @@ import { Effect, Schema } from 'effect';
 import { resolve } from 'node:path';
 
 import {
+  HARDCODED_ARTIFACT_BOUNDS,
   PROJECT_CONFIGURATION_SCHEMA_VERSION,
   PUBLICATION_DRAFT,
   PUBLICATION_MAINTAINERS_CAN_MODIFY,
@@ -92,18 +93,7 @@ const DecisionPublicationSchema = Schema.Struct({
   maintainersCanModify: Schema.Boolean,
 });
 
-const ArtifactsSchema = Schema.Struct({
-  retentionDays: NonNegativeInteger,
-  maxRequestBytes: PositiveInteger,
-  maxGuidanceBytes: PositiveInteger,
-  maxRoleHandoffBytes: PositiveInteger,
-  maxEvidenceBytes: PositiveInteger,
-  maxTerminalCaptureBytes: PositiveInteger,
-  maxRunBytes: PositiveInteger,
-  redactionPatterns: StringListSchema,
-});
-
-export const ProjectConfigurationSchema = Schema.Struct({
+const ProjectConfigurationInputSchema = Schema.Struct({
   schemaVersion: Schema.Literal(PROJECT_CONFIGURATION_SCHEMA_VERSION),
   targetRepository: Schema.NonEmptyString,
   sourceRemote: Schema.NonEmptyString,
@@ -117,8 +107,9 @@ export const ProjectConfigurationSchema = Schema.Struct({
   projectProfile: ProjectProfileSchema,
   runtimeProfile: Schema.NullOr(RuntimeProfileSchema),
   decisionPublication: Schema.NullOr(DecisionPublicationSchema),
-  artifacts: ArtifactsSchema,
 });
+
+export const ProjectConfigurationSchema = ProjectConfigurationInputSchema;
 
 export class InvalidProjectConfiguration extends Schema.TaggedError<InvalidProjectConfiguration>()(
   'InvalidProjectConfiguration',
@@ -258,6 +249,10 @@ export const decodeProjectConfiguration = Effect.fn('decodeProjectConfiguration'
 
   return {
     ...decoded,
+    artifacts: {
+      ...HARDCODED_ARTIFACT_BOUNDS,
+      redactionPatterns: [...HARDCODED_ARTIFACT_BOUNDS.redactionPatterns],
+    },
     targetRepository: resolve(configDirectory, decoded.targetRepository),
     roleHarness: {
       ...decoded.roleHarness,

@@ -231,6 +231,17 @@ const PublicationReadinessData = Schema.Struct({
   capabilities: Schema.Array(PublicationCapabilityReadinessData),
 });
 
+const ArtifactBoundsData = Schema.Struct({
+  retentionDays: Schema.Number,
+  maxRequestBytes: Schema.Number,
+  maxGuidanceBytes: Schema.Number,
+  maxRoleHandoffBytes: Schema.Number,
+  maxEvidenceBytes: Schema.Number,
+  maxTerminalCaptureBytes: Schema.Number,
+  maxRunBytes: Schema.Number,
+  redactionPatterns: Schema.Array(Schema.String),
+});
+
 const DoctorReportData = Schema.Struct({
   readiness: Schema.Literal('ready'),
   host: Schema.Struct({
@@ -262,6 +273,7 @@ const DoctorReportData = Schema.Struct({
     networkProfiles: Schema.Array(Schema.String),
   }),
   publication: Schema.optional(PublicationReadinessData),
+  artifacts: ArtifactBoundsData,
 });
 
 const InitPreviewReportData = Schema.Struct({
@@ -279,6 +291,14 @@ const InitPreviewReportData = Schema.Struct({
   }),
   artifacts: Schema.Struct({
     root: Schema.String,
+    retentionDays: Schema.Number,
+    maxRequestBytes: Schema.Number,
+    maxGuidanceBytes: Schema.Number,
+    maxRoleHandoffBytes: Schema.Number,
+    maxEvidenceBytes: Schema.Number,
+    maxTerminalCaptureBytes: Schema.Number,
+    maxRunBytes: Schema.Number,
+    redactionPatterns: Schema.Array(Schema.String),
   }),
 });
 
@@ -900,6 +920,16 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
             .join(' ')}`,
         );
       }
+      lines.push(
+        `data.artifacts.retentionDays: ${data.artifacts.retentionDays}`,
+        `data.artifacts.maxRequestBytes: ${data.artifacts.maxRequestBytes}`,
+        `data.artifacts.maxGuidanceBytes: ${data.artifacts.maxGuidanceBytes}`,
+        `data.artifacts.maxRoleHandoffBytes: ${data.artifacts.maxRoleHandoffBytes}`,
+        `data.artifacts.maxEvidenceBytes: ${data.artifacts.maxEvidenceBytes}`,
+        `data.artifacts.maxTerminalCaptureBytes: ${data.artifacts.maxTerminalCaptureBytes}`,
+        `data.artifacts.maxRunBytes: ${data.artifacts.maxRunBytes}`,
+        `data.artifacts.redactionPatterns: ${data.artifacts.redactionPatterns.join(' ')}`,
+      );
     } else if ('profileCheck' in data) {
       lines.push(
         `data.profileCheck: ${data.profileCheck}`,
@@ -1037,6 +1067,14 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         `data.roleHarness.protocol: ${data.roleHarness.protocol}`,
         `data.roleHarness.command: ${data.roleHarness.command.join(' ')}`,
         `data.artifacts.root: ${data.artifacts.root}`,
+        `data.artifacts.retentionDays: ${data.artifacts.retentionDays}`,
+        `data.artifacts.maxRequestBytes: ${data.artifacts.maxRequestBytes}`,
+        `data.artifacts.maxGuidanceBytes: ${data.artifacts.maxGuidanceBytes}`,
+        `data.artifacts.maxRoleHandoffBytes: ${data.artifacts.maxRoleHandoffBytes}`,
+        `data.artifacts.maxEvidenceBytes: ${data.artifacts.maxEvidenceBytes}`,
+        `data.artifacts.maxTerminalCaptureBytes: ${data.artifacts.maxTerminalCaptureBytes}`,
+        `data.artifacts.maxRunBytes: ${data.artifacts.maxRunBytes}`,
+        `data.artifacts.redactionPatterns: ${data.artifacts.redactionPatterns.join(' ')}`,
       );
     }
   } else {
@@ -1224,6 +1262,16 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
         filesystemProfiles: [...report.roleHost.filesystemProfiles],
         networkProfiles: [...report.roleHost.networkProfiles],
       },
+      artifacts: {
+        retentionDays: report.artifacts.retentionDays,
+        maxRequestBytes: report.artifacts.maxRequestBytes,
+        maxGuidanceBytes: report.artifacts.maxGuidanceBytes,
+        maxRoleHandoffBytes: report.artifacts.maxRoleHandoffBytes,
+        maxEvidenceBytes: report.artifacts.maxEvidenceBytes,
+        maxTerminalCaptureBytes: report.artifacts.maxTerminalCaptureBytes,
+        maxRunBytes: report.artifacts.maxRunBytes,
+        redactionPatterns: [...report.artifacts.redactionPatterns],
+      },
     };
     if (!('publication' in report)) {
       return base;
@@ -1390,6 +1438,14 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
     },
     artifacts: {
       root: report.artifacts.root,
+      retentionDays: report.artifacts.retentionDays,
+      maxRequestBytes: report.artifacts.maxRequestBytes,
+      maxGuidanceBytes: report.artifacts.maxGuidanceBytes,
+      maxRoleHandoffBytes: report.artifacts.maxRoleHandoffBytes,
+      maxEvidenceBytes: report.artifacts.maxEvidenceBytes,
+      maxTerminalCaptureBytes: report.artifacts.maxTerminalCaptureBytes,
+      maxRunBytes: report.artifacts.maxRunBytes,
+      redactionPatterns: [...report.artifacts.redactionPatterns],
     },
   };
 }

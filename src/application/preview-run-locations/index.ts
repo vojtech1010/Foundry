@@ -46,6 +46,14 @@ export interface PreviewRoleHarnessReport {
 
 export interface PreviewArtifactsReport {
   readonly root: string;
+  readonly retentionDays: number;
+  readonly maxRequestBytes: number;
+  readonly maxGuidanceBytes: number;
+  readonly maxRoleHandoffBytes: number;
+  readonly maxEvidenceBytes: number;
+  readonly maxTerminalCaptureBytes: number;
+  readonly maxRunBytes: number;
+  readonly redactionPatterns: ReadonlyArray<string>;
 }
 
 export interface PreviewLocationsReport {
@@ -136,6 +144,14 @@ export const previewRunLocations = Effect.fn('previewRunLocations')(function* (
     },
     artifacts: {
       root: artifactsRoot,
+      retentionDays: configuration.artifacts.retentionDays,
+      maxRequestBytes: configuration.artifacts.maxRequestBytes,
+      maxGuidanceBytes: configuration.artifacts.maxGuidanceBytes,
+      maxRoleHandoffBytes: configuration.artifacts.maxRoleHandoffBytes,
+      maxEvidenceBytes: configuration.artifacts.maxEvidenceBytes,
+      maxTerminalCaptureBytes: configuration.artifacts.maxTerminalCaptureBytes,
+      maxRunBytes: configuration.artifacts.maxRunBytes,
+      redactionPatterns: [...configuration.artifacts.redactionPatterns],
     },
   };
 });

@@ -97,6 +97,17 @@ export interface ArtifactConfiguration {
   readonly redactionPatterns: ReadonlyArray<string>;
 }
 
+export const HARDCODED_ARTIFACT_BOUNDS: ArtifactConfiguration = {
+  retentionDays: 30,
+  maxRequestBytes: 262144,
+  maxGuidanceBytes: 1048576,
+  maxRoleHandoffBytes: 262144,
+  maxEvidenceBytes: 26214400,
+  maxTerminalCaptureBytes: 10485760,
+  maxRunBytes: 104857600,
+  redactionPatterns: [],
+};
+
 export interface ProjectConfiguration {
   readonly schemaVersion: typeof PROJECT_CONFIGURATION_SCHEMA_VERSION;
   readonly targetRepository: string;

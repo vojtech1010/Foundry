@@ -120,16 +120,6 @@ function goldenDocument(targetRepository: string) {
     },
     runtimeProfile: null,
     decisionPublication: null,
-    artifacts: {
-      retentionDays: 30,
-      maxRequestBytes: 262144,
-      maxGuidanceBytes: 1048576,
-      maxRoleHandoffBytes: 262144,
-      maxEvidenceBytes: 26214400,
-      maxTerminalCaptureBytes: 10485760,
-      maxRunBytes: 104857600,
-      redactionPatterns: [],
-    },
   };
 }
 
@@ -599,7 +589,25 @@ describe('readiness check with fake services', () => {
     }),
   );
 
-  it.effect('fails when a redaction pattern is not a valid ECMAScript regular expression', () =>
+  it.effect('reports the hardcoded artifact bounds as effective doctor facts', () =>
+    Effect.gen(function* () {
+      const { check } = checkWith(defaultWorld());
+      const report = yield* check;
+
+      expect(report.artifacts).toEqual({
+        retentionDays: 30,
+        maxRequestBytes: 262144,
+        maxGuidanceBytes: 1048576,
+        maxRoleHandoffBytes: 262144,
+        maxEvidenceBytes: 26214400,
+        maxTerminalCaptureBytes: 10485760,
+        maxRunBytes: 104857600,
+        redactionPatterns: [],
+      });
+    }),
+  );
+
+  it.effect('rejects a configuration document carrying the removed artifacts block', () =>
     Effect.gen(function* () {
       const golden = goldenDocument(TARGET);
       const { check } = checkWith(
@@ -610,7 +618,16 @@ describe('readiness check with fake services', () => {
               CONFIG_PATH,
               JSON.stringify({
                 ...golden,
-                artifacts: { ...golden.artifacts, redactionPatterns: ['(unclosed'] },
+                artifacts: {
+                  retentionDays: 30,
+                  maxRequestBytes: 262144,
+                  maxGuidanceBytes: 1048576,
+                  maxRoleHandoffBytes: 262144,
+                  maxEvidenceBytes: 26214400,
+                  maxTerminalCaptureBytes: 10485760,
+                  maxRunBytes: 104857600,
+                  redactionPatterns: [],
+                },
               }),
             ],
           ]),
@@ -618,8 +635,7 @@ describe('readiness check with fake services', () => {
       );
       const error = yield* check.pipe(Effect.flip);
       expect(error).toBeInstanceOf(ReadinessError);
-      expect(error.message).toContain('Redaction pattern "(unclosed"');
-      expect(error.message).toContain('not a valid ECMAScript regular expression');
+      expect(error.message).toContain('Expected schemaVersion 1');
     }),
   );
 
@@ -760,6 +776,16 @@ describe('readiness check with fake services', () => {
         reason: null,
         capabilities: [],
       });
+      expect(data.artifacts).toEqual({
+        retentionDays: 30,
+        maxRequestBytes: 262144,
+        maxGuidanceBytes: 1048576,
+        maxRoleHandoffBytes: 262144,
+        maxEvidenceBytes: 26214400,
+        maxTerminalCaptureBytes: 10485760,
+        maxRunBytes: 104857600,
+        redactionPatterns: [],
+      });
       expect(Object.keys(data)).toEqual([
         'readiness',
         'host',
@@ -768,6 +794,7 @@ describe('readiness check with fake services', () => {
         'repository',
         'roleHost',
         'publication',
+        'artifacts',
       ]);
       expectNoBranchMutation(built.gitCalls);
     }),
@@ -796,6 +823,27 @@ describe('readiness check with fake services', () => {
       expect(humanResult.stdout).toContain(`data.roleHost.resumable: ${data.roleHost.resumable}`);
       expect(humanResult.stdout).toContain(
         `data.roleHost.availableRoles: ${data.roleHost.availableRoles.join(' ')}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.retentionDays: ${data.artifacts.retentionDays}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.maxRequestBytes: ${data.artifacts.maxRequestBytes}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.maxGuidanceBytes: ${data.artifacts.maxGuidanceBytes}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.maxRoleHandoffBytes: ${data.artifacts.maxRoleHandoffBytes}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.maxEvidenceBytes: ${data.artifacts.maxEvidenceBytes}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.maxTerminalCaptureBytes: ${data.artifacts.maxTerminalCaptureBytes}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.maxRunBytes: ${data.artifacts.maxRunBytes}`,
       );
       expect(humanResult.stdout.endsWith('\n')).toBe(true);
     }),
