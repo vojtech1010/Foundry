@@ -3,6 +3,7 @@ import { Effect, Layer } from 'effect';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { vi } from 'vitest';
 
 import {
   GitHubPublication,
@@ -16,6 +17,7 @@ import {
   renderResultPullRequestBody,
 } from '../src/application/result-publication/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../src/application/run-history/index.js';
+import { GitHubPublicationLive } from '../src/platform/github-publication.js';
 import { RunHistoryLive } from '../src/platform/run-history.js';
 import { goldenConfigurationDocument } from './fixtures/checks-runtime-run.js';
 
@@ -1110,4 +1112,135 @@ describe('result pull request body', () => {
     expect(autoMerge).toContain('GitHub may merge this pull request automatically');
     expect(autoMerge).not.toMatch(/never force-pushes/u);
   });
+});
+
+interface StubRequest {
+  readonly method: string;
+  readonly url: string;
+}
+
+function githubPullRequestDocument(number: number, draft: boolean) {
+  return {
+    number,
+    html_url: `https://github.com/${REPOSITORY}/pull/${number}`,
+    draft,
+    head: { ref: TASK_BRANCH, sha: RESULT_COMMIT },
+    base: { ref: 'main' },
+  };
+}
+
+/**
+ * Stubs the process-wide GitHub transport for the real adapter so the draft
+ * classification can be exercised without network access. The stub records each
+ * request so a test can prove that an exact open draft match issues a lookup and
+ * no create, while a create posts exactly once.
+ */
+function stubGitHubFetch(
+  handler: (request: StubRequest) => { readonly status: number; readonly body: unknown },
+) {
+  const requests: Array<StubRequest> = [];
+  vi.stubGlobal('fetch', (input: string, init?: RequestInit) => {
+    const method = init?.method ?? 'GET';
+    requests.push({ method, url: input });
+    const response = handler({ method, url: input });
+    return Promise.resolve(
+      new Response(JSON.stringify(response.body), { status: response.status }),
+    );
+  });
+  return { requests };
+}
+
+function openAdapterResultPullRequest(draft: boolean) {
+  return Effect.gen(function* () {
+    const github = yield* GitHubPublication;
+    return yield* github.openResultPullRequest({
+      repository: REPOSITORY,
+      title: `Approved result for ${RUN_ID}`,
+      body: 'body',
+      headBranch: TASK_BRANCH,
+      baseBranch: 'main',
+      draft,
+    });
+  }).pipe(Effect.provide(GitHubPublicationLive));
+}
+
+function withGithubToken(): () => void {
+  const original = process.env.GITHUB_TOKEN;
+  process.env.GITHUB_TOKEN = 'test-token';
+  return () => {
+    if (original === undefined) {
+      delete process.env.GITHUB_TOKEN;
+    } else {
+      process.env.GITHUB_TOKEN = original;
+    }
+  };
+}
+
+describe('github result pull request draft matching', () => {
+  it.effect('draft mode reuses an exact open draft match without creating', () =>
+    Effect.gen(function* () {
+      const restoreToken = withGithubToken();
+      const stub = stubGitHubFetch(() => ({
+        status: 200,
+        body: [githubPullRequestDocument(7, true)],
+      }));
+      try {
+        const opened = yield* openAdapterResultPullRequest(true);
+
+        expect(opened).toEqual({
+          number: 7,
+          url: `https://github.com/${REPOSITORY}/pull/7`,
+          draft: true,
+          headBranch: TASK_BRANCH,
+          headCommit: RESULT_COMMIT,
+          baseBranch: 'main',
+        });
+        expect(stub.requests.map((request) => request.method)).toEqual(['GET']);
+      } finally {
+        vi.unstubAllGlobals();
+        restoreToken();
+      }
+    }),
+  );
+
+  it.effect('draft mode refuses an existing non-draft match as integrity ambiguity', () =>
+    Effect.gen(function* () {
+      const restoreToken = withGithubToken();
+      const stub = stubGitHubFetch(() => ({
+        status: 200,
+        body: [githubPullRequestDocument(8, false)],
+      }));
+      try {
+        const error = yield* openAdapterResultPullRequest(true).pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(GitHubPublicationError);
+        expect(error.message).toContain('non-draft');
+        expect(stub.requests.map((request) => request.method)).toEqual(['GET']);
+      } finally {
+        vi.unstubAllGlobals();
+        restoreToken();
+      }
+    }),
+  );
+
+  it.effect('non-draft mode ignores a decision draft match and creates exactly once', () =>
+    Effect.gen(function* () {
+      const restoreToken = withGithubToken();
+      const stub = stubGitHubFetch((request) =>
+        request.method === 'GET'
+          ? { status: 200, body: [githubPullRequestDocument(9, true)] }
+          : { status: 201, body: githubPullRequestDocument(10, false) },
+      );
+      try {
+        const opened = yield* openAdapterResultPullRequest(false);
+
+        expect(opened.number).toBe(10);
+        expect(opened.draft).toBe(false);
+        expect(stub.requests.map((request) => request.method)).toEqual(['GET', 'POST']);
+      } finally {
+        vi.unstubAllGlobals();
+        restoreToken();
+      }
+    }),
+  );
 });
