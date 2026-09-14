@@ -50,6 +50,7 @@ import {
   normalizeRequestPromptText,
 } from '../src/domain/run-identity.js';
 import { EXIT_CODES } from '../src/domain/public-commands.js';
+import { HARDCODED_ARTIFACT_BOUNDS } from '../src/domain/project-configuration.js';
 import { REPOSITORY_LEASE_FILENAME } from '../src/domain/repository-lease.js';
 import {
   ACTIVE_WORKFLOW_STATES,
@@ -114,12 +115,9 @@ function sha256Hex(bytes: Uint8Array): string {
   return createHash('sha256').update(Buffer.from(bytes)).digest('hex');
 }
 
-function goldenDocument(
-  targetRepository: string,
-  // 055: artifact bounds are hardcoded, so the configured per-document limit is
-  // accepted here only to preserve call sites until the hardcoded set lands.
-  _maxRequestBytes = 262144,
-) {
+function goldenDocument(targetRepository: string) {
+  // 055: artifact bounds are hardcoded; the document carries no `artifacts`
+  // block and the oversized-request test generates content past the fixed bound.
   return {
     schemaVersion: 1,
     targetRepository,
@@ -180,7 +178,7 @@ function gitExec(cwd: string, args: ReadonlyArray<string>): string {
   return execFileSync('git', [...args], { cwd, encoding: 'utf8' });
 }
 
-function setupFixture(options?: { readonly maxRequestBytes?: number }): Fixture {
+function setupFixture(): Fixture {
   const base = mkdtempSync(join(tmpdir(), 'foundry-run-identity-'));
   const target = join(base, 'target');
   const remote = join(base, 'remote.git');
@@ -197,10 +195,7 @@ function setupFixture(options?: { readonly maxRequestBytes?: number }): Fixture 
   gitExec(target, ['remote', 'add', 'origin', remote]);
   gitExec(target, ['push', '-u', 'origin', 'main']);
   const configPath = join(home, 'foundry.config.json');
-  writeFileSync(
-    configPath,
-    JSON.stringify(goldenDocument(target, options?.maxRequestBytes ?? 262144)),
-  );
+  writeFileSync(configPath, JSON.stringify(goldenDocument(target)));
   const requestPath = join(home, 'request.md');
   return {
     base,
@@ -594,9 +589,13 @@ describe('recordRunIdentity with live storage', () => {
 
   it.effect('refuses an oversized request without creating a run directory', () =>
     Effect.gen(function* () {
-      const fixture = setupFixture({ maxRequestBytes: 16 });
+      const fixture = setupFixture();
       try {
-        writeFileSync(fixture.requestPath, 'x'.repeat(17));
+        // 055: exceed the fixed maxRequestBytes by an exact bounded amount.
+        writeFileSync(
+          fixture.requestPath,
+          'x'.repeat(HARDCODED_ARTIFACT_BOUNDS.maxRequestBytes + 17),
+        );
         const error = yield* recordWithLive({
           configPath: fixture.configPath,
           requestPath: fixture.requestPath,

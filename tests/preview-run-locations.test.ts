@@ -98,6 +98,13 @@ function goldenDocument(
       command: ['foundry-role-host'],
       environmentAllowlist: ['OPENAI_API_KEY'],
     },
+    roles: {
+      architect: { harness: 'codex', model: 'gpt-5-codex' },
+      coder: { harness: 'codex', model: 'gpt-5-codex' },
+      lead_coder: { harness: 'opencode', model: 'openai/gpt-5' },
+      tester: { harness: 'opencode', model: 'openai/gpt-5' },
+      reviewer: { harness: 'codex', model: 'gpt-5-codex' },
+    },
     timeouts: {
       roleMs: 1800000,
       settleMs: 30000,
@@ -459,10 +466,13 @@ describe('preview run locations with fake services', () => {
         maxRunBytes: 104857600,
         redactionPatterns: [],
       });
-      // INTEGRATE-W1: `roleRouting` stays absent until CODER-053A promotes
-      // the closed `roles` contract into `ProjectConfiguration`; the preview
-      // omits the section instead of inventing routing.
-      expect(report.roleRouting).toBeUndefined();
+      expect(report.roleRouting).toEqual([
+        { role: 'architect', harness: 'codex', model: 'gpt-5-codex' },
+        { role: 'coder', harness: 'codex', model: 'gpt-5-codex' },
+        { role: 'lead_coder', harness: 'opencode', model: 'openai/gpt-5' },
+        { role: 'tester', harness: 'opencode', model: 'openai/gpt-5' },
+        { role: 'reviewer', harness: 'codex', model: 'gpt-5-codex' },
+      ]);
       expectReadOnlyGitCalls(built.gitCalls);
     }),
   );
@@ -684,11 +694,23 @@ describe('preview run locations with fake services', () => {
         maxRunBytes: 104857600,
         redactionPatterns: [],
       });
-      // INTEGRATE-W1: `roleRouting` stays absent until CODER-053A promotes
-      // the closed `roles` contract into `ProjectConfiguration`.
-      expect(data.roleRouting).toBeUndefined();
+      expect(data.roleRouting).toEqual([
+        { role: 'architect', harness: 'codex', model: 'gpt-5-codex' },
+        { role: 'coder', harness: 'codex', model: 'gpt-5-codex' },
+        { role: 'lead_coder', harness: 'opencode', model: 'openai/gpt-5' },
+        { role: 'tester', harness: 'opencode', model: 'openai/gpt-5' },
+        { role: 'reviewer', harness: 'codex', model: 'gpt-5-codex' },
+      ]);
       expect(Object.keys(data).sort()).toEqual(
-        ['artifacts', 'branch', 'roleHarness', 'source', 'taskId', 'workspace'].sort(),
+        [
+          'artifacts',
+          'branch',
+          'roleHarness',
+          'roleRouting',
+          'source',
+          'taskId',
+          'workspace',
+        ].sort(),
       );
       expectReadOnlyGitCalls(built.gitCalls);
     }),
@@ -729,10 +751,11 @@ describe('preview run locations with fake services', () => {
       expect(humanResult.stdout).toContain(
         `data.roleHarness.protocol: ${data.roleHarness.protocol}`,
       );
-      // INTEGRATE-W1: no routing lines until CODER-053A promotes the
-      // closed `roles` contract; the human report omits the section.
-      expect(data.roleRouting).toBeUndefined();
-      expect(humanResult.stdout).not.toContain('data.roleRouting:');
+      for (const route of data.roleRouting) {
+        expect(humanResult.stdout).toContain(
+          `data.roleRouting: ${route.role} harness=${route.harness} model=${route.model}`,
+        );
+      }
       expect(humanResult.stdout).toContain(`data.artifacts.root: ${data.artifacts.root}`);
       expect(humanResult.stdout).toContain(
         `data.artifacts.retentionDays: ${data.artifacts.retentionDays}`,

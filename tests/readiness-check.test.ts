@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@effect/vitest';
-import { Effect, Layer, Option, Schema } from 'effect';
+import { Effect, Layer, Schema } from 'effect';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -96,6 +96,13 @@ function goldenDocument(targetRepository: string) {
       protocol: 'foundry-role-host-v1',
       command: ['foundry-role-host'],
       environmentAllowlist: ['OPENAI_API_KEY'],
+    },
+    roles: {
+      architect: { harness: 'codex', model: 'gpt-5-codex' },
+      coder: { harness: 'codex', model: 'gpt-5-codex' },
+      lead_coder: { harness: 'opencode', model: 'openai/gpt-5' },
+      tester: { harness: 'opencode', model: 'openai/gpt-5' },
+      reviewer: { harness: 'codex', model: 'gpt-5-codex' },
     },
     timeouts: {
       roleMs: 1800000,
@@ -459,87 +466,48 @@ describe('readiness domain vocabulary', () => {
 
 describe('per-role routing resolution', () => {
   function asConfiguration(document: Schema.Json): ProjectConfiguration {
-    // SAFETY: the resolver reads only the documented `roles` section, so a
-    // JSON-shaped test double exercises the same code path as decoded input.
-    // A `roles` section cannot pass the base closed configuration schema
-    // until CODER-053A promotes it there; these doubles simulate that
-    // post-053A shape for the pure resolver only.
+    // SAFETY: the resolver projects the typed `roles` selections, so a
+    // JSON-shaped test double carrying the documented `roles` section
+    // exercises the same code path as decoded input.
     return document as ProjectConfiguration;
   }
 
-  function selections() {
-    return {
-      architect: { harness: 'architect-harness', model: 'architect-model' },
-      coder: { harness: 'coder-harness', model: 'coder-model' },
-      lead_coder: { harness: 'lead-harness', model: 'lead-model' },
-      tester: { harness: 'tester-harness', model: 'tester-model' },
-      reviewer: { harness: 'reviewer-harness', model: 'reviewer-model' },
-    };
+  function expectedRouting() {
+    return [
+      { role: 'architect', harness: 'codex', model: 'gpt-5-codex' },
+      { role: 'coder', harness: 'codex', model: 'gpt-5-codex' },
+      { role: 'lead_coder', harness: 'opencode', model: 'openai/gpt-5' },
+      { role: 'tester', harness: 'opencode', model: 'openai/gpt-5' },
+      { role: 'reviewer', harness: 'codex', model: 'gpt-5-codex' },
+    ];
   }
 
-  it('projects the documented roles section in role order', () => {
-    const routing = resolveRoleRouting(
-      asConfiguration({ ...goldenDocument(TARGET), roles: selections() }),
-    );
+  it('projects the exact configured harness and model per role', () => {
+    const routing = resolveRoleRouting(asConfiguration(goldenDocument(TARGET)));
 
-    expect(Option.isSome(routing)).toBe(true);
-    if (Option.isSome(routing)) {
-      expect(routing.value).toEqual([
-        { role: 'architect', harness: 'architect-harness', model: 'architect-model' },
-        { role: 'coder', harness: 'coder-harness', model: 'coder-model' },
-        { role: 'lead_coder', harness: 'lead-harness', model: 'lead-model' },
-        { role: 'tester', harness: 'tester-harness', model: 'tester-model' },
-        { role: 'reviewer', harness: 'reviewer-harness', model: 'reviewer-model' },
-      ]);
-    }
+    expect(routing).toEqual(expectedRouting());
   });
 
   it('resolves the same routing twice for the same document', () => {
-    const document = asConfiguration({ ...goldenDocument(TARGET), roles: selections() });
+    const document = asConfiguration(goldenDocument(TARGET));
 
-    const first = resolveRoleRouting(document);
-    const second = resolveRoleRouting(document);
-
-    expect(second).toEqual(first);
-    expect(Option.isSome(first)).toBe(true);
+    expect(resolveRoleRouting(document)).toEqual(resolveRoleRouting(document));
   });
 
-  it('ignores duck-typed routing aliases instead of honoring them', () => {
-    const roleRoutes = {
-      architect: { harness: 'alias-harness', model: 'alias-model' },
-      coder: { harness: 'alias-harness', model: 'alias-model' },
-      lead_coder: { harness: 'alias-harness', model: 'alias-model' },
-      tester: { harness: 'alias-harness', model: 'alias-model' },
-      reviewer: { harness: 'alias-harness', model: 'alias-model' },
-    };
-    const aliased = [
-      { ...goldenDocument(TARGET), roleRoutes },
-      { ...goldenDocument(TARGET), roleHarnessByRole: roleRoutes },
-      { ...goldenDocument(TARGET), perRoleHarness: roleRoutes },
-    ];
+  it("uses each role's own selection instead of sharing one harness", () => {
+    const routing = resolveRoleRouting(asConfiguration(goldenDocument(TARGET)));
+    const byRole = new Map(routing.map((route) => [route.role, route] as const));
 
-    for (const document of aliased) {
-      expect(Option.isNone(resolveRoleRouting(asConfiguration(document)))).toBe(true);
-    }
-  });
-
-  it('yields no routing when roles are absent, incomplete, or empty', () => {
-    const incomplete = {
-      architect: { harness: 'architect-harness', model: 'architect-model' },
-    };
-    const emptyModel = {
-      ...selections(),
-      reviewer: { harness: 'reviewer-harness', model: '' },
-    };
-    const documents = [
-      goldenDocument(TARGET),
-      { ...goldenDocument(TARGET), roles: incomplete },
-      { ...goldenDocument(TARGET), roles: emptyModel },
-    ];
-
-    for (const document of documents) {
-      expect(Option.isNone(resolveRoleRouting(asConfiguration(document)))).toBe(true);
-    }
+    expect(byRole.get('architect')).toEqual({
+      role: 'architect',
+      harness: 'codex',
+      model: 'gpt-5-codex',
+    });
+    expect(byRole.get('lead_coder')).toEqual({
+      role: 'lead_coder',
+      harness: 'opencode',
+      model: 'openai/gpt-5',
+    });
   });
 });
 
@@ -563,10 +531,13 @@ describe('readiness check with fake services', () => {
         branch: 'main',
         commit: COMMIT,
       });
-      // INTEGRATE-W1: `roleRouting` stays absent until CODER-053A promotes
-      // the closed `roles` contract into `ProjectConfiguration`; the report
-      // omits the section instead of inventing routing.
-      expect(report.roleRouting).toBeUndefined();
+      expect(report.roleRouting).toEqual([
+        { role: 'architect', harness: 'codex', model: 'gpt-5-codex' },
+        { role: 'coder', harness: 'codex', model: 'gpt-5-codex' },
+        { role: 'lead_coder', harness: 'opencode', model: 'openai/gpt-5' },
+        { role: 'tester', harness: 'opencode', model: 'openai/gpt-5' },
+        { role: 'reviewer', harness: 'codex', model: 'gpt-5-codex' },
+      ]);
       expectNoBranchMutation(built.gitCalls);
     }),
   );
@@ -860,9 +831,13 @@ describe('readiness check with fake services', () => {
         'reviewer',
       ]);
       expect(data.roleHost.networkProfiles).toEqual(['network_denied', 'runtime_origin_only']);
-      // INTEGRATE-W1: `roleRouting` stays absent until CODER-053A promotes
-      // the closed `roles` contract into `ProjectConfiguration`.
-      expect(data.roleRouting).toBeUndefined();
+      expect(data.roleRouting).toEqual([
+        { role: 'architect', harness: 'codex', model: 'gpt-5-codex' },
+        { role: 'coder', harness: 'codex', model: 'gpt-5-codex' },
+        { role: 'lead_coder', harness: 'opencode', model: 'openai/gpt-5' },
+        { role: 'tester', harness: 'opencode', model: 'openai/gpt-5' },
+        { role: 'reviewer', harness: 'codex', model: 'gpt-5-codex' },
+      ]);
       expect(data.publication).toEqual({
         configured: false,
         eligible: false,
@@ -888,6 +863,7 @@ describe('readiness check with fake services', () => {
         'storage',
         'repository',
         'roleHost',
+        'roleRouting',
         'publication',
         'artifacts',
       ]);
@@ -940,10 +916,11 @@ describe('readiness check with fake services', () => {
       expect(humanResult.stdout).toContain(
         `data.artifacts.maxRunBytes: ${data.artifacts.maxRunBytes}`,
       );
-      // INTEGRATE-W1: no routing lines until CODER-053A promotes the
-      // closed `roles` contract; the human report omits the section.
-      expect(data.roleRouting).toBeUndefined();
-      expect(humanResult.stdout).not.toContain('data.roleRouting:');
+      for (const route of data.roleRouting) {
+        expect(humanResult.stdout).toContain(
+          `data.roleRouting: ${route.role} harness=${route.harness} model=${route.model}`,
+        );
+      }
       expect(humanResult.stdout.endsWith('\n')).toBe(true);
     }),
   );

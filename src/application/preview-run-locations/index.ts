@@ -1,4 +1,4 @@
-import { Effect, Option, Schema } from 'effect';
+import { Effect, Schema } from 'effect';
 import { dirname, join, resolve } from 'node:path';
 
 import { TASK_ID_PLACEHOLDER } from '../../domain/project-configuration.js';
@@ -64,10 +64,7 @@ export interface PreviewLocationsReport {
   readonly branch: string;
   readonly workspace: string;
   readonly roleHarness: PreviewRoleHarnessReport;
-  // INTEGRATE-W1: optional until CODER-053A promotes the closed `roles`
-  // contract into `ProjectConfiguration`; reports omit the section instead
-  // of inventing routing. See `resolveRoleRouting`.
-  readonly roleRouting: ReadonlyArray<RoleRoutingReport> | undefined;
+  readonly roleRouting: ReadonlyArray<RoleRoutingReport>;
   readonly artifacts: PreviewArtifactsReport;
 }
 
@@ -148,7 +145,7 @@ export const previewRunLocations = Effect.fn('previewRunLocations')(function* (
       protocol: configuration.roleHarness.protocol,
       command: configuration.roleHarness.command,
     },
-    roleRouting: Option.getOrUndefined(resolveRoleRouting(configuration)),
+    roleRouting: resolveRoleRouting(configuration),
     artifacts: {
       root: artifactsRoot,
       retentionDays: configuration.artifacts.retentionDays,

@@ -279,7 +279,7 @@ const DoctorReportData = Schema.Struct({
     filesystemProfiles: Schema.Array(Schema.String),
     networkProfiles: Schema.Array(Schema.String),
   }),
-  roleRouting: Schema.optional(Schema.Array(RoleRoutingReportData)),
+  roleRouting: Schema.Array(RoleRoutingReportData),
   publication: Schema.optional(PublicationReadinessData),
   artifacts: ArtifactBoundsData,
 });
@@ -297,7 +297,7 @@ const InitPreviewReportData = Schema.Struct({
     protocol: Schema.String,
     command: Schema.NonEmptyArray(Schema.String),
   }),
-  roleRouting: Schema.optional(Schema.Array(RoleRoutingReportData)),
+  roleRouting: Schema.Array(RoleRoutingReportData),
   artifacts: Schema.Struct({
     root: Schema.String,
     retentionDays: Schema.Number,
@@ -917,12 +917,8 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         `data.roleHost.filesystemProfiles: ${data.roleHost.filesystemProfiles.join(' ')}`,
         `data.roleHost.networkProfiles: ${data.roleHost.networkProfiles.join(' ')}`,
       );
-      if (data.roleRouting !== undefined) {
-        for (const route of data.roleRouting) {
-          lines.push(
-            `data.roleRouting: ${route.role} harness=${route.harness} model=${route.model}`,
-          );
-        }
+      for (const route of data.roleRouting) {
+        lines.push(`data.roleRouting: ${route.role} harness=${route.harness} model=${route.model}`);
       }
       if (data.publication !== undefined) {
         lines.push(
@@ -1092,12 +1088,8 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         `data.artifacts.maxRunBytes: ${data.artifacts.maxRunBytes}`,
         `data.artifacts.redactionPatterns: ${data.artifacts.redactionPatterns.join(' ')}`,
       );
-      if (data.roleRouting !== undefined) {
-        for (const route of data.roleRouting) {
-          lines.push(
-            `data.roleRouting: ${route.role} harness=${route.harness} model=${route.model}`,
-          );
-        }
+      for (const route of data.roleRouting) {
+        lines.push(`data.roleRouting: ${route.role} harness=${route.harness} model=${route.model}`);
       }
     }
   } else {
@@ -1285,6 +1277,7 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
         filesystemProfiles: [...report.roleHost.filesystemProfiles],
         networkProfiles: [...report.roleHost.networkProfiles],
       },
+      roleRouting: report.roleRouting.map((route) => ({ ...route })),
       artifacts: {
         retentionDays: report.artifacts.retentionDays,
         maxRequestBytes: report.artifacts.maxRequestBytes,
@@ -1296,18 +1289,11 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
         redactionPatterns: [...report.artifacts.redactionPatterns],
       },
     };
-    const routed: (typeof DoctorReportData)['Type'] =
-      report.roleRouting === undefined
-        ? base
-        : {
-            ...base,
-            roleRouting: report.roleRouting.map((route) => ({ ...route })),
-          };
     if (!('publication' in report)) {
-      return routed;
+      return base;
     }
     return {
-      ...routed,
+      ...base,
       publication: Schema.decodeUnknownSync(PublicationReadinessData)(report.publication),
     };
   }
@@ -1453,7 +1439,7 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       eventHash: report.eventHash,
     };
   }
-  const preview: (typeof InitPreviewReportData)['Type'] = {
+  return {
     taskId: report.taskId,
     source: {
       remote: report.source.remote,
@@ -1466,6 +1452,7 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       protocol: report.roleHarness.protocol,
       command: [...report.roleHarness.command],
     },
+    roleRouting: report.roleRouting.map((route) => ({ ...route })),
     artifacts: {
       root: report.artifacts.root,
       retentionDays: report.artifacts.retentionDays,
@@ -1478,12 +1465,6 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       redactionPatterns: [...report.artifacts.redactionPatterns],
     },
   };
-  return report.roleRouting === undefined
-    ? preview
-    : {
-        ...preview,
-        roleRouting: report.roleRouting.map((route) => ({ ...route })),
-      };
 }
 
 export const runCli = Effect.fn('runCli')(function* (

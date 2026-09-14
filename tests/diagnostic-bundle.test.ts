@@ -18,6 +18,7 @@ import {
   DiagnosticBundleManifestSchema,
 } from '../src/domain/diagnostic-bundle.js';
 import { EXIT_CODES } from '../src/domain/public-commands.js';
+import { HARDCODED_ARTIFACT_BOUNDS } from '../src/domain/project-configuration.js';
 import {
   RUN_HISTORY_FILENAME,
   RUN_HISTORY_WITNESS_FILENAME,
@@ -52,7 +53,16 @@ const RUNTIME_IDENTITY = {
   toolProfile: 'test',
 };
 
-const SECRET_PATTERN = 'SECRET-[0-9]+';
+const REQUEST_OVERSHOOT_BYTES = 17;
+
+const REQUEST_PREFIX = 'SECRET-99999 ';
+
+// 055: artifact bounds are hardcoded, so truncation is exercised with content
+// generated to exceed the fixed maxRequestBytes by an exact, bounded amount.
+// The hardcoded redactionPatterns are empty, so nothing is redacted.
+const REQUEST_TEXT = `${REQUEST_PREFIX}${'x'.repeat(
+  HARDCODED_ARTIFACT_BOUNDS.maxRequestBytes + REQUEST_OVERSHOOT_BYTES - REQUEST_PREFIX.length,
+)}`;
 
 function eventId(index: number): string {
   return `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
@@ -249,14 +259,8 @@ interface Fixture {
   readonly cleanup: () => void;
 }
 
-const REQUEST_TEXT = `${'SECRET-12345 '.repeat(6)}trailing payload`;
-
-// 055: artifact bounds are hardcoded, so the per-document limit overrides are
-// accepted here only to preserve call sites until the hardcoded set lands.
-function setupFixture(_options?: {
-  readonly maxRequestBytes?: number;
-  readonly redactionPatterns?: ReadonlyArray<string>;
-}): Fixture {
+// 055: artifact bounds are hardcoded; the fixture takes no limit overrides.
+function setupFixture(): Fixture {
   const base = mkdtempSync(join(tmpdir(), 'foundry-diagnostic-'));
   const target = join(base, 'target');
   const runDirectory = join(target, '.agent', 'runs', RUN_ID);
@@ -322,10 +326,7 @@ function manifestOf(fixture: Fixture) {
 describe('diagnostic bundle', () => {
   it.effect('writes a bounded, redacted manifest of verified history and retained artifacts', () =>
     Effect.gen(function* () {
-      const fixture = setupFixture({
-        maxRequestBytes: 40,
-        redactionPatterns: [SECRET_PATTERN],
-      });
+      const fixture = setupFixture();
       try {
         const historyBefore = readFileSync(
           join(fixture.runDirectory, RUN_HISTORY_FILENAME),
@@ -368,9 +369,16 @@ describe('diagnostic bundle', () => {
         expect(paths).toContain('evidence/formatCheck.log');
 
         const request = manifest.entries.find((entry) => entry.path === 'request.md');
-        expect(request).toMatchObject({ source: 'request', byteLength: 40, truncated: true });
-        expect(request?.redactionCount).toBeGreaterThanOrEqual(1);
-        expect(readFileSync(join(outputPath(fixture), 'request.md'), 'utf8')).toContain(
+        // The generated request exceeds the fixed maxRequestBytes by exactly
+        // REQUEST_OVERSHOOT_BYTES, so the entry is bounded at the fixed limit.
+        // The hardcoded redactionPatterns are empty, so nothing is redacted.
+        expect(request).toMatchObject({
+          source: 'request',
+          byteLength: HARDCODED_ARTIFACT_BOUNDS.maxRequestBytes,
+          truncated: true,
+        });
+        expect(request?.redactionCount).toBe(0);
+        expect(readFileSync(join(outputPath(fixture), 'request.md'), 'utf8')).not.toContain(
           '[REDACTED]',
         );
 
