@@ -82,8 +82,12 @@ Foundry never:
 - gives a read-only role permission to change production files;
 - treats file existence or role termination as successful completion;
 - resubmits an interrupted role prompt when recovery can reattach;
-- force-pushes, merges, deploys, or rewrites history;
-- edits the source branch; or
+- merges through a GitHub merge API, approves, closes, or rewrites history
+  (enabling GitHub auto-merge on a result pull request delegates the merge to
+  GitHub rules);
+- force-pushes or edits the source branch, except that `direct-merge` may update
+  the configured source branch on the configured publication remote with
+  `--force-with-lease` pinned to the freshly fetched head; or
 - invents a human answer from GitHub state.
 
 All operations remain bounded by strict schemas, timeout and retry budgets,

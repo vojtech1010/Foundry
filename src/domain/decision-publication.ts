@@ -176,7 +176,8 @@ export function renderDecisionDraftPrBody(input: DecisionDraftPrBodyInput): stri
     `Run ID: \`${input.runId}\`. The commands above are the only decisions Foundry`,
     'accepts for this run.',
     '',
-    'Foundry never force-pushes, merges, closes, or rewrites history.',
+    'This draft pull request is the decision channel: Foundry never merges,',
+    'closes, or rewrites history through it.',
     '',
   );
   return lines.join('\n');

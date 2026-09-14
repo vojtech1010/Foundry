@@ -338,6 +338,12 @@ const RunWorkflowRecoveryData = Schema.Struct({
   reason: Schema.String,
 });
 
+const RunWorkflowResultMergeData = Schema.Struct({
+  commit: Schema.NonEmptyString,
+  sourceBranch: Schema.NonEmptyString,
+  fastForward: Schema.Boolean,
+});
+
 const RunWorkflowReportData = Schema.Struct({
   runId: Schema.String,
   taskId: Schema.String,
@@ -351,6 +357,7 @@ const RunWorkflowReportData = Schema.Struct({
   decision: Schema.optional(RunWorkflowDecisionData),
   recovery: Schema.optional(RunWorkflowRecoveryData),
   resultPullRequest: Schema.optional(Schema.NullOr(Schema.NonEmptyString)),
+  resultMerged: Schema.optional(RunWorkflowResultMergeData),
 });
 
 const StatusMeasureData = Schema.Struct({
@@ -935,6 +942,13 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
           `data.testerSkipped: ${data.testerSkipped}`,
           `data.resultPullRequest: ${data.resultPullRequest ?? 'none'}`,
         );
+        if (data.resultMerged !== undefined) {
+          lines.push(
+            `data.resultMerged.commit: ${data.resultMerged.commit}`,
+            `data.resultMerged.sourceBranch: ${data.resultMerged.sourceBranch}`,
+            `data.resultMerged.fastForward: ${data.resultMerged.fastForward}`,
+          );
+        }
         if (data.decision !== undefined) {
           lines.push(
             `data.decision.applied: ${data.decision.applied ?? 'none'}`,
@@ -1245,7 +1259,7 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       normalizedByteLength: report.request.normalizedByteLength,
       normalizedPromptHash: report.request.normalizedPromptHash,
     };
-    const workflowReport = {
+    const baseWorkflowReport = {
       runId: report.runId,
       taskId: report.taskId,
       runDirectory: report.runDirectory,
@@ -1257,6 +1271,17 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       testerSkipped: report.testerSkipped,
       resultPullRequest: report.resultPullRequest ?? null,
     };
+    const workflowReport =
+      report.resultMerged === undefined
+        ? baseWorkflowReport
+        : {
+            ...baseWorkflowReport,
+            resultMerged: {
+              commit: report.resultMerged.commit,
+              sourceBranch: report.resultMerged.sourceBranch,
+              fastForward: report.resultMerged.fastForward,
+            },
+          };
     if (report.decision === undefined && report.recovery === undefined) {
       return workflowReport;
     }

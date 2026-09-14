@@ -402,10 +402,12 @@ function githubPublishingHarness(mode: 'success' | 'ambiguous'): GitHubHarness {
       },
       openResultPullRequest: () => Effect.die(new Error('no result PR is expected')),
       refreshOwnedDraftPullRequestBody: () => Effect.die(new Error('no draft refresh is expected')),
+      enablePullRequestAutoMerge: () => Effect.die(new Error('no auto-merge is expected')),
       pushTaskBranch: () => {
         calls.pushes += 1;
         return Effect.void;
       },
+      pushSourceBranch: () => Effect.die(new Error('no source push is expected')),
       listIssueCommentsAfter: () => Effect.succeed({ comments: [], truncated: false }),
       collaboratorPermission: () => Effect.succeed({ permission: 'maintain' }),
     }),
