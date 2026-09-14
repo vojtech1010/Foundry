@@ -12,9 +12,11 @@ import {
   readVerifiedRunHistory,
 } from '../src/application/run-history/index.js';
 import { ROLE_CONVERSATION_FAILURE_REASONS } from '../src/application/role-conversations/index.js';
+import { RoleHost, RoleHostLauncher } from '../src/application/role-conversations/index.js';
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
 import { ReadinessHost } from '../src/application/readiness/index.js';
+import { ROLE_HOST_PROTOCOL_VERSION } from '../src/domain/role-host.js';
 import { GuidanceLive } from '../src/platform/guidance.js';
 import { RunGitLive } from '../src/platform/git-provisioning.js';
 import { ProjectCommandsPlatformLive } from '../src/platform/project-commands.js';
@@ -24,11 +26,17 @@ import { RoleTurnResourceObserverLive } from '../src/platform/role-permissions.j
 import { RunHistoryLive } from '../src/platform/run-history.js';
 import { RunIdentityLive } from '../src/platform/run-identity.js';
 import { goldenConfigurationDocument } from './fixtures/checks-runtime-run.js';
-import { scriptedRoleHostLauncher } from './fixtures/role-host/role-host-launcher.js';
+import {
+  CAPABLE_ROLE_HOST_CAPABILITIES,
+  scriptedRoleHostLauncher,
+} from './fixtures/role-host/role-host-launcher.js';
 
 import type { RecoveryFacts } from '../src/application/recovery/index.js';
-import type { RoleHostLauncher } from '../src/application/role-conversations/index.js';
-import type { RoleHostControl, RoleHostSessionState } from '../src/domain/role-host.js';
+import type {
+  RoleHostControl,
+  RoleHostRole,
+  RoleHostSessionState,
+} from '../src/domain/role-host.js';
 import type { RunEventDraft, RunHistoryDerivedState } from '../src/domain/run-history.js';
 
 const ReportEnvelopeJson = Schema.fromJsonString(ReportEnvelope);
@@ -178,6 +186,158 @@ describe('recovery disposition classifier', () => {
     expect(classification.disposition).toBe('accept');
   });
 
+  it('reconciles a changed implementation against its accepted head, not the frozen head', () => {
+    const classification = classifyRecovery(
+      derivedState({
+        checkpoint: 'reviewing',
+        roleSessions: [settledReviewer('approved')],
+        implementation: {
+          taskBranch: TASK_BRANCH,
+          baseCommit: FROZEN_COMMIT,
+          commit: RESULT_COMMIT,
+          changedFiles: ['src/a.ts'],
+          noChangeCandidate: false,
+        },
+      }),
+      facts({
+        worktree: {
+          registered: true,
+          checkedOutBranch: TASK_BRANCH,
+          headCommit: RESULT_COMMIT,
+        },
+        implementation: {
+          workspaceExists: true,
+          currentBranch: TASK_BRANCH,
+          headCommit: RESULT_COMMIT,
+          clean: true,
+          baseIsAncestor: true,
+          changedFiles: ['src/a.ts'],
+        },
+      }),
+    );
+    expect(classification.disposition).toBe('accept');
+    expect(classification.reason).toContain(RESULT_COMMIT);
+  });
+
+  it('stops for a person when a changed implementation worktree matches neither known head', () => {
+    const classification = classifyRecovery(
+      derivedState({
+        checkpoint: 'reviewing',
+        roleSessions: [settledReviewer('approved')],
+        implementation: {
+          taskBranch: TASK_BRANCH,
+          baseCommit: FROZEN_COMMIT,
+          commit: RESULT_COMMIT,
+          changedFiles: ['src/a.ts'],
+          noChangeCandidate: false,
+        },
+      }),
+      facts({
+        worktree: {
+          registered: true,
+          checkedOutBranch: TASK_BRANCH,
+          headCommit: 'ffffffffffffffffffffffffffffffffffffffff',
+        },
+        implementation: {
+          workspaceExists: true,
+          currentBranch: TASK_BRANCH,
+          headCommit: 'ffffffffffffffffffffffffffffffffffffffff',
+          clean: true,
+          baseIsAncestor: true,
+          changedFiles: ['src/a.ts'],
+        },
+      }),
+    );
+    expect(classification.disposition).toBe('human_recovery');
+    expect(classification.reason).toContain('matches neither');
+  });
+
+  it('retries interrupted files after an accepted implementation', () => {
+    const classification = classifyRecovery(
+      derivedState({
+        checkpoint: 'correcting',
+        implementation: {
+          taskBranch: TASK_BRANCH,
+          baseCommit: FROZEN_COMMIT,
+          commit: RESULT_COMMIT,
+          changedFiles: ['src/a.ts'],
+          noChangeCandidate: false,
+        },
+      }),
+      facts({
+        worktree: {
+          registered: true,
+          checkedOutBranch: TASK_BRANCH,
+          headCommit: RESULT_COMMIT,
+        },
+        implementation: {
+          workspaceExists: true,
+          currentBranch: TASK_BRANCH,
+          headCommit: RESULT_COMMIT,
+          clean: false,
+          baseIsAncestor: true,
+          changedFiles: ['src/a.ts', 'src/b.ts'],
+        },
+      }),
+    );
+    expect(classification.disposition).toBe('retry');
+    expect(classification.reason).toContain('clean-branch rule');
+  });
+
+  it('keeps waiting on an owned submission after an accepted implementation', () => {
+    const reviewer = roleSession({
+      role: 'reviewer',
+      submission: { idempotencyKey: 'key-1', promptHash: 'a'.repeat(64), baselineSequence: 0 },
+      submissionStarted: 'accepted',
+    });
+    const classification = classifyRecovery(
+      derivedState({
+        checkpoint: 'reviewing',
+        roleSessions: [reviewer],
+        implementation: {
+          taskBranch: TASK_BRANCH,
+          baseCommit: FROZEN_COMMIT,
+          commit: RESULT_COMMIT,
+          changedFiles: ['src/a.ts'],
+          noChangeCandidate: false,
+        },
+      }),
+      facts({
+        worktree: {
+          registered: true,
+          checkedOutBranch: TASK_BRANCH,
+          headCommit: RESULT_COMMIT,
+        },
+        implementation: {
+          workspaceExists: true,
+          currentBranch: TASK_BRANCH,
+          headCommit: RESULT_COMMIT,
+          clean: true,
+          baseIsAncestor: true,
+          changedFiles: ['src/a.ts'],
+        },
+      }),
+    );
+    expect(classification.disposition).toBe('continue_waiting');
+  });
+
+  it('blocks while a live process holds ownership after an accepted implementation', () => {
+    const classification = classifyRecovery(
+      derivedState({
+        checkpoint: 'reviewing',
+        implementation: {
+          taskBranch: TASK_BRANCH,
+          baseCommit: FROZEN_COMMIT,
+          commit: RESULT_COMMIT,
+          changedFiles: ['src/a.ts'],
+          noChangeCandidate: false,
+        },
+      }),
+      facts({ lease: 'live' }),
+    );
+    expect(classification.disposition).toBe('blocked');
+  });
+
   it('blocks a settled role attempt that reported a blocked outcome', () => {
     const classification = classifyRecovery(
       derivedState({ roleSessions: [settledReviewer('blocked')] }),
@@ -201,7 +361,7 @@ describe('recovery disposition classifier', () => {
         implementation: {
           workspaceExists: true,
           currentBranch: TASK_BRANCH,
-          headCommit: null,
+          headCommit: FROZEN_COMMIT,
           clean: false,
           baseIsAncestor: true,
           changedFiles: ['src/a.ts'],
@@ -632,6 +792,141 @@ function runInvalidReviewerControl(fixture: RunFixture, runId: string) {
   ]).pipe(Effect.provide(withRoleHost(roleHost)));
 }
 
+interface ChangingTurn {
+  readonly narrative: string;
+  readonly control: RoleHostControl;
+}
+
+/**
+ * A deterministic host that makes a real Coder commit on the assigned worktree
+ * so a changed implementation is recorded, then settles each role with its
+ * scripted control. Used to prove recovery reconciles the accepted head.
+ */
+function changingRoleHostLauncher(
+  turns: Partial<Record<RoleHostRole, ChangingTurn>>,
+): Layer.Layer<RoleHostLauncher> {
+  const roles = new Map<string, RoleHostRole>();
+  const counters = new Map<RoleHostRole, number>();
+  let commits = 0;
+  const hostLayer = Layer.succeed(
+    RoleHost,
+    RoleHost.of({
+      capabilities: () => Effect.succeed(CAPABLE_ROLE_HOST_CAPABILITIES),
+      create: (request) =>
+        Effect.sync(() => {
+          const sessionId = `session-${request.role}-${request.attempt}-${request.generation}`;
+          roles.set(sessionId, request.role);
+          const workspace = request.workingDirectory;
+          if (request.role === 'coder' && workspace !== undefined) {
+            commits += 1;
+            const name = `recovery-change-${commits}.txt`;
+            writeFileSync(join(workspace, name), `recovery change ${commits}\n`);
+            execFileSync('git', ['-C', workspace, 'add', name]);
+            execFileSync('git', ['-C', workspace, 'commit', '-m', `recovery change ${commits}`]);
+          }
+          return {
+            schemaVersion: ROLE_HOST_PROTOCOL_VERSION,
+            sessionId,
+            ownershipToken: `owner-${sessionId}`,
+            generation: request.generation,
+            sequence: 0,
+            runtimeIdentity: {
+              adapterVersion: 'recovery-1',
+              provider: 'recovery',
+              model: 'recovery',
+              toolProfile: 'recovery',
+            },
+          };
+        }),
+      submit: () =>
+        Effect.succeed({
+          schemaVersion: ROLE_HOST_PROTOCOL_VERSION,
+          submission: 'accepted',
+        }),
+      observe: (request) =>
+        Effect.sync(() => {
+          const role = roles.get(request.sessionId) ?? 'architect';
+          const index = counters.get(role) ?? 0;
+          counters.set(role, index + 1);
+          const turn = turns[role] ?? {
+            narrative: `${role} settled.`,
+            control: { schemaVersion: 1, outcome: 'blocked' },
+          };
+          return {
+            schemaVersion: ROLE_HOST_PROTOCOL_VERSION,
+            status: 'settled' as const,
+            sequence: request.afterSequence + 1,
+            events: [],
+            narrative: turn.narrative,
+            control: turn.control,
+          };
+        }),
+      stop: () =>
+        Effect.succeed({
+          schemaVersion: ROLE_HOST_PROTOCOL_VERSION,
+          disposition: 'disposed',
+        }),
+    }),
+  );
+  return Layer.succeed(RoleHostLauncher, RoleHostLauncher.of({ launch: () => hostLayer }));
+}
+
+function changedImplementationTurns() {
+  return {
+    architect: {
+      narrative: 'The plan is ready.',
+      control: {
+        schemaVersion: 1,
+        outcome: 'plan_ready',
+        acceptanceCriteria: ['the change works'],
+        runtimeValidation: 'not_required',
+        execution: 'sequential',
+      },
+    },
+    coder: {
+      narrative: 'The implementation changed.',
+      control: { schemaVersion: 1, outcome: 'implemented' },
+    },
+    reviewer: {
+      narrative: 'The reviewer control cannot be decoded.',
+      control: { schemaVersion: 1, outcome: 'bogus' },
+    },
+  } satisfies Parameters<typeof changingRoleHostLauncher>[0];
+}
+
+function runChangedImplementationBlocked(fixture: RunFixture, runId: string) {
+  return runCli([
+    'run',
+    '--config',
+    fixture.configPath,
+    '--request',
+    fixture.requestPath,
+    '--task-id',
+    'TASK-RECOVERY',
+    '--run-id',
+    runId,
+    '--json',
+  ]).pipe(Effect.provide(withRoleHost(changingRoleHostLauncher(changedImplementationTurns()))));
+}
+
+function resume(fixture: RunFixture, runId: string) {
+  return runCli(['resume', '--config', fixture.configPath, '--run-id', runId, '--json']).pipe(
+    Effect.provide(withRoleHost(scriptedRoleHostLauncher({}))),
+  );
+}
+
+function advanceWorktreeHead(fixture: RunFixture, runId: string) {
+  return Effect.gen(function* () {
+    const history = yield* readHistory(fixture, runId);
+    const workspace = history.derived.worktreeReady?.workspace;
+    if (workspace === undefined) {
+      throw new Error('Expected a recorded worktree to advance.');
+    }
+    execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'drift the worktree']);
+    return workspace;
+  });
+}
+
 describe('resume recovery', () => {
   it.live('does not repeat a settled role prompt and records the recovery disposition', () =>
     Effect.gen(function* () {
@@ -703,5 +998,60 @@ describe('resume recovery', () => {
           fixture.cleanup();
         }
       }),
+  );
+
+  it.live('resumes a changed implementation blocked run by reconciling its accepted head', () =>
+    Effect.gen(function* () {
+      const fixture = setupRunFixture();
+      try {
+        const first = yield* runChangedImplementationBlocked(fixture, 'RUN-RECOVERY-CHANGED');
+        expect(first.exitCode).toBe(1);
+        const before = yield* readHistory(fixture, 'RUN-RECOVERY-CHANGED');
+        expect(before.derived.state).toBe('blocked');
+        expect(before.derived.implementation?.commit ?? null).not.toBeNull();
+        const sessionsBefore = before.derived.roleSessions.length;
+
+        const resumed = yield* resume(fixture, 'RUN-RECOVERY-CHANGED');
+        expect(resumed.exitCode).toBe(1);
+
+        const after = yield* readHistory(fixture, 'RUN-RECOVERY-CHANGED');
+        expect(after.derived.state).toBe('blocked');
+        expect(after.derived.roleSessions.length).toBe(sessionsBefore);
+        const dispositions = after.derived.recoveryDispositions;
+        expect(dispositions.some((entry) => entry.disposition === 'accept')).toBe(true);
+        expect(dispositions.some((entry) => entry.disposition === 'human_recovery')).toBe(false);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.live('stops for human recovery when a changed worktree matches neither known head', () =>
+    Effect.gen(function* () {
+      const fixture = setupRunFixture();
+      try {
+        const first = yield* runChangedImplementationBlocked(fixture, 'RUN-RECOVERY-DRIFT');
+        expect(first.exitCode).toBe(1);
+        yield* advanceWorktreeHead(fixture, 'RUN-RECOVERY-DRIFT');
+        const sessionsBefore = (yield* readHistory(fixture, 'RUN-RECOVERY-DRIFT')).derived
+          .roleSessions.length;
+
+        const resumed = yield* resume(fixture, 'RUN-RECOVERY-DRIFT');
+        expect(resumed.exitCode).toBe(1);
+        const envelope = Schema.decodeUnknownSync(ReportEnvelopeJson)(resumed.stdout);
+        expect(envelope.ok).toBe(false);
+        if (envelope.ok) {
+          throw new Error(`Expected a human-recovery failure envelope: ${resumed.stdout}`);
+        }
+        expect(envelope.error.message).toContain('human recovery');
+
+        const after = yield* readHistory(fixture, 'RUN-RECOVERY-DRIFT');
+        expect(after.derived.roleSessions.length).toBe(sessionsBefore);
+        const dispositions = after.derived.recoveryDispositions;
+        expect(dispositions[dispositions.length - 1]?.disposition).toBe('human_recovery');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
   );
 });

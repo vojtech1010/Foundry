@@ -213,23 +213,53 @@ export function classifyRecovery(
     );
   }
   const ready = history.worktreeReady;
+  const implementation = history.implementation;
+  const acceptedHead = implementation === null ? null : implementation.commit;
   if (ready !== null) {
-    if (facts.worktree === null) {
+    const worktree = facts.worktree;
+    if (worktree === null) {
       return humanRecovery(
         'The recorded worktree could not be observed, so its identity is ambiguous.',
       );
     }
-    if (!facts.worktree.registered) {
+    if (!worktree.registered) {
       return humanRecovery(
         `The recorded worktree ${ready.workspace} is no longer registered to Git.`,
       );
     }
+    if (worktree.checkedOutBranch !== ready.taskBranch) {
+      return humanRecovery(
+        `The recorded worktree ${ready.workspace} is no longer on branch "${ready.taskBranch}".`,
+      );
+    }
+    const implementationHead =
+      facts.implementation === null ? null : facts.implementation.headCommit;
+    const observedHead = implementationHead ?? worktree.headCommit;
+    if (observedHead === null) {
+      return humanRecovery(
+        `The recorded worktree ${ready.workspace} has no resolvable head commit, so its identity is ambiguous.`,
+      );
+    }
     if (
-      facts.worktree.checkedOutBranch !== ready.taskBranch ||
-      facts.worktree.headCommit !== ready.headCommit
+      implementationHead !== null &&
+      worktree.headCommit !== null &&
+      implementationHead !== worktree.headCommit
     ) {
       return humanRecovery(
-        `The recorded worktree ${ready.workspace} is no longer on branch "${ready.taskBranch}" at ${ready.headCommit}.`,
+        `Git reported two different heads (${worktree.headCommit} and ${implementationHead}) for the recorded worktree ${ready.workspace}, so its identity is ambiguous.`,
+      );
+    }
+    /**
+     * A changed implementation advances the worktree past the frozen
+     * provisioning commit, so identity reconciles against the accepted
+     * implementation head from durable history as well. Only a head that matches
+     * neither the accepted head nor the provisioning head is ambiguous.
+     */
+    const knownHeads =
+      acceptedHead === null ? [ready.headCommit] : [ready.headCommit, acceptedHead];
+    if (!knownHeads.some((head) => head === observedHead)) {
+      return humanRecovery(
+        `The recorded worktree ${ready.workspace} is at ${observedHead}, which matches neither the accepted head ${acceptedHead ?? 'none'} nor the recorded provisioning head ${ready.headCommit}.`,
       );
     }
   }
@@ -241,10 +271,34 @@ export function classifyRecovery(
       `The settled ${role} attempt reported a blocked outcome; an operational or integrity fix is required before resume.`,
     );
   }
-  if (history.implementation !== null) {
+  const observation = session === null ? null : session.lastObservation;
+  if (
+    role !== null &&
+    session !== null &&
+    session.submissionStarted !== null &&
+    (observation === null || observation.status !== 'settled')
+  ) {
+    return classified(
+      'continue_waiting',
+      `The ${role} submission for session "${session.sessionId}" is owned and still in progress; observe the same session again later without resubmitting.`,
+    );
+  }
+  if (
+    (checkpoint === 'coding' || checkpoint === 'correcting') &&
+    facts.implementation !== null &&
+    !facts.implementation.clean
+  ) {
+    return classified(
+      'retry',
+      'Interrupted Coder files are evidence, not an accepted implementation; resume the coding stage under the clean-branch rule.',
+    );
+  }
+  if (implementation !== null) {
     return classified(
       'accept',
-      'The implementation is already accepted from a verified commit; continue automatic validation without repeating the Coder turn.',
+      acceptedHead === null
+        ? 'The no-change implementation is already accepted from durable history; continue automatic validation without repeating the Coder turn.'
+        : `The accepted implementation at ${acceptedHead} is reconciled from durable history; continue automatic validation without repeating the Coder turn.`,
     );
   }
   if (role === null) {
@@ -259,7 +313,6 @@ export function classifyRecovery(
       `No ${role} session was created for the recorded checkpoint; retrying the stage has no submission side effect.`,
     );
   }
-  const observation = session.lastObservation;
   if (observation !== null && observation.status === 'settled') {
     if (checkpoint === 'coding' || checkpoint === 'correcting') {
       return classified(
@@ -275,12 +328,6 @@ export function classifyRecovery(
   if (observation !== null && observation.status === 'lost') {
     return humanRecovery(
       `The owned ${role} session "${session.sessionId}" was lost and cannot be observed again.`,
-    );
-  }
-  if (session.submissionStarted !== null) {
-    return classified(
-      'continue_waiting',
-      `The ${role} submission for session "${session.sessionId}" is owned and still in progress; observe the same session again later without resubmitting.`,
     );
   }
   if (session.submission !== null) {
