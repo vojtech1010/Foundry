@@ -23,7 +23,10 @@ import type {
   DecisionOpenedPayload,
   PublicationCheckpointStage,
 } from '../../domain/decision-publication.js';
-import type { ProjectConfiguration } from '../../domain/project-configuration.js';
+import type {
+  ProjectConfiguration,
+  ResultPublicationMergeMethod,
+} from '../../domain/project-configuration.js';
 import type { ReviewerDecision } from '../../domain/reviewer-outcomes.js';
 import type { RunEvent } from '../../domain/run-history.js';
 import type { RunStateUnavailable } from '../run-identity/index.js';
@@ -77,6 +80,22 @@ export interface GitHubCreatePullRequestOptions {
   readonly body: string;
   readonly headBranch: string;
   readonly baseBranch: string;
+  readonly draft: boolean;
+}
+
+export interface GitHubEnableAutoMergeOptions {
+  readonly repository: string;
+  readonly pullRequestNumber: number;
+  readonly mergeMethod: ResultPublicationMergeMethod;
+}
+
+export interface GitHubPushSourceBranchOptions {
+  readonly repositoryPath: string;
+  readonly remote: string;
+  readonly sourceBranch: string;
+  readonly commit: string;
+  readonly expectedRemoteCommit: string;
+  readonly runId: string;
 }
 
 export interface GitHubRefreshPullRequestBodyOptions {
@@ -154,8 +173,14 @@ export class GitHubPublication extends Context.Service<
     readonly refreshOwnedDraftPullRequestBody: (
       options: GitHubRefreshPullRequestBodyOptions,
     ) => Effect.Effect<GitHubPullRequest, GitHubPublicationError>;
+    readonly enablePullRequestAutoMerge: (
+      options: GitHubEnableAutoMergeOptions,
+    ) => Effect.Effect<GitHubPullRequest, GitHubPublicationError>;
     readonly pushTaskBranch: (
       options: GitHubPushTaskBranchOptions,
+    ) => Effect.Effect<void, GitHubPublicationError>;
+    readonly pushSourceBranch: (
+      options: GitHubPushSourceBranchOptions,
     ) => Effect.Effect<void, GitHubPublicationError>;
     readonly listIssueCommentsAfter: (
       options: GitHubIssueCommentsAfterOptions,
@@ -484,6 +509,7 @@ export const publishDecisionDraftPr = Effect.fn('publishDecisionDraftPr')(functi
         body,
         headBranch: implementation.taskBranch,
         baseBranch: configuration.sourceBranch,
+        draft: true,
       })
       .pipe(Effect.result);
     if (Result.isFailure(created)) {

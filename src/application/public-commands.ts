@@ -97,6 +97,18 @@ export interface RunWorkflowRecovery {
   readonly reason: string;
 }
 
+/**
+ * The settled direct-merge fact of an approved changed result. It is present
+ * only in `direct-merge` mode, where the accepted commit was taken forward by
+ * updating the configured source branch instead of opening a result pull
+ * request, so `resultPullRequest` stays null.
+ */
+export interface RunWorkflowResultMerge {
+  readonly commit: string;
+  readonly sourceBranch: string;
+  readonly fastForward: boolean;
+}
+
 export interface RunWorkflowReport {
   readonly runId: string;
   readonly taskId: string;
@@ -110,6 +122,7 @@ export interface RunWorkflowReport {
   readonly decision?: RunWorkflowDecision;
   readonly recovery?: RunWorkflowRecovery;
   readonly resultPullRequest?: string | null;
+  readonly resultMerged?: RunWorkflowResultMerge;
 }
 
 export type PublicCommandReport =
@@ -161,6 +174,17 @@ function requestFilesOf(
 function resultPullRequestOf(outcome: RunWorkflowOutcome): string | null {
   const publication = outcome.resultPublication;
   return publication !== null && publication.outcome === 'published' ? publication.url : null;
+}
+
+function resultMergedOf(outcome: RunWorkflowOutcome): RunWorkflowResultMerge | null {
+  const publication = outcome.resultPublication;
+  return publication !== null && publication.outcome === 'merged'
+    ? {
+        commit: publication.commit,
+        sourceBranch: publication.sourceBranch,
+        fastForward: publication.fastForward,
+      }
+    : null;
 }
 
 function terminalFailureFor(outcome: RunWorkflowOutcome, runId: string): RunWorkflowError | null {
@@ -253,7 +277,8 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       return yield* terminalFailure;
     }
     const progress = yield* reconcileRunReports({ runDirectory: recorded.runDirectory, runId });
-    const report: RunWorkflowReport = {
+    const merged = resultMergedOf(outcome);
+    const baseReport: RunWorkflowReport = {
       runId,
       taskId,
       runDirectory: recorded.runDirectory,
@@ -265,6 +290,8 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       testerSkipped: outcome.testerSkipped,
       resultPullRequest: resultPullRequestOf(outcome),
     };
+    const report: RunWorkflowReport =
+      merged === null ? baseReport : { ...baseReport, resultMerged: merged };
     if (recovery === null) {
       return report;
     }
@@ -347,7 +374,8 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
         runId,
       });
     }
-    const report: RunWorkflowReport = {
+    const merged = resultMergedOf(outcome);
+    const baseReport: RunWorkflowReport = {
       runId,
       taskId: identity.taskId,
       runDirectory: context.runDirectory,
@@ -359,6 +387,8 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       testerSkipped: outcome.testerSkipped,
       resultPullRequest: resultPullRequestOf(outcome),
     };
+    const report: RunWorkflowReport =
+      merged === null ? baseReport : { ...baseReport, resultMerged: merged };
     const withRecovery: RunWorkflowReport =
       recovery === null
         ? report

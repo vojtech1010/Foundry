@@ -112,7 +112,10 @@ const capabilityLayers = Layer.mergeAll(
       openResultPullRequest: () => Effect.die(new Error('no result PR is expected for this run')),
       refreshOwnedDraftPullRequestBody: () =>
         Effect.die(new Error('no draft PR is expected for this run')),
+      enablePullRequestAutoMerge: () =>
+        Effect.die(new Error('no auto-merge is expected for this run')),
       pushTaskBranch: () => Effect.die(new Error('no push is expected for this run')),
+      pushSourceBranch: () => Effect.die(new Error('no source push is expected for this run')),
       listIssueCommentsAfter: () => Effect.succeed({ comments: [], truncated: false }),
       collaboratorPermission: () => Effect.succeed({ permission: 'maintain' }),
     }),
