@@ -24,13 +24,18 @@ import { invalidRedactionPatterns } from '../evidence-limits/index.js';
 import { decodeProjectConfiguration } from '../project-configuration.js';
 import { preflightRoleHostCapabilities } from '../role-conversations/index.js';
 
+import { ROLE_HOST_ROLES } from '../../domain/role-host.js';
+import type {
+  DecisionPublicationConfiguration,
+  ProjectConfiguration,
+} from '../../domain/project-configuration.js';
 import type {
   PublicationCapability,
   PublicationCapabilityState,
   PublicationRepositoryScope,
 } from '../../domain/readiness.js';
-import type { DecisionPublicationConfiguration } from '../../domain/project-configuration.js';
 import type { BranchProtectionEvidence } from '../../domain/run-locations.js';
+import type { RoleHostRole } from '../../domain/role-host.js';
 import type { RoleHostCapabilityError, RoleHostLauncher } from '../role-conversations/index.js';
 
 export class ReadinessError extends Schema.TaggedError<ReadinessError>()('ReadinessError', {
@@ -164,6 +169,62 @@ export interface DoctorArtifactsReport {
   readonly redactionPatterns: ReadonlyArray<string>;
 }
 
+export interface RoleRoutingReport {
+  readonly role: RoleHostRole;
+  readonly harness: string;
+  readonly model: string;
+}
+
+const RoleRoutingSelectionSchema = Schema.Struct({
+  harness: Schema.NonEmptyString,
+  model: Schema.NonEmptyString,
+});
+
+const RoleRoutingSectionSchema = Schema.Struct({
+  architect: RoleRoutingSelectionSchema,
+  coder: RoleRoutingSelectionSchema,
+  lead_coder: RoleRoutingSelectionSchema,
+  tester: RoleRoutingSelectionSchema,
+  reviewer: RoleRoutingSelectionSchema,
+});
+
+const RoleRoutingDocumentSchema = Schema.Struct({
+  roles: RoleRoutingSectionSchema,
+});
+
+/**
+ * Resolved per-role harness/model routing for read-only reports (`doctor`,
+ * `init --dry-run`). Resolution is pure and launches nothing: it projects the
+ * typed per-role `roles` selections (docs/tasks/053-per-role-harness-models.md,
+ * docs/features/project-setup.md#configuration-shape) in `ROLE_HOST_ROLES`
+ * order, so the same document resolves the same routing on Linux and Windows.
+ *
+ * INTEGRATE-W1 seam (owner: CODER-053A, branch `agent/053-contract-host`):
+ * the closed `roles` contract (required five roles, supported-harness catalog,
+ * trimmed non-empty models) is promoted into `ProjectConfiguration` and its
+ * decode schema by 053A. Until then this reads only the single documented
+ * `roles` key strictly. Duck-typed aliases (`roleRoutes`, `roleHarnessByRole`,
+ * `perRoleHarness`), command-shaped entries, shared-harness fallback routing,
+ * and placeholder models are not honored: absence or mismatch yields `None`
+ * and reports omit `roleRouting` instead of inventing routing. Foundry never
+ * invents a substitute model. When 053A lands, replace this seam with a direct
+ * projection of `configuration.roles` and make `roleRouting` required again.
+ */
+export function resolveRoleRouting(
+  configuration: ProjectConfiguration,
+): Option.Option<ReadonlyArray<RoleRoutingReport>> {
+  const decoded = Schema.decodeUnknownOption(RoleRoutingDocumentSchema, {
+    onExcessProperty: 'ignore',
+  })(configuration);
+  return Option.map(decoded, ({ roles }) =>
+    ROLE_HOST_ROLES.map((role) => ({
+      role,
+      harness: roles[role].harness,
+      model: roles[role].model,
+    })),
+  );
+}
+
 export interface DoctorPublicationCapabilityReport {
   readonly capability: PublicationCapability;
   readonly state: PublicationCapabilityState;
@@ -185,6 +246,7 @@ export interface DoctorReport {
   readonly storage: DoctorStorageReport;
   readonly repository: DoctorRepositoryReport;
   readonly roleHost: DoctorRoleHostReport;
+  readonly roleRouting: ReadonlyArray<RoleRoutingReport> | undefined;
   readonly publication: DoctorPublicationReport;
   readonly artifacts: DoctorArtifactsReport;
 }
@@ -627,6 +689,7 @@ export const checkReadiness = Effect.fn('checkReadiness')(function* (
       filesystemProfiles: [...capabilities.capabilityProfiles.filesystem],
       networkProfiles: [...capabilities.capabilityProfiles.network],
     },
+    roleRouting: Option.getOrUndefined(resolveRoleRouting(configuration)),
     publication,
     artifacts: {
       retentionDays: configuration.artifacts.retentionDays,

@@ -459,6 +459,10 @@ describe('preview run locations with fake services', () => {
         maxRunBytes: 104857600,
         redactionPatterns: [],
       });
+      // INTEGRATE-W1: `roleRouting` stays absent until CODER-053A promotes
+      // the closed `roles` contract into `ProjectConfiguration`; the preview
+      // omits the section instead of inventing routing.
+      expect(report.roleRouting).toBeUndefined();
       expectReadOnlyGitCalls(built.gitCalls);
     }),
   );
@@ -680,6 +684,9 @@ describe('preview run locations with fake services', () => {
         maxRunBytes: 104857600,
         redactionPatterns: [],
       });
+      // INTEGRATE-W1: `roleRouting` stays absent until CODER-053A promotes
+      // the closed `roles` contract into `ProjectConfiguration`.
+      expect(data.roleRouting).toBeUndefined();
       expect(Object.keys(data).sort()).toEqual(
         ['artifacts', 'branch', 'roleHarness', 'source', 'taskId', 'workspace'].sort(),
       );
@@ -722,6 +729,10 @@ describe('preview run locations with fake services', () => {
       expect(humanResult.stdout).toContain(
         `data.roleHarness.protocol: ${data.roleHarness.protocol}`,
       );
+      // INTEGRATE-W1: no routing lines until CODER-053A promotes the
+      // closed `roles` contract; the human report omits the section.
+      expect(data.roleRouting).toBeUndefined();
+      expect(humanResult.stdout).not.toContain('data.roleRouting:');
       expect(humanResult.stdout).toContain(`data.artifacts.root: ${data.artifacts.root}`);
       expect(humanResult.stdout).toContain(
         `data.artifacts.retentionDays: ${data.artifacts.retentionDays}`,

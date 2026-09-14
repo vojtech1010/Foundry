@@ -1,5 +1,5 @@
 import { describe, expect, it } from '@effect/vitest';
-import { Effect, Layer, Schema } from 'effect';
+import { Effect, Layer, Option, Schema } from 'effect';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,6 +19,7 @@ import {
   checkReadiness,
   describePublicationReadiness,
   resolveBranchProtectionEvidence,
+  resolveRoleRouting,
 } from '../src/application/readiness/index.js';
 import {
   GIT_OPERATION_MARKERS,
@@ -43,6 +44,7 @@ import type {
   PublicationProbeObservation,
   PublicationProbeRequest,
 } from '../src/application/readiness/index.js';
+import type { ProjectConfiguration } from '../src/domain/project-configuration.js';
 import type { RoleHostLauncher } from '../src/application/role-conversations/index.js';
 
 const ReportEnvelopeJson = Schema.fromJsonString(ReportEnvelope);
@@ -455,6 +457,92 @@ describe('readiness domain vocabulary', () => {
   });
 });
 
+describe('per-role routing resolution', () => {
+  function asConfiguration(document: Schema.Json): ProjectConfiguration {
+    // SAFETY: the resolver reads only the documented `roles` section, so a
+    // JSON-shaped test double exercises the same code path as decoded input.
+    // A `roles` section cannot pass the base closed configuration schema
+    // until CODER-053A promotes it there; these doubles simulate that
+    // post-053A shape for the pure resolver only.
+    return document as ProjectConfiguration;
+  }
+
+  function selections() {
+    return {
+      architect: { harness: 'architect-harness', model: 'architect-model' },
+      coder: { harness: 'coder-harness', model: 'coder-model' },
+      lead_coder: { harness: 'lead-harness', model: 'lead-model' },
+      tester: { harness: 'tester-harness', model: 'tester-model' },
+      reviewer: { harness: 'reviewer-harness', model: 'reviewer-model' },
+    };
+  }
+
+  it('projects the documented roles section in role order', () => {
+    const routing = resolveRoleRouting(
+      asConfiguration({ ...goldenDocument(TARGET), roles: selections() }),
+    );
+
+    expect(Option.isSome(routing)).toBe(true);
+    if (Option.isSome(routing)) {
+      expect(routing.value).toEqual([
+        { role: 'architect', harness: 'architect-harness', model: 'architect-model' },
+        { role: 'coder', harness: 'coder-harness', model: 'coder-model' },
+        { role: 'lead_coder', harness: 'lead-harness', model: 'lead-model' },
+        { role: 'tester', harness: 'tester-harness', model: 'tester-model' },
+        { role: 'reviewer', harness: 'reviewer-harness', model: 'reviewer-model' },
+      ]);
+    }
+  });
+
+  it('resolves the same routing twice for the same document', () => {
+    const document = asConfiguration({ ...goldenDocument(TARGET), roles: selections() });
+
+    const first = resolveRoleRouting(document);
+    const second = resolveRoleRouting(document);
+
+    expect(second).toEqual(first);
+    expect(Option.isSome(first)).toBe(true);
+  });
+
+  it('ignores duck-typed routing aliases instead of honoring them', () => {
+    const roleRoutes = {
+      architect: { harness: 'alias-harness', model: 'alias-model' },
+      coder: { harness: 'alias-harness', model: 'alias-model' },
+      lead_coder: { harness: 'alias-harness', model: 'alias-model' },
+      tester: { harness: 'alias-harness', model: 'alias-model' },
+      reviewer: { harness: 'alias-harness', model: 'alias-model' },
+    };
+    const aliased = [
+      { ...goldenDocument(TARGET), roleRoutes },
+      { ...goldenDocument(TARGET), roleHarnessByRole: roleRoutes },
+      { ...goldenDocument(TARGET), perRoleHarness: roleRoutes },
+    ];
+
+    for (const document of aliased) {
+      expect(Option.isNone(resolveRoleRouting(asConfiguration(document)))).toBe(true);
+    }
+  });
+
+  it('yields no routing when roles are absent, incomplete, or empty', () => {
+    const incomplete = {
+      architect: { harness: 'architect-harness', model: 'architect-model' },
+    };
+    const emptyModel = {
+      ...selections(),
+      reviewer: { harness: 'reviewer-harness', model: '' },
+    };
+    const documents = [
+      goldenDocument(TARGET),
+      { ...goldenDocument(TARGET), roles: incomplete },
+      { ...goldenDocument(TARGET), roles: emptyModel },
+    ];
+
+    for (const document of documents) {
+      expect(Option.isNone(resolveRoleRouting(asConfiguration(document)))).toBe(true);
+    }
+  });
+});
+
 describe('readiness check with fake services', () => {
   it.effect('reports host, configuration, storage, and repository identity when ready', () =>
     Effect.gen(function* () {
@@ -475,6 +563,10 @@ describe('readiness check with fake services', () => {
         branch: 'main',
         commit: COMMIT,
       });
+      // INTEGRATE-W1: `roleRouting` stays absent until CODER-053A promotes
+      // the closed `roles` contract into `ProjectConfiguration`; the report
+      // omits the section instead of inventing routing.
+      expect(report.roleRouting).toBeUndefined();
       expectNoBranchMutation(built.gitCalls);
     }),
   );
@@ -768,6 +860,9 @@ describe('readiness check with fake services', () => {
         'reviewer',
       ]);
       expect(data.roleHost.networkProfiles).toEqual(['network_denied', 'runtime_origin_only']);
+      // INTEGRATE-W1: `roleRouting` stays absent until CODER-053A promotes
+      // the closed `roles` contract into `ProjectConfiguration`.
+      expect(data.roleRouting).toBeUndefined();
       expect(data.publication).toEqual({
         configured: false,
         eligible: false,
@@ -845,6 +940,10 @@ describe('readiness check with fake services', () => {
       expect(humanResult.stdout).toContain(
         `data.artifacts.maxRunBytes: ${data.artifacts.maxRunBytes}`,
       );
+      // INTEGRATE-W1: no routing lines until CODER-053A promotes the
+      // closed `roles` contract; the human report omits the section.
+      expect(data.roleRouting).toBeUndefined();
+      expect(humanResult.stdout).not.toContain('data.roleRouting:');
       expect(humanResult.stdout.endsWith('\n')).toBe(true);
     }),
   );
