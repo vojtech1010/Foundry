@@ -55,7 +55,10 @@ function signalOwned(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): v
     return;
   }
   if (process.platform === 'win32') {
-    child.kill(signal);
+    // Signal the whole recorded tree, not just its root: a root-only kill
+    // would orphan descendants that share the executable name. The forced
+    // taskkill path still runs if the graceful request exceeds the budget.
+    spawnSync('taskkill', ['/pid', String(pid), '/T'], { stdio: 'ignore' });
     return;
   }
   try {

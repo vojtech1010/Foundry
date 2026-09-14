@@ -355,6 +355,11 @@ path-escape, atomic-persistence, lock-recovery, temporary-Git-repository, and
 interrupt/resume suites. A feature is not supported until the same observable
 workflow and safety tests pass on both platforms.
 
+**Implemented:** `tests/parity/` holds the platform-conditional argument-vector,
+owned-process-tree, path-escape, role-host, durable-history, lock-recovery,
+temporary-repository, and interrupt/resume suites, and the CI `parity` job runs
+them on `ubuntu-latest` and `windows-latest`.
+
 ## Artifact limits
 
 Mandatory state, events, journals, control envelopes, and the canonical handoff
