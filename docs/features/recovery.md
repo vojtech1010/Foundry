@@ -136,6 +136,18 @@ The supported surface is `resume --run-id <id> --abandon --reason <text>`.
 Abandonment is idempotent for the same run and reason; a different repeated
 reason is appended as a new audit note without rerunning cleanup.
 
+**Implemented:** an empty reason is rejected before any durable write. A
+nonterminal run is durably transitioned to terminal `abandoned` first, then its
+owned resources are disposed best-effort with the cleanup outcome recorded
+separately; a pending or failed cleanup never un-abandons the run. The operator
+reason is recorded as an `abandonment-note`, so repeating the same reason is a
+no-op and a different reason appends an audit note without rerunning disposal.
+A run that already ended in another terminal state is refused with a typed error
+that leaves its history unchanged, and a run with no recorded workflow state is
+refused by the transition route. Abandonment never approves, commits, publishes,
+or erases history, and it never re-enters the resume/advance path that could
+resume a blocked run instead of ending it.
+
 Result acceptance and resource disposal are separate outcomes. At the end of
 every terminal run Foundry automatically disposes the resources it owns — the
 application process, recorded role sessions, the run worktree, and any worker

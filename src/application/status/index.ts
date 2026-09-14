@@ -229,6 +229,8 @@ function eventDetail(event: RunEvent): string {
       return boundedDetail(`result publication ${event.payload.stage}: ${event.payload.detail}`);
     case 'result-pr-recorded':
       return boundedDetail(`result pull request recorded at ${event.payload.url}`);
+    case 'abandonment-note':
+      return boundedDetail(`abandoned: ${event.payload.reason}`);
   }
 }
 

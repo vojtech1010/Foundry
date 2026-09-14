@@ -1,8 +1,5 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer, Schema } from 'effect';
-import { existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
@@ -18,7 +15,6 @@ import {
   EXIT_CODES,
   INTERRUPT_EXIT_CODES,
   NON_PRODUCT_COMMANDS,
-  NOT_AVAILABLE,
   PUBLIC_COMMANDS,
   REPORT_SCHEMA_VERSION,
   exitCodeForOutcome,
@@ -32,15 +28,6 @@ function envelopeFrom(stdout: string) {
   return Schema.decodeUnknownSync(ReportEnvelopeJson)(stdout);
 }
 
-function expectSuccessEnvelope(stdout: string) {
-  const envelope = envelopeFrom(stdout);
-  expect(envelope.ok).toBe(true);
-  if (!envelope.ok) {
-    throw new Error(`Expected a success envelope but received: ${stdout}`);
-  }
-  return envelope;
-}
-
 function expectFailureEnvelope(stdout: string) {
   const envelope = envelopeFrom(stdout);
   expect(envelope.ok).toBe(false);
@@ -48,15 +35,6 @@ function expectFailureEnvelope(stdout: string) {
     throw new Error(`Expected a failure envelope but received: ${stdout}`);
   }
   return envelope;
-}
-
-function expectStubEnvelope(stdout: string) {
-  const envelope = expectSuccessEnvelope(stdout);
-  const data = envelope.data;
-  if (!('availability' in data)) {
-    throw new Error(`Expected a stub envelope but received: ${stdout}`);
-  }
-  return { envelope, data };
 }
 
 function untouchedReadiness(name: string) {
@@ -152,31 +130,6 @@ const UntouchedReadiness = Layer.mergeAll(
 function runStubCli(argv: ReadonlyArray<string>) {
   return runCli(argv).pipe(Effect.provide(UntouchedReadiness));
 }
-
-interface ValidScenario {
-  readonly command: string;
-  readonly argv: ReadonlyArray<string>;
-  readonly runId: string | undefined;
-  readonly taskId: string | undefined;
-}
-
-const validScenarios: ReadonlyArray<ValidScenario> = [
-  {
-    command: 'resume',
-    argv: [
-      'resume',
-      '--config',
-      'foundry.config.json',
-      '--run-id',
-      'RUN-1',
-      '--abandon',
-      '--reason',
-      'superseded by a new request',
-    ],
-    runId: 'RUN-1',
-    taskId: undefined,
-  },
-];
 
 interface InvalidScenario {
   readonly label: string;
@@ -331,39 +284,6 @@ describe('public command surface', () => {
     expect(isPublicCommand('frobnicate')).toBe(false);
   });
 
-  it.effect('accepts every stub command with well-formed flags', () =>
-    Effect.gen(function* () {
-      for (const scenario of validScenarios) {
-        const result = yield* runStubCli([...scenario.argv, '--json']);
-        expect(result.exitCode, scenario.command).toBe(EXIT_CODES.reported);
-        expect(result.stdout.endsWith('\n'), scenario.command).toBe(true);
-        const { envelope, data } = expectStubEnvelope(result.stdout);
-        expect(envelope.schemaVersion).toBe(REPORT_SCHEMA_VERSION);
-        expect(envelope.command).toBe(scenario.command);
-        expect(data.availability).toBe(NOT_AVAILABLE);
-        expect(data.message.length).toBeGreaterThan(0);
-
-        const expectedEnvelopeKeys = ['schemaVersion', 'command', 'ok', 'data'];
-        expect(Object.keys(envelope)).toEqual(expectedEnvelopeKeys);
-
-        const expectedDataKeys = ['availability', 'message'];
-        if (scenario.runId === undefined) {
-          expect('runId' in data).toBe(false);
-        } else {
-          expectedDataKeys.push('runId');
-          expect(data.runId).toBe(scenario.runId);
-        }
-        if (scenario.taskId === undefined) {
-          expect('taskId' in data).toBe(false);
-        } else {
-          expectedDataKeys.push('taskId');
-          expect(data.taskId).toBe(scenario.taskId);
-        }
-        expect(Object.keys(data)).toEqual(expectedDataKeys);
-      }
-    }),
-  );
-
   it.effect('rejects forbidden, unknown, and malformed invocations with exit code 2', () =>
     Effect.gen(function* () {
       for (const scenario of invalidScenarios) {
@@ -420,135 +340,6 @@ describe('public command surface', () => {
         expect(result.exitCode, flag).toBe(EXIT_CODES.invalidInvocation);
         expectFailureEnvelope(result.stdout);
       }
-    }),
-  );
-
-  it.effect('accepts --json before the command name', () =>
-    Effect.gen(function* () {
-      const result = yield* runStubCli([
-        '--json',
-        'resume',
-        '--config',
-        'cfg.json',
-        '--run-id',
-        'RUN-1',
-        '--abandon',
-        '--reason',
-        'superseded by a new request',
-      ]);
-      expect(result.exitCode).toBe(EXIT_CODES.reported);
-      const { envelope, data } = expectStubEnvelope(result.stdout);
-      expect(envelope.command).toBe('resume');
-      expect(data.availability).toBe(NOT_AVAILABLE);
-    }),
-  );
-
-  it.effect('presents the same facts in human output as in JSON output', () =>
-    Effect.gen(function* () {
-      const argv = [
-        'resume',
-        '--config',
-        'cfg.json',
-        '--run-id',
-        'RUN-1',
-        '--abandon',
-        '--reason',
-        'superseded by a new request',
-      ];
-      const jsonResult = yield* runStubCli([...argv, '--json']);
-      const humanResult = yield* runStubCli(argv);
-      expect(jsonResult.exitCode).toBe(EXIT_CODES.reported);
-      expect(humanResult.exitCode).toBe(EXIT_CODES.reported);
-
-      const { envelope, data } = expectStubEnvelope(jsonResult.stdout);
-      expect(humanResult.stdout).toContain(`schemaVersion: ${envelope.schemaVersion}`);
-      expect(humanResult.stdout).toContain(`command: ${envelope.command}`);
-      expect(humanResult.stdout).toContain(`ok: ${envelope.ok}`);
-      expect(humanResult.stdout).toContain(`data.availability: ${data.availability}`);
-      expect(humanResult.stdout).toContain(`data.message: ${data.message}`);
-      if (data.runId !== undefined) {
-        expect(humanResult.stdout).toContain(`data.runId: ${data.runId}`);
-      }
-      expect(humanResult.stdout.endsWith('\n')).toBe(true);
-    }),
-  );
-
-  it.effect('renders human success and failure reports without a JSON prefix', () =>
-    Effect.gen(function* () {
-      const success = yield* runStubCli([
-        'resume',
-        '--config',
-        'cfg.json',
-        '--run-id',
-        'RUN-1',
-        '--abandon',
-        '--reason',
-        'superseded by a new request',
-      ]);
-      expect(success.stdout).toBe(
-        [
-          'schemaVersion: 1',
-          'command: resume',
-          'ok: true',
-          `data.availability: ${NOT_AVAILABLE}`,
-          'data.message: Foundry resume is not available yet.',
-          'data.runId: RUN-1',
-          '',
-        ].join('\n'),
-      );
-
-      const failure = yield* runStubCli(['run', '--config', 'cfg.json']);
-      expect(failure.exitCode).toBe(EXIT_CODES.invalidInvocation);
-      expect(failure.stdout).toContain('schemaVersion: 1');
-      expect(failure.stdout).toContain('command: run');
-      expect(failure.stdout).toContain('ok: false');
-      expect(failure.stdout).toContain('error.kind: invalid_invocation');
-      expect(failure.stdout).toContain('error.retryable: false');
-      expect(failure.stdout.startsWith('{')).toBe(false);
-    }),
-  );
-
-  it.effect('writes exactly one JSON envelope per invocation', () =>
-    Effect.gen(function* () {
-      const result = yield* runStubCli([
-        'resume',
-        '--config',
-        'cfg.json',
-        '--run-id',
-        'RUN-1',
-        '--abandon',
-        '--reason',
-        'superseded by a new request',
-        '--json',
-      ]);
-      expect(result.stdout.startsWith('{')).toBe(true);
-      expect(result.stdout.trimEnd().includes('\n')).toBe(false);
-      expect(result.stdout.endsWith('\n')).toBe(true);
-    }),
-  );
-
-  it.effect('reports not-available without reading configuration or writing outputs', () =>
-    Effect.gen(function* () {
-      const missingConfig = join(tmpdir(), 'foundry-public-surface-missing-config.json');
-      const output = join(tmpdir(), `foundry-public-surface-output-${process.pid}`);
-      expect(existsSync(output)).toBe(false);
-
-      const result = yield* runStubCli([
-        'resume',
-        '--config',
-        missingConfig,
-        '--run-id',
-        'RUN-1',
-        '--abandon',
-        '--reason',
-        'superseded by a new request',
-        '--json',
-      ]);
-      expect(result.exitCode).toBe(EXIT_CODES.reported);
-      const { envelope, data } = expectStubEnvelope(result.stdout);
-      expect(envelope.command).toBe('resume');
-      expect(data.availability).toBe(NOT_AVAILABLE);
-      expect(existsSync(output)).toBe(false);
     }),
   );
 
