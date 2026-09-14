@@ -98,5 +98,5 @@ The [successful-run evidence appendix](run-history-evidence.md) maps retained
 orchestration behavior, historical limitations, and deliberate exclusions.
 Legacy publication policy, Quality Engineer execution, and Tester data mutation
 are not Foundry capabilities merely because an older run completed with them.
-These are intended product contracts, not a claim that Foundry's skeleton
-already implements the observed behavior.
+These are Foundry's product contracts; the public command surface realizes them,
+and individual feature pages mark any capability that is not yet supported.
