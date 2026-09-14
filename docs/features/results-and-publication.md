@@ -139,9 +139,10 @@ transaction journal. The decision journal records the checkpoints `pre-push`,
 only `url-recorded` carries the authoritative draft PR URL, so recovery resumes
 from the recorded checkpoint and never infers success from a branch or
 arbitrary PR alone. The result publication uses its own `result-pr-checkpoint`
-journal with the same stage vocabulary plus a settled `result-pr-recorded` fact;
-the result journal is permitted only after a Reviewer-approved changed result,
-and `result-pr-recorded` makes a resumed reconciliation a no-op instead of a
+journal with the stages `pre-push`, `pushed`, `pull-request-created`, and
+`url-recorded`, plus a settled `result-pr-recorded` fact; the result journal is
+permitted only after a Reviewer-approved changed result, and
+`result-pr-recorded` makes a resumed reconciliation a no-op instead of a
 duplicate result pull request.
 
 Publication uses the GitHub HTTPS API with `GITHUB_TOKEN` supplied from the
