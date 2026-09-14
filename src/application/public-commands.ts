@@ -30,6 +30,7 @@ import { readRunStatus } from './status/index.js';
 import type { PublicCommandInvocation } from '../domain/public-commands.js';
 import type { RunWorkflowOutcome } from './run-workflow/index.js';
 import type { RequestIdentityDocument } from '../domain/run-identity.js';
+import type { RecoveryDisposition } from '../domain/run-history.js';
 import type { WorkflowState } from '../domain/workflow.js';
 import type {
   RunHistoryConflict,
@@ -92,6 +93,15 @@ export interface RunWorkflowDecision {
   readonly draftPrUrl: string | null;
 }
 
+/**
+ * The recovery disposition chosen before a resumable run advanced, included in
+ * the success report only when the disposition was not an integrity stop.
+ */
+export interface RunWorkflowRecovery {
+  readonly disposition: RecoveryDisposition;
+  readonly reason: string;
+}
+
 export interface RunWorkflowReport {
   readonly runId: string;
   readonly taskId: string;
@@ -103,6 +113,7 @@ export interface RunWorkflowReport {
   readonly stages: ReadonlyArray<WorkflowState>;
   readonly testerSkipped: boolean;
   readonly decision?: RunWorkflowDecision;
+  readonly recovery?: RunWorkflowRecovery;
 }
 
 export type PublicCommandReport =
@@ -231,12 +242,20 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       configuration: context.configuration,
       allowResume: false,
     });
+    const recovery = outcome.recovery;
+    if (recovery !== null && recovery.problem !== null) {
+      return yield* new RunWorkflowError({
+        message: `Run "${runId}" stopped for human recovery: ${recovery.problem}`,
+        runId,
+        kind: 'blocked',
+      });
+    }
     const terminalFailure = terminalFailureFor(outcome, runId);
     if (terminalFailure !== null) {
       return yield* terminalFailure;
     }
     const progress = yield* reconcileRunReports({ runDirectory: recorded.runDirectory, runId });
-    return {
+    const report: RunWorkflowReport = {
       runId,
       taskId,
       runDirectory: recorded.runDirectory,
@@ -246,6 +265,13 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       outcome: outcome.workflowState,
       stages: outcome.stages,
       testerSkipped: outcome.testerSkipped,
+    };
+    if (recovery === null) {
+      return report;
+    }
+    return {
+      ...report,
+      recovery: { disposition: recovery.disposition, reason: recovery.reason },
     } satisfies RunWorkflowReport;
   }
   if (invocation.command === 'resume') {
@@ -279,6 +305,14 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       configuration: context.configuration,
       allowResume: true,
     });
+    const recovery = outcome.recovery;
+    if (recovery !== null && recovery.problem !== null) {
+      return yield* new RunWorkflowError({
+        message: `Run "${runId}" stopped for human recovery: ${recovery.problem}`,
+        runId,
+        kind: 'blocked',
+      });
+    }
     const terminalFailure = terminalFailureFor(outcome, runId);
     if (terminalFailure !== null) {
       return yield* terminalFailure;
@@ -309,11 +343,18 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       stages: outcome.stages,
       testerSkipped: outcome.testerSkipped,
     };
+    const withRecovery: RunWorkflowReport =
+      recovery === null
+        ? report
+        : {
+            ...report,
+            recovery: { disposition: recovery.disposition, reason: recovery.reason },
+          };
     if (decision === null) {
-      return report;
+      return withRecovery;
     }
     return {
-      ...report,
+      ...withRecovery,
       decision: {
         applied: decision.applied,
         waiting: decision.waiting,

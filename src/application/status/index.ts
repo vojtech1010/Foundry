@@ -223,6 +223,8 @@ function eventDetail(event: RunEvent): string {
           event.payload.entries.length === 1 ? 'y' : 'ies'
         }`,
       );
+    case 'recovery-recorded':
+      return boundedDetail(`recovery ${event.payload.disposition}: ${event.payload.reason}`);
   }
 }
 

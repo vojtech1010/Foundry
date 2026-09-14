@@ -3,9 +3,16 @@ import { dirname, join } from 'node:path';
 
 import { decodeReviewerTurnControl } from '../../domain/reviewer-outcomes.js';
 import { REQUEST_NORMALIZED_FILENAME } from '../../domain/run-identity.js';
+import { RUN_STORAGE_DIRECTORY_NAME } from '../../domain/readiness.js';
 import { describeRunCleanupReport } from '../../domain/run-cleanup.js';
 import { decodeTesterTurnControl } from '../../domain/tester-outcomes.js';
 import { workerWorkspacePath } from '../../domain/parallel-workers.js';
+import {
+  REPOSITORY_LEASE_FILENAME,
+  RepositoryLeaseJson,
+  classifyRepositoryLeaseOwner,
+  repositoryLeaseExpired,
+} from '../../domain/repository-lease.js';
 import { isActiveWorkflowState, isTerminalWorkflowState } from '../../domain/workflow.js';
 import {
   admitArchitectPlan,
@@ -38,10 +45,17 @@ import {
 } from '../parallel-workers/index.js';
 import { prepareAndHoldApplicationRuntime } from '../project-runtime/index.js';
 import { runProjectVerification } from '../project-verification/index.js';
+import { classifyRecovery, classifyRoleFailure } from '../recovery/index.js';
+import { RepositoryHostIdentity, RepositoryLeaseStore } from '../repository-lease/index.js';
 import { buildRolePacket } from '../role-packets/index.js';
 import { startGovernedRoleTurn } from '../role-permissions/index.js';
 import { handleReviewerTurn } from '../reviewer-outcomes/index.js';
-import { RoleHostLauncher, stopRoleSession } from '../role-conversations/index.js';
+import {
+  RoleConversationError,
+  RoleHostLauncher,
+  stopRoleSession,
+} from '../role-conversations/index.js';
+import { RunGit } from '../git-provisioning/index.js';
 import { describePublicationReadiness } from '../readiness/index.js';
 import { RunIdentityStore, RunIdentityStorageError } from '../run-identity/index.js';
 import { disposeRunResources } from '../run-cleanup/index.js';
@@ -58,10 +72,21 @@ import type { ProjectConfiguration } from '../../domain/project-configuration.js
 import type { PlannedObjective } from '../../domain/architect-plan.js';
 import type { RoleHostControl, RoleHostSessionState } from '../../domain/role-host.js';
 import type { RoleTurnLocations } from '../../domain/role-permissions.js';
-import type { EvidenceManifestEntry, RunHistoryDerivedState } from '../../domain/run-history.js';
+import type {
+  EvidenceManifestEntry,
+  RunHistoryDerivedState,
+  WorkflowTransitionPayload,
+} from '../../domain/run-history.js';
 import type { WorkflowRole, WorkflowState } from '../../domain/workflow.js';
 import type { WorkerTurnTarget } from '../parallel-workers/index.js';
 import type { HeldApplicationRuntime } from '../project-runtime/index.js';
+import type {
+  RecoveryClassification,
+  RecoveryFacts,
+  RecoveryDisposition,
+} from '../recovery/index.js';
+import type { RoleConversationFailureReason } from '../role-conversations/index.js';
+import type { ImplementationObservation, WorktreeObservation } from '../git-provisioning/index.js';
 import type { WorkerWorktreeDisposal } from '../run-cleanup/index.js';
 import type { VerifiedRunHistory } from '../run-history/index.js';
 
@@ -93,11 +118,23 @@ export interface RunWorkflowDecisionReport {
   readonly problem: string | null;
 }
 
+/**
+ * The disposition chosen for a resumable run before it advanced. A non-null
+ * `problem` is a `human_recovery` integrity stop: durable state is not advanced
+ * and the problem is reported instead of guessing.
+ */
+export interface RunWorkflowRecoveryReport {
+  readonly disposition: RecoveryDisposition;
+  readonly reason: string;
+  readonly problem: string | null;
+}
+
 export interface RunWorkflowOutcome {
   readonly workflowState: WorkflowState;
   readonly stages: ReadonlyArray<WorkflowState>;
   readonly testerSkipped: boolean;
   readonly decision: RunWorkflowDecisionReport | null;
+  readonly recovery: RunWorkflowRecoveryReport | null;
 }
 
 function errorMessage(error: { readonly message: string }): string {
@@ -138,11 +175,38 @@ function summaryOf(history: VerifiedRunHistory): RunWorkflowOutcome {
     stages: stagesOf(history),
     testerSkipped: history.derived.testerSkips.length > 0,
     decision: null,
+    recovery: null,
   };
 }
 
-function countSessions(history: RunHistoryDerivedState, role: WorkflowRole): number {
-  return history.roleSessions.filter((session) => session.role === role).length;
+function lastWorkflowTransition(history: VerifiedRunHistory): WorkflowTransitionPayload | null {
+  for (let index = history.events.length - 1; index >= 0; index -= 1) {
+    const event = history.events[index];
+    if (event !== undefined && event.type === 'workflow-transition') {
+      return event.payload;
+    }
+  }
+  return null;
+}
+
+/**
+ * The role attempt a stage should run. A stage re-entered by a `resume`
+ * transition reattaches to the latest recorded session for its role instead of
+ * allocating a new attempt, so recovery observes the same owned operation and
+ * never resubmits a prompt whose submission already started. Every other
+ * re-entry (a control retry, a correction, a retest) allocates the next attempt.
+ */
+function roleAttempt(history: VerifiedRunHistory, role: WorkflowRole): number {
+  const sessions = history.derived.roleSessions.filter((session) => session.role === role);
+  const latest = sessions[sessions.length - 1];
+  if (latest === undefined) {
+    return 1;
+  }
+  const last = lastWorkflowTransition(history);
+  if (last !== null && last.route === 'resume' && last.to === history.derived.state) {
+    return latest.attempt;
+  }
+  return latest.attempt + 1;
 }
 
 function retriesUsed(history: RunHistoryDerivedState, role: WorkflowRole): number {
@@ -470,7 +534,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       return;
     }
     const prompt = yield* promptFor('architect', history);
-    const attempt = countSessions(history.derived, 'architect') + 1;
+    const attempt = roleAttempt(history, 'architect');
     const settled = yield* performRoleTurn('architect', attempt, prompt, null);
     if (!settled.controlValid) {
       yield* recordControlRetry('architect', settled.controlProblem ?? 'invalid control envelope');
@@ -702,7 +766,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       return;
     }
     const prompt = yield* promptFor('coder', history);
-    const attempt = countSessions(history.derived, 'coder') + 1;
+    const attempt = roleAttempt(history, 'coder');
     const settled = yield* performRoleTurn('coder', attempt, prompt, null);
     if (!settled.controlValid) {
       yield* recordControlRetry('coder', settled.controlProblem ?? 'invalid control envelope');
@@ -844,7 +908,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       return;
     }
     const prompt = yield* promptFor('tester', history);
-    const attempt = countSessions(history.derived, 'tester') + 1;
+    const attempt = roleAttempt(history, 'tester');
     const baseUrl = held.baseUrl;
     const settled = yield* performRoleTurn('tester', attempt, prompt, baseUrl);
     if (!settled.controlValid) {
@@ -918,7 +982,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       publicationEligible: publicationReport.eligible,
     };
     const prompt = yield* promptFor('reviewer', history);
-    const attempt = countSessions(history.derived, 'reviewer') + 1;
+    const attempt = roleAttempt(history, 'reviewer');
     const settled = yield* performRoleTurn('reviewer', attempt, prompt, null);
     if (!settled.controlValid) {
       yield* recordControlRetry('reviewer', settled.controlProblem ?? 'invalid control envelope');
@@ -1055,7 +1119,134 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     }
   });
 
-  const blockOnFailure = Effect.fn('advanceRun.blockOnFailure')(function* (message: string) {
+  /**
+   * Observes the repository lease for the target repository. The lease store is
+   * optional, so a caller without it reports an unobserved lock rather than
+   * guessing; a live or indeterminate lease blocks recovery.
+   */
+  const observeRecoveryLease = Effect.fn('advanceRun.observeRecoveryLease')(function* () {
+    const store = yield* Effect.serviceOption(RepositoryLeaseStore);
+    const identity = yield* Effect.serviceOption(RepositoryHostIdentity);
+    if (Option.isNone(store) || Option.isNone(identity)) {
+      return 'unobserved' as const;
+    }
+    const leasePath = join(
+      configuration.targetRepository,
+      RUN_STORAGE_DIRECTORY_NAME,
+      REPOSITORY_LEASE_FILENAME,
+    );
+    const state = yield* store.value.statPath(leasePath).pipe(Effect.result);
+    if (Result.isFailure(state)) {
+      return 'indeterminate' as const;
+    }
+    const fileState = state.success;
+    if (fileState.kind === 'missing') {
+      return 'none' as const;
+    }
+    if (fileState.kind === 'not-regular-file') {
+      return 'indeterminate' as const;
+    }
+    const text = yield* Effect.try({
+      try: () => new TextDecoder('utf-8', { fatal: true }).decode(fileState.bytes),
+      catch: () => 'not-utf8' as const,
+    }).pipe(Effect.result);
+    if (Result.isFailure(text)) {
+      return 'indeterminate' as const;
+    }
+    const decoded = Schema.decodeUnknownResult(RepositoryLeaseJson)(text.success);
+    if (Result.isFailure(decoded)) {
+      return 'indeterminate' as const;
+    }
+    const record = decoded.success;
+    const now = yield* DateTime.now;
+    if (!repositoryLeaseExpired(record, now)) {
+      return 'live' as const;
+    }
+    const hostIdentity = yield* identity.value.hostIdentity;
+    const processObservation = yield* identity.value.probeProcess(record.processId);
+    return classifyRepositoryLeaseOwner(record, hostIdentity, processObservation) === 'dead'
+      ? ('expired-dead' as const)
+      : ('indeterminate' as const);
+  });
+
+  const observeRecoveryFacts = Effect.fn('advanceRun.observeRecoveryFacts')(function* (
+    history: VerifiedRunHistory,
+    failureReason: RoleConversationFailureReason | null,
+  ): Effect.fn.Return<RecoveryFacts, never, RunGit> {
+    const ready = history.derived.worktreeReady;
+    let worktree: WorktreeObservation | null = null;
+    let implementation: ImplementationObservation | null = null;
+    let observationProblem: string | null = null;
+    if (ready !== null) {
+      const git = yield* RunGit;
+      const observedWorktree = yield* git
+        .readWorktree({
+          repositoryRoot: configuration.targetRepository,
+          workspace: ready.workspace,
+          runId,
+        })
+        .pipe(Effect.result);
+      if (Result.isFailure(observedWorktree)) {
+        observationProblem = observedWorktree.failure.message;
+      } else {
+        worktree = observedWorktree.success;
+        const observedImplementation = yield* git
+          .observeImplementation({
+            workspace: ready.workspace,
+            taskBranch: ready.taskBranch,
+            baseCommit: ready.baseCommit,
+            runId,
+          })
+          .pipe(Effect.result);
+        if (Result.isFailure(observedImplementation)) {
+          observationProblem = observedImplementation.failure.message;
+        } else {
+          implementation = observedImplementation.success;
+        }
+      }
+    }
+    const lease = yield* observeRecoveryLease();
+    return {
+      journalIntact: true,
+      lease,
+      worktree,
+      implementation,
+      observationProblem,
+      failureReason,
+    };
+  });
+
+  const recordRecoveryDisposition = Effect.fn('advanceRun.recordRecoveryDisposition')(function* (
+    classification: RecoveryClassification,
+  ) {
+    yield* appendRunEvent({
+      runDirectory,
+      runId,
+      createIfMissing: false,
+      build: () =>
+        Effect.succeed({
+          type: 'recovery-recorded',
+          payload: {
+            disposition: classification.disposition,
+            reason: classification.reason,
+          },
+        } as const),
+    });
+  });
+
+  const recoveryReportOf = (
+    classification: RecoveryClassification,
+    problem: string | null,
+  ): RunWorkflowRecoveryReport => ({
+    disposition: classification.disposition,
+    reason: classification.reason,
+    problem,
+  });
+
+  const blockOnFailure = Effect.fn('advanceRun.blockOnFailure')(function* (
+    message: string,
+    failureReason: RoleConversationFailureReason | null = null,
+  ) {
     const result = yield* readVerifiedRunHistory({
       runDirectory,
       runId,
@@ -1067,6 +1258,8 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     const history = result.success;
     const state = history.derived.state;
     if (state !== null && isActiveWorkflowState(state)) {
+      const classification = classifyRoleFailure(failureReason);
+      yield* recordRecoveryDisposition(classification);
       const blocked = yield* transitionWorkflow({
         runDirectory,
         runId,
@@ -1084,7 +1277,13 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
         runId,
         createIfMissing: false,
       });
-      return summaryOf(after);
+      return {
+        ...summaryOf(after),
+        recovery: recoveryReportOf(
+          classification,
+          classification.disposition === 'human_recovery' ? classification.reason : null,
+        ),
+      };
     }
     return summaryOf(history);
   });
@@ -1111,13 +1310,42 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
           checkpoint !== null &&
           isActiveWorkflowState(checkpoint)
         ) {
-          yield* transitionWorkflow({
+          /**
+           * The recorded checkpoint is not a blind prerequisite. Foundry
+           * reconciles the checkpoint against durable Git, lock, journal, and
+           * owned-session evidence before it resumes: a settled fact is
+           * accepted, an owned in-progress operation keeps waiting, a proven
+           * side-effect-free attempt retries, and ambiguous evidence stops for a
+           * person instead of guessing.
+           */
+          const facts = yield* observeRecoveryFacts(history, null);
+          const classification = classifyRecovery(history.derived, facts);
+          yield* recordRecoveryDisposition(classification);
+          if (
+            classification.disposition === 'accept' ||
+            classification.disposition === 'retry' ||
+            classification.disposition === 'continue_waiting'
+          ) {
+            yield* transitionWorkflow({
+              runDirectory,
+              runId,
+              request: { route: 'resume', prerequisiteValid: true },
+            });
+            resumed = true;
+            continue;
+          }
+          const after = yield* readVerifiedRunHistory({
             runDirectory,
             runId,
-            request: { route: 'resume', prerequisiteValid: true },
+            createIfMissing: false,
           });
-          resumed = true;
-          continue;
+          return {
+            ...summaryOf(after),
+            recovery: recoveryReportOf(
+              classification,
+              classification.disposition === 'human_recovery' ? classification.reason : null,
+            ),
+          };
         }
         return summaryOf(history);
       }
@@ -1175,7 +1403,10 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       }
       const step = yield* runStage(state, history).pipe(Effect.result);
       if (Result.isFailure(step)) {
-        return yield* blockOnFailure(errorMessage(step.failure));
+        return yield* blockOnFailure(
+          errorMessage(step.failure),
+          step.failure instanceof RoleConversationError ? step.failure.reason : null,
+        );
       }
     }
     return yield* blockOnFailure(
