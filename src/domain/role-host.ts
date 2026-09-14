@@ -75,6 +75,32 @@ export type RoleHostFilesystemProfile = (typeof ROLE_HOST_FILESYSTEM_PROFILES)[n
 
 export const ROLE_HOST_NETWORK_PROFILES = ['network_denied', 'runtime_origin_only'] as const;
 
+/**
+ * Build identifier for the Foundry-bundled role host. The bundled host is
+ * Foundry's own ship: launch argv, model catalogs, and credential names are
+ * hardcoded per harness, so one version identifies the whole adapter
+ * contract. Bump it when the catalog or protocol surface changes.
+ */
+export const BUNDLED_ROLE_HOST_ADAPTER_VERSION = 'bundled-1' as const;
+
+/**
+ * The bundled host's static capability attestation. Foundry ships the host,
+ * so protocol, resumable sessions, runnable roles, and enforceable profiles
+ * are known without spawning anything; `evaluateRoleHostCapabilities`
+ * guards this table against drift from the required role/profile matrix.
+ */
+export const BUNDLED_ROLE_HOST_CAPABILITIES: RoleHostCapabilitiesResponse = {
+  schemaVersion: ROLE_HOST_PROTOCOL_VERSION,
+  protocol: ROLE_HOST_PROTOCOL_NAME,
+  resumable: true,
+  availableRoles: [...ROLE_HOST_ROLES],
+  capabilityProfiles: {
+    filesystem: [...ROLE_HOST_FILESYSTEM_PROFILES],
+    network: [...ROLE_HOST_NETWORK_PROFILES],
+  },
+  adapterVersion: BUNDLED_ROLE_HOST_ADAPTER_VERSION,
+};
+
 export type RoleHostNetworkProfile = (typeof ROLE_HOST_NETWORK_PROFILES)[number];
 
 export interface RoleHostRoleRequirement {

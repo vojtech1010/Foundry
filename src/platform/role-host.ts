@@ -1,9 +1,13 @@
 import { spawn } from 'node:child_process';
+import { accessSync, constants } from 'node:fs';
+import { delimiter, join } from 'node:path';
 
 import { Duration, Effect, Layer, Schema } from 'effect';
 
 import {
   RoleHost,
+  RoleHostBinaryResolver,
+  RoleHostCapabilityError,
   RoleHostLauncher,
   RoleHostOperationalError,
 } from '../application/role-conversations/index.js';
@@ -36,16 +40,10 @@ const STDERR_CAPTURE_LIMIT = 2_048;
 type ProcessOutputChunk = Buffer | string;
 
 export interface RoleHostProcessOptions {
-  /**
-   * Explicit launch argv for the legacy externally configured adapter.
-   * Required when `harness` is absent; ignored when `harness` is present so
-   * launch details are never carried in configuration.
-   */
-  readonly command?: CommandVector;
   /** Per-role routing: resolve the hardcoded catalog argv for this harness. */
-  readonly harness?: RoleHarnessName;
-  /** The model the harness must serve; required with `harness`. */
-  readonly model?: string;
+  readonly harness: RoleHarnessName;
+  /** The model the harness must serve. */
+  readonly model: string;
   readonly cwd: string;
   readonly environmentAllowlist: ReadonlyArray<string>;
   readonly timeoutMs: number;
@@ -56,6 +54,37 @@ export interface RoleHarnessCatalogEntry {
   readonly executable: string;
   readonly args: ReadonlyArray<string>;
   readonly models: ReadonlyArray<string>;
+  /**
+   * Provider credential names the Foundry process forwards to this harness.
+   * Values are read from Foundry's own environment at launch and never reach
+   * configuration, prompts, or logs; see the role-host protocol contracts.
+   */
+  readonly environmentAllowlist: ReadonlyArray<string>;
+}
+
+/**
+ * The exact provider credential names Foundry reads for bundled harnesses.
+ * Both shipped harnesses serve OpenAI models, so the set is one name; it is
+ * documented in `docs/features/protocol-contracts.md` and any addition is a
+ * deliberate catalog change, never per-project configuration.
+ */
+export const BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES: ReadonlyArray<string> = ['OPENAI_API_KEY'];
+
+/**
+ * Candidate executable names per harness and platform. Only executable
+ * resolution varies by platform; argv, catalogs, and routing are identical
+ * on Linux and Windows. Windows probes PATHEXT-style names because vendor
+ * CLIs may install as `.exe`, `.cmd`, or `.bat` shims.
+ */
+export function bundledExecutableCandidates(
+  harness: RoleHarnessName,
+  platform: NodeJS.Platform,
+): ReadonlyArray<string> {
+  const entry = ROLE_HARNESS_CATALOG[harness];
+  if (platform === 'win32') {
+    return [entry.executable, `${entry.executable}.exe`, `${entry.executable}.cmd`];
+  }
+  return [entry.executable];
 }
 
 /**
@@ -67,8 +96,18 @@ export interface RoleHarnessCatalogEntry {
  * the bundling work in task 054.
  */
 export const ROLE_HARNESS_CATALOG: Readonly<Record<RoleHarnessName, RoleHarnessCatalogEntry>> = {
-  codex: { executable: 'codex', args: [], models: ['gpt-5-codex'] },
-  opencode: { executable: 'opencode', args: [], models: ['openai/gpt-5'] },
+  codex: {
+    executable: 'codex',
+    args: [],
+    models: ['gpt-5-codex'],
+    environmentAllowlist: BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES,
+  },
+  opencode: {
+    executable: 'opencode',
+    args: [],
+    models: ['openai/gpt-5'],
+    environmentAllowlist: BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES,
+  },
 };
 
 /**
@@ -88,45 +127,28 @@ const resolveEffectiveCommand = Effect.fn('roleHost.resolveEffectiveCommand')(fu
   options: RoleHostProcessOptions,
   operation: RoleHostOperation,
 ): Effect.fn.Return<CommandVector, RoleHostOperationalError> {
-  if (options.harness !== undefined) {
-    const entry = ROLE_HARNESS_CATALOG[options.harness];
-    if (entry === undefined) {
-      return yield* new RoleHostOperationalError({
-        message: `Unknown role harness "${options.harness}": Foundry supports ${ROLE_HARNESS_NAMES.join(', ')}.`,
-        operation,
-      });
-    }
-    const model = options.model?.trim() ?? '';
-    if (model.length === 0) {
-      return yield* new RoleHostOperationalError({
-        message: `Role harness "${options.harness}" requires a non-empty model; Foundry never invents a substitute model.`,
-        operation,
-      });
-    }
-    if (!entry.models.includes(model)) {
-      return yield* new RoleHostOperationalError({
-        message: `Unknown model "${model}" for role harness "${options.harness}": supported models are ${entry.models.join(', ')}.`,
-        operation,
-      });
-    }
-    const command: CommandVector = [entry.executable, ...entry.args];
-    return command;
-  }
-  if (options.model !== undefined) {
+  const entry = ROLE_HARNESS_CATALOG[options.harness];
+  if (entry === undefined) {
     return yield* new RoleHostOperationalError({
-      message:
-        'A role host model without a harness cannot be resolved; configure both harness and model per role.',
+      message: `Unknown role harness "${options.harness}": Foundry supports ${ROLE_HARNESS_NAMES.join(', ')}.`,
       operation,
     });
   }
-  const [executable, ...rest] = options.command ?? [];
-  if (executable === undefined) {
+  const model = options.model.trim();
+  if (model.length === 0) {
     return yield* new RoleHostOperationalError({
-      message: 'The configured role host command is empty.',
+      message: `Role harness "${options.harness}" requires a non-empty model; Foundry never invents a substitute model.`,
       operation,
     });
   }
-  return [executable, ...rest];
+  if (!entry.models.includes(model)) {
+    return yield* new RoleHostOperationalError({
+      message: `Unknown model "${model}" for role harness "${options.harness}": supported models are ${entry.models.join(', ')}.`,
+      operation,
+    });
+  }
+  const command: CommandVector = [entry.executable, ...entry.args];
+  return command;
 });
 
 interface ResponseDocumentSchema extends Schema.Constraint {
@@ -144,6 +166,14 @@ function forwardedEnvironment(names: ReadonlyArray<string>) {
     if (value !== undefined) {
       environment[name] = value;
     }
+  }
+  // Bundled harness CLIs resolve through the process PATH, so PATH is always
+  // forwarded alongside the credential names. This keeps spawned launches
+  // coherent with doctor's PATH-based binary verification; PATH itself
+  // carries directory names, never credential values.
+  const path = process.env.PATH;
+  if (path !== undefined) {
+    environment.PATH = path;
   }
   return environment;
 }
@@ -326,5 +356,61 @@ export const RoleHostLauncherLive: Layer.Layer<RoleHostLauncher> = Layer.succeed
   RoleHostLauncher,
   RoleHostLauncher.of({
     launch: (options) => roleHostProcessLayer(options),
+  }),
+);
+
+function isExecutableFile(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Live bundled-harness resolution: searches the Foundry process PATH for the
+ * hardcoded per-harness, per-platform executable candidates and checks model
+ * catalog membership. Used by doctor verification; live runs resolve through
+ * the spawning adapter instead.
+ */
+export const RoleHostBinaryResolverLive: Layer.Layer<RoleHostBinaryResolver> = Layer.succeed(
+  RoleHostBinaryResolver,
+  RoleHostBinaryResolver.of({
+    resolveExecutable: (harness) =>
+      Effect.gen(function* () {
+        const candidates = bundledExecutableCandidates(harness, process.platform);
+        const directories = (process.env.PATH ?? '').split(delimiter);
+        for (const directory of directories) {
+          if (directory.length === 0) {
+            continue;
+          }
+          for (const name of candidates) {
+            const candidate = join(directory, name);
+            const executable = yield* Effect.sync(() => isExecutableFile(candidate));
+            if (executable) {
+              return candidate;
+            }
+          }
+        }
+        return yield* new RoleHostCapabilityError({
+          message: `Bundled role harness "${harness}" executable (${candidates.join(', ')}) was not found on the process PATH.`,
+          reason: 'unavailable',
+        });
+      }),
+    resolveModel: (harness, model) =>
+      Effect.gen(function* () {
+        const entry = ROLE_HARNESS_CATALOG[harness];
+        const trimmed = model.trim();
+        if (entry === undefined || !entry.models.includes(trimmed)) {
+          const supported =
+            entry === undefined ? ROLE_HARNESS_NAMES.join(', ') : entry.models.join(', ');
+          return yield* new RoleHostCapabilityError({
+            message: `Unknown model "${model}" for bundled role harness "${harness}": supported models are ${supported}.`,
+            reason: 'unavailable',
+          });
+        }
+        return trimmed;
+      }),
   }),
 );

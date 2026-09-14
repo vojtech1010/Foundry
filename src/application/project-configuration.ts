@@ -7,7 +7,6 @@ import {
   PUBLICATION_DRAFT,
   PUBLICATION_MAINTAINERS_CAN_MODIFY,
   ROLE_HARNESS_NAMES,
-  ROLE_HARNESS_PROTOCOL,
   RUNTIME_DATA_POLICY,
   RUNTIME_TESTER_ACCESS,
   TASK_ID_PLACEHOLDER,
@@ -16,7 +15,7 @@ import {
 } from '../domain/project-configuration.js';
 
 import type { SchemaIssue } from 'effect';
-import type { CommandVector, ProjectConfiguration } from '../domain/project-configuration.js';
+import type { ProjectConfiguration } from '../domain/project-configuration.js';
 
 const PositiveInteger = Schema.Int.check(Schema.isGreaterThan(0));
 
@@ -25,12 +24,6 @@ const NonNegativeInteger = Schema.Natural;
 const CommandVectorSchema = Schema.NonEmptyArray(Schema.NonEmptyString);
 
 const StringListSchema = Schema.Array(Schema.NonEmptyString);
-
-const RoleHarnessSchema = Schema.Struct({
-  protocol: Schema.Literal(ROLE_HARNESS_PROTOCOL),
-  command: CommandVectorSchema,
-  environmentAllowlist: StringListSchema,
-});
 
 /**
  * A model string is stored trimmed and must be non-empty after trimming.
@@ -121,7 +114,6 @@ const ProjectConfigurationInputSchema = Schema.Struct({
   sourceRemote: Schema.NonEmptyString,
   sourceBranch: Schema.NonEmptyString,
   taskBranchPolicy: Schema.NonEmptyString,
-  roleHarness: RoleHarnessSchema,
   roles: RolesSchema,
   timeouts: TimeoutsSchema,
   retryBudgets: RetryBudgetsSchema,
@@ -142,8 +134,6 @@ export class InvalidProjectConfiguration extends Schema.TaggedError<InvalidProje
     field: Schema.optional(Schema.String),
   },
 ) {}
-
-export type ResolvedProjectConfiguration = ProjectConfiguration;
 
 function invalidProjectConfiguration(
   detail: string,
@@ -210,18 +200,6 @@ function fromSchemaError(error: Schema.SchemaError): InvalidProjectConfiguration
   );
 }
 
-function containsPathSeparator(executable: string): boolean {
-  return executable.includes('/') || executable.includes('\\');
-}
-
-function resolveHarnessCommand(configDirectory: string, command: CommandVector): CommandVector {
-  const [executable, ...rest] = command;
-  if (!containsPathSeparator(executable)) {
-    return command;
-  }
-  return [resolve(configDirectory, executable), ...rest];
-}
-
 export const decodeProjectConfiguration = Effect.fn('decodeProjectConfiguration')(function* (
   document: Schema.Json,
   configDirectory: string,
@@ -284,10 +262,6 @@ export const decodeProjectConfiguration = Effect.fn('decodeProjectConfiguration'
       redactionPatterns: [...HARDCODED_ARTIFACT_BOUNDS.redactionPatterns],
     },
     targetRepository: resolve(configDirectory, decoded.targetRepository),
-    roleHarness: {
-      ...decoded.roleHarness,
-      command: resolveHarnessCommand(configDirectory, decoded.roleHarness.command),
-    },
     projectProfile: {
       ...decoded.projectProfile,
       guidancePaths: decoded.projectProfile.guidancePaths.map((guidancePath) =>

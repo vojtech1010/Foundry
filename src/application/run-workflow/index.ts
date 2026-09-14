@@ -53,6 +53,7 @@ import { handleReviewerTurn } from '../reviewer-outcomes/index.js';
 import {
   RoleConversationError,
   RoleHostLauncher,
+  launchOptionsForRole,
   stopRoleSession,
 } from '../role-conversations/index.js';
 import { publishResultPr } from '../result-publication/index.js';
@@ -459,13 +460,12 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     const deadline = DateTime.formatIso(
       DateTime.addDuration(Duration.millis(configuration.timeouts.roleMs))(now),
     );
-    const hostLayer = launcher.launch({
-      command: configuration.roleHarness.command,
+    const launchOptions = launchOptionsForRole({
+      configuration,
+      role,
       cwd: configuration.targetRepository,
-      environmentAllowlist: configuration.roleHarness.environmentAllowlist,
-      timeoutMs: configuration.timeouts.commandMs,
-      maxOutputBytes: configuration.artifacts.maxRoleHandoffBytes,
     });
+    const hostLayer = launcher.launch(launchOptions);
     const governedTurn = {
       runDirectory,
       runId,
@@ -473,7 +473,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       attempt,
       generation,
       locations,
-      environmentAllowlist: configuration.roleHarness.environmentAllowlist,
+      environmentAllowlist: launchOptions.environmentAllowlist,
       prompt,
       deadline,
       pollMs: configuration.timeouts.pollMs,

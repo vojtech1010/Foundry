@@ -10,6 +10,7 @@ import {
   decodeProjectConfiguration,
 } from '../src/application/project-configuration.js';
 import {
+  BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES,
   ROLE_HARNESS_NAMES,
   type RoleHarnessSelections,
 } from '../src/domain/project-configuration.js';
@@ -76,11 +77,6 @@ function validDocument() {
     sourceRemote: 'origin',
     sourceBranch: 'main',
     taskBranchPolicy: 'foundry/<task-id>',
-    roleHarness: {
-      protocol: 'foundry-role-host-v1',
-      command: ['foundry-role-host'],
-      environmentAllowlist: ['OPENAI_API_KEY'],
-    },
     roles: validRoles(),
     timeouts: {
       roleMs: 1800000,
@@ -247,11 +243,21 @@ describe('per-role harness and model contract', () => {
     }),
   );
 
-  it.effect('keeps the legacy roleHarness block alongside per-role selections', () =>
+  it.effect('rejects the removed roleHarness block as an unknown field', () =>
     Effect.gen(function* () {
-      const decoded = yield* decodeProjectConfiguration(validDocument(), configDirectory);
-      expect(decoded.roleHarness.protocol).toBe('foundry-role-host-v1');
-      expect(decoded.roles.architect.harness).toBe('codex');
+      const error = yield* decodeProjectConfiguration(
+        {
+          ...validDocument(),
+          roleHarness: {
+            protocol: 'foundry-role-host-v1',
+            command: ['foundry-role-host'],
+            environmentAllowlist: ['OPENAI_API_KEY'],
+          },
+        },
+        configDirectory,
+      ).pipe(Effect.flip);
+      expect(error).toBeInstanceOf(InvalidProjectConfiguration);
+      expect(error.field).toBe('roleHarness');
     }),
   );
 });
@@ -303,9 +309,8 @@ describe('per-role routing', () => {
       });
       expect(options.harness).toBe('opencode');
       expect(options.model).toBe('openai/gpt-5');
-      expect(options.command).toBeUndefined();
       expect(options.cwd).toBe(configuration.targetRepository);
-      expect(options.environmentAllowlist).toEqual(configuration.roleHarness.environmentAllowlist);
+      expect(options.environmentAllowlist).toEqual([...BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES]);
       expect(options.timeoutMs).toBe(configuration.timeouts.commandMs);
       expect(options.maxOutputBytes).toBe(configuration.artifacts.maxRoleHandoffBytes);
 
@@ -362,11 +367,13 @@ describe('role-host adapter catalog', () => {
     }).pipe(Effect.provide(RoleHostLauncherLive)),
   );
 
-  it.effect('fails closed when the model is missing beside a harness', () =>
+  it.effect('fails closed on an empty model beside a harness', () =>
     Effect.gen(function* () {
       const launcher = yield* RoleHostLauncher;
+      // A missing model is a type error at the launch seam; only empty or
+      // whitespace strings can still reach the adapter, which rejects them.
       const incomplete: Array<Pick<RoleHostLaunchOptions, 'harness' | 'model'>> = [
-        { harness: 'codex', model: undefined },
+        { harness: 'codex', model: '' },
         { harness: 'codex', model: '   ' },
       ];
       for (const options of incomplete) {
@@ -383,49 +390,6 @@ describe('role-host adapter catalog', () => {
         }).pipe(Effect.provide(hostLayer), Effect.flip);
         expect(error).toBeInstanceOf(RoleHostOperationalError);
         expect(error.message).toContain('requires a non-empty model');
-      }
-    }).pipe(Effect.provide(RoleHostLauncherLive)),
-  );
-
-  it.effect('fails closed on a model without a harness', () =>
-    Effect.gen(function* () {
-      const launcher = yield* RoleHostLauncher;
-      const hostLayer = launcher.launch({
-        model: 'gpt-5-codex',
-        cwd: configDirectory,
-        environmentAllowlist: [],
-        timeoutMs: 5_000,
-        maxOutputBytes: 65_536,
-      });
-      const error = yield* Effect.gen(function* () {
-        const host = yield* RoleHost;
-        return yield* host.capabilities({ schemaVersion: ROLE_HOST_PROTOCOL_VERSION });
-      }).pipe(Effect.provide(hostLayer), Effect.flip);
-      expect(error).toBeInstanceOf(RoleHostOperationalError);
-      expect(error.message).toContain('without a harness');
-    }).pipe(Effect.provide(RoleHostLauncherLive)),
-  );
-
-  it.effect('keeps serving the legacy explicit command path', () =>
-    Effect.gen(function* () {
-      const directory = mkdtempSync(join(tmpdir(), 'foundry-legacy-harness-'));
-      try {
-        const launcher = yield* RoleHostLauncher;
-        const hostLayer = launcher.launch({
-          command: [process.execPath, FAKE_ROLE_HOST, 'settled', ''],
-          cwd: directory,
-          environmentAllowlist: ['PATH'],
-          timeoutMs: 30_000,
-          maxOutputBytes: 1_048_576,
-        });
-        const report = yield* Effect.gen(function* () {
-          const host = yield* RoleHost;
-          return yield* host.capabilities({ schemaVersion: ROLE_HOST_PROTOCOL_VERSION });
-        }).pipe(Effect.provide(hostLayer));
-        expect(report.protocol).toBe('foundry-role-host-v1');
-        expect(report.adapterVersion).toBe('fake-1');
-      } finally {
-        rmSync(directory, { recursive: true, force: true });
       }
     }).pipe(Effect.provide(RoleHostLauncherLive)),
   );

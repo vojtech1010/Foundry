@@ -4,8 +4,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Layer } from 'effect';
 
 import {
+  BUNDLED_ROLE_HOST_CAPABILITIES,
   ROLE_HOST_OPERATIONS,
   ROLE_HOST_PROTOCOL_VERSION,
+  ROLE_HOST_ROLES,
   evaluateRoleHostCapabilities,
   resolveRoleHostRoute,
   roleHostEventsAreOrdered,
@@ -33,11 +35,8 @@ import type {
   RoleHostSubmitRequest,
   RoleHostSubmitResponse,
 } from '../../domain/role-host.js';
-import type {
-  CommandVector,
-  ProjectConfiguration,
-  RoleHarnessName,
-} from '../../domain/project-configuration.js';
+import { BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES } from '../../domain/project-configuration.js';
+import type { ProjectConfiguration, RoleHarnessName } from '../../domain/project-configuration.js';
 import type { RoleTurnLocations } from '../../domain/role-permissions.js';
 
 export class RoleHostOperationalError extends Schema.TaggedError<RoleHostOperationalError>()(
@@ -94,20 +93,14 @@ export class RoleHost extends Context.Service<
 
 export interface RoleHostLaunchOptions {
   /**
-   * Explicit launch argv for the legacy externally configured adapter. It is
-   * required when `harness` is absent; when `harness` is present the adapter
-   * resolves the hardcoded catalog argv for that harness and this command is
-   * ignored, so launch details are never carried in configuration.
+   * Per-role routing: the harness to launch for the role. The adapter
+   * resolves its hardcoded catalog argv for that harness and validates the
+   * model against the harness catalog, failing closed on unknown models.
+   * Launch details are never carried in configuration.
    */
-  readonly command?: CommandVector;
-  /**
-   * Per-role routing: the harness to launch for the role. Requires `model`;
-   * the adapter validates the model against the harness catalog and fails
-   * closed on unknown models.
-   */
-  readonly harness?: RoleHarnessName;
-  /** The model the harness must serve; required with `harness`. */
-  readonly model?: string;
+  readonly harness: RoleHarnessName;
+  /** The model the harness must serve. */
+  readonly model: string;
   readonly cwd: string;
   readonly environmentAllowlist: ReadonlyArray<string>;
   readonly timeoutMs: number;
@@ -121,6 +114,26 @@ export class RoleHostLauncher extends Context.Service<
   }
 >()('foundry/application/role-conversations/Launcher') {}
 
+/**
+ * Resolves bundled harness executables and models without spawning anything.
+ * The platform implementation searches the process PATH for the hardcoded
+ * per-harness, per-platform executable candidates and checks model catalog
+ * membership. Doctor verification consumes this; live runs resolve through
+ * the spawning adapter instead.
+ */
+export class RoleHostBinaryResolver extends Context.Service<
+  RoleHostBinaryResolver,
+  {
+    readonly resolveExecutable: (
+      harness: RoleHarnessName,
+    ) => Effect.Effect<string, RoleHostCapabilityError>;
+    readonly resolveModel: (
+      harness: RoleHarnessName,
+      model: string,
+    ) => Effect.Effect<string, RoleHostCapabilityError>;
+  }
+>()('foundry/application/role-conversations/BinaryResolver') {}
+
 export interface RoleHostRouteLaunchOptions {
   readonly configuration: ProjectConfiguration;
   readonly role: RoleHostRole;
@@ -131,11 +144,12 @@ export interface RoleHostRouteLaunchOptions {
 
 /**
  * Builds launch options for one role from the configuration's per-role
- * harness and model selection. The returned options carry `harness` and
- * `model` without an explicit `command`, so the adapter resolves its
- * hardcoded catalog argv and validates the model. Timeouts and output bounds
- * default to the configured command and handoff budgets. This is the stable
- * seam for per-role launching that reporting and the bundled host consume.
+ * harness and model selection. The returned options carry the exact
+ * configured `harness` and `model` with provider credential names from the
+ * hardcoded bundled set, so the adapter resolves its catalog argv and
+ * validates the model. Timeouts and output bounds default to the configured
+ * command and handoff budgets. This is the stable seam for per-role
+ * launching that reporting and the bundled host consume.
  */
 export function launchOptionsForRole(options: RoleHostRouteLaunchOptions): RoleHostLaunchOptions {
   const route = resolveRoleHostRoute(options.configuration.roles, options.role);
@@ -143,7 +157,7 @@ export function launchOptionsForRole(options: RoleHostRouteLaunchOptions): RoleH
     harness: route.harness,
     model: route.model,
     cwd: options.cwd,
-    environmentAllowlist: options.configuration.roleHarness.environmentAllowlist,
+    environmentAllowlist: [...BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES],
     timeoutMs: options.timeoutMs ?? options.configuration.timeouts.commandMs,
     maxOutputBytes: options.maxOutputBytes ?? options.configuration.artifacts.maxRoleHandoffBytes,
   };
@@ -183,43 +197,109 @@ export interface RoleHostCapabilityPreflightOptions {
   readonly runId?: string;
 }
 
+/**
+ * Gates a run on the bundled role host: every distinct configured harness is
+ * launched from its hardcoded catalog argv (never an external command) and
+ * must attest the required protocol, resumable sessions, roles, and
+ * capability profiles. The model each role names is validated by the adapter
+ * at every launch and fails closed against the harness catalog. Returns the
+ * first harness report; callers that only gate a run discard it.
+ */
 export const preflightRoleHostCapabilities = Effect.fn('preflightRoleHostCapabilities')(function* (
   options: RoleHostCapabilityPreflightOptions,
 ): Effect.fn.Return<RoleHostCapabilitiesResponse, RoleHostCapabilityError, RoleHostLauncher> {
   const launcher = yield* RoleHostLauncher;
-  const hostLayer = launcher.launch({
-    command: options.configuration.roleHarness.command,
-    cwd: options.configuration.targetRepository,
-    environmentAllowlist: options.configuration.roleHarness.environmentAllowlist,
-    timeoutMs: options.configuration.timeouts.commandMs,
-    maxOutputBytes: options.configuration.artifacts.maxRoleHandoffBytes,
-  });
+  const harnesses = new Map<RoleHarnessName, string>();
+  for (const role of ROLE_HOST_ROLES) {
+    const selection = options.configuration.roles[role];
+    if (!harnesses.has(selection.harness)) {
+      harnesses.set(selection.harness, selection.model);
+    }
+  }
 
-  const report = yield* Effect.gen(function* () {
-    const host = yield* RoleHost;
-    return yield* host.capabilities({ schemaVersion: ROLE_HOST_PROTOCOL_VERSION });
-  }).pipe(
-    Effect.provide(hostLayer),
-    Effect.mapError(
-      (error) =>
-        new RoleHostCapabilityError({
-          message: `The configured role host did not report usable capabilities: ${error.message}`,
-          reason: 'unavailable',
-          runId: options.runId,
-        }),
-    ),
-  );
+  let first: RoleHostCapabilitiesResponse | undefined;
+  for (const [harness, model] of harnesses) {
+    const hostLayer = launcher.launch({
+      harness,
+      model,
+      cwd: options.configuration.targetRepository,
+      environmentAllowlist: [...BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES],
+      timeoutMs: options.configuration.timeouts.commandMs,
+      maxOutputBytes: options.configuration.artifacts.maxRoleHandoffBytes,
+    });
 
-  const evaluation = evaluateRoleHostCapabilities(report);
-  if (!evaluation.ok) {
+    const report = yield* Effect.gen(function* () {
+      const host = yield* RoleHost;
+      return yield* host.capabilities({ schemaVersion: ROLE_HOST_PROTOCOL_VERSION });
+    }).pipe(
+      Effect.provide(hostLayer),
+      Effect.mapError(
+        (error) =>
+          new RoleHostCapabilityError({
+            message: `The bundled role host (harness "${harness}") did not report usable capabilities: ${error.message}`,
+            reason: 'unavailable',
+            runId: options.runId,
+          }),
+      ),
+    );
+
+    const evaluation = evaluateRoleHostCapabilities(report);
+    if (!evaluation.ok) {
+      return yield* new RoleHostCapabilityError({
+        message: `The bundled role host (harness "${harness}") is unusable: ${evaluation.problem.detail}`,
+        reason: CAPABILITY_REASON_BY_PROBLEM[evaluation.problem.kind],
+        runId: options.runId,
+      });
+    }
+    first ??= report;
+  }
+  if (first === undefined) {
     return yield* new RoleHostCapabilityError({
-      message: evaluation.problem.detail,
-      reason: CAPABILITY_REASON_BY_PROBLEM[evaluation.problem.kind],
+      message: 'The bundled role host has no configured harness to probe.',
+      reason: 'unavailable',
       runId: options.runId,
     });
   }
-  return report;
+  return first;
 });
+
+/**
+ * Verifies the bundled role host directly, without spawning anything: every
+ * distinct configured harness binary must resolve on the process PATH, every
+ * listed model must resolve against its harness catalog, and the bundled
+ * static attestation must cover every role plus the required capability
+ * profiles. Fails closed with harness-identifying errors. Doctor consumes
+ * this; live runs gate through the spawning capability preflight instead.
+ */
+export const verifyBundledRoleHostCapabilities = Effect.fn('verifyBundledRoleHostCapabilities')(
+  function* (
+    options: RoleHostCapabilityPreflightOptions,
+  ): Effect.fn.Return<
+    RoleHostCapabilitiesResponse,
+    RoleHostCapabilityError,
+    RoleHostBinaryResolver
+  > {
+    const resolver = yield* RoleHostBinaryResolver;
+    const harnesses = new Set<RoleHarnessName>();
+    for (const role of ROLE_HOST_ROLES) {
+      const selection = options.configuration.roles[role];
+      harnesses.add(selection.harness);
+      yield* resolver.resolveModel(selection.harness, selection.model);
+    }
+    for (const harness of harnesses) {
+      yield* resolver.resolveExecutable(harness);
+    }
+    const evaluation = evaluateRoleHostCapabilities(BUNDLED_ROLE_HOST_CAPABILITIES);
+    if (!evaluation.ok) {
+      return yield* new RoleHostCapabilityError({
+        message: `The bundled role host is unusable: ${evaluation.problem.detail}`,
+        reason: CAPABILITY_REASON_BY_PROBLEM[evaluation.problem.kind],
+        runId: options.runId,
+      });
+    }
+    return BUNDLED_ROLE_HOST_CAPABILITIES;
+  },
+);
 
 export interface RoleTurnTarget {
   readonly runDirectory: string;

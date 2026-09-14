@@ -24,8 +24,10 @@ import type {
   RoleRoutingReport,
   PublicationProbe,
 } from '../readiness/index.js';
-import type { RoleHostCapabilityError, RoleHostLauncher } from '../role-conversations/index.js';
-import type { CommandVector } from '../../domain/project-configuration.js';
+import type {
+  RoleHostBinaryResolver,
+  RoleHostCapabilityError,
+} from '../role-conversations/index.js';
 import type { BranchProtectionEvidence } from '../../domain/run-locations.js';
 
 export class PreviewLocationsError extends Schema.TaggedError<PreviewLocationsError>()(
@@ -39,11 +41,6 @@ export interface PreviewSourceReport {
   readonly remote: string;
   readonly branch: string;
   readonly commit: string;
-}
-
-export interface PreviewRoleHarnessReport {
-  readonly protocol: string;
-  readonly command: CommandVector;
 }
 
 export interface PreviewArtifactsReport {
@@ -63,7 +60,6 @@ export interface PreviewLocationsReport {
   readonly source: PreviewSourceReport;
   readonly branch: string;
   readonly workspace: string;
-  readonly roleHarness: PreviewRoleHarnessReport;
   readonly roleRouting: ReadonlyArray<RoleRoutingReport>;
   readonly artifacts: PreviewArtifactsReport;
 }
@@ -84,7 +80,7 @@ export const previewRunLocations = Effect.fn('previewRunLocations')(function* (
 ): Effect.fn.Return<
   PreviewLocationsReport,
   PreviewLocationsError | ReadinessError | RoleHostCapabilityError,
-  ReadinessHost | ReadinessFiles | ReadinessGit | PublicationProbe | RoleHostLauncher
+  ReadinessHost | ReadinessFiles | ReadinessGit | PublicationProbe | RoleHostBinaryResolver
 > {
   const readiness = yield* checkReadiness({ configArg: options.configArg, cwd: options.cwd });
 
@@ -141,10 +137,6 @@ export const previewRunLocations = Effect.fn('previewRunLocations')(function* (
     },
     branch,
     workspace,
-    roleHarness: {
-      protocol: configuration.roleHarness.protocol,
-      command: configuration.roleHarness.command,
-    },
     roleRouting: resolveRoleRouting(configuration),
     artifacts: {
       root: artifactsRoot,

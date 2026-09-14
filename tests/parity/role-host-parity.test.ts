@@ -9,6 +9,7 @@ import { RoleHost } from '../../src/application/role-conversations/index.js';
 import { evaluateStandInCreateRequest } from '../../src/application/stand-in-role-host/index.js';
 import { ROLE_HOST_PROTOCOL_VERSION } from '../../src/domain/role-host.js';
 import { roleHostProcessLayer } from '../../src/platform/role-host.js';
+import { installBundledHarnessShim } from '../fixtures/role-host/bundled-harness-shim.js';
 
 import type { RoleHostCreateRequest } from '../../src/domain/role-host.js';
 
@@ -43,6 +44,7 @@ describe('role-host parity', () => {
     const workingDirectory = join(base, 'working directory');
     mkdirSync(workingDirectory, { recursive: true });
     const logPath = join(base, 'invocations.jsonl');
+    const shim = installBundledHarnessShim(FIXTURE_PATH, 'settled', logPath);
     return Effect.gen(function* () {
       process.env.FOUNDRY_FAKE_TOKEN = 'parity-token';
       process.env.FOUNDRY_FAKE_UNLISTED = 'parity-unlisted';
@@ -105,7 +107,8 @@ describe('role-host parity', () => {
     }).pipe(
       Effect.provide(
         roleHostProcessLayer({
-          command: [process.execPath, FIXTURE_PATH, 'settled', logPath],
+          harness: 'codex',
+          model: 'gpt-5-codex',
           cwd: base,
           environmentAllowlist: ['FOUNDRY_FAKE_TOKEN'],
           timeoutMs: 10_000,
@@ -116,6 +119,7 @@ describe('role-host parity', () => {
         Effect.sync(() => {
           delete process.env.FOUNDRY_FAKE_TOKEN;
           delete process.env.FOUNDRY_FAKE_UNLISTED;
+          shim.restore();
           rmSync(base, { recursive: true, force: true });
         }),
       ),

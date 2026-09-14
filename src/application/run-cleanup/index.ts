@@ -1,7 +1,11 @@
 import { Effect, Result } from 'effect';
 
 import { cleanupOutcomeOf } from '../../domain/run-cleanup.js';
-import { RoleHostLauncher, stopRoleSession } from '../role-conversations/index.js';
+import {
+  RoleHostLauncher,
+  launchOptionsForRole,
+  stopRoleSession,
+} from '../role-conversations/index.js';
 import { readVerifiedRunHistory } from '../run-history/index.js';
 import { RunIdentityStore } from '../run-identity/index.js';
 
@@ -67,13 +71,6 @@ const stopRoleSessions = Effect.fn('disposeRunResources.roleSessions')(function*
     return [];
   }
   const launcher = yield* RoleHostLauncher;
-  const hostLayer = launcher.launch({
-    command: options.configuration.roleHarness.command,
-    cwd: options.configuration.targetRepository,
-    environmentAllowlist: options.configuration.roleHarness.environmentAllowlist,
-    timeoutMs: options.configuration.timeouts.commandMs,
-    maxOutputBytes: options.configuration.artifacts.maxRoleHandoffBytes,
-  });
   const resources: Array<RunCleanupResource> = [];
   for (const session of sessions) {
     if (session.stopDisposition !== null) {
@@ -84,6 +81,14 @@ const stopRoleSessions = Effect.fn('disposeRunResources.roleSessions')(function*
       });
       continue;
     }
+    // Each recorded session stops through its own role's bundled harness.
+    const hostLayer = launcher.launch(
+      launchOptionsForRole({
+        configuration: options.configuration,
+        role: session.role,
+        cwd: options.configuration.targetRepository,
+      }),
+    );
     const stopped = yield* stopRoleSession({
       runDirectory: options.runDirectory,
       runId: options.runId,

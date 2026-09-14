@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { installBundledHarnessShim } from './fixtures/role-host/bundled-harness-shim.js';
 
 import {
   RoleHost,
@@ -50,11 +51,6 @@ function goldenDocument(targetRepository: string) {
     sourceRemote: 'origin',
     sourceBranch: 'main',
     taskBranchPolicy: 'foundry/<task-id>',
-    roleHarness: {
-      protocol: 'foundry-role-host-v1',
-      command: ['foundry-role-host'],
-      environmentAllowlist: [],
-    },
     roles: {
       architect: { harness: 'codex', model: 'gpt-5-codex' },
       coder: { harness: 'codex', model: 'gpt-5-codex' },
@@ -128,9 +124,10 @@ function setupLog() {
   };
 }
 
-function adapterLayer(scenario: string, logPath: string): Layer.Layer<RoleHost> {
+function adapterLayer(): Layer.Layer<RoleHost> {
   return roleHostProcessLayer({
-    command: [process.execPath, FIXTURE_PATH, scenario, logPath],
+    harness: 'codex',
+    model: 'gpt-5-codex',
     cwd: REPOSITORY_ROOT,
     environmentAllowlist: [],
     timeoutMs: 10_000,
@@ -241,11 +238,12 @@ describe('role-host capabilities adapter', () => {
   it.effect('executes the capabilities operation and strictly decodes the report', () =>
     Effect.gen(function* () {
       const log = setupLog();
+      const shim = installBundledHarnessShim(FIXTURE_PATH, 'settled', log.logPath);
       try {
         const report = yield* Effect.gen(function* () {
           const host = yield* RoleHost;
           return yield* host.capabilities({ schemaVersion: ROLE_HOST_PROTOCOL_VERSION });
-        }).pipe(Effect.provide(adapterLayer('settled', log.logPath)));
+        }).pipe(Effect.provide(adapterLayer()));
 
         expect(report.protocol).toBe(ROLE_HOST_PROTOCOL_NAME);
         expect(report.resumable).toBe(true);
@@ -261,6 +259,7 @@ describe('role-host capabilities adapter', () => {
         expect(invocations.map((invocation) => invocation.operation)).toEqual(['capabilities']);
         expect(invocations.at(0)?.argv.at(-1)).toBe('capabilities');
       } finally {
+        shim.restore();
         log.cleanup();
       }
     }),
@@ -270,13 +269,15 @@ describe('role-host capabilities adapter', () => {
     Effect.gen(function* () {
       for (const scenario of ['nonzero', 'malformed', 'extra-capabilities', 'unknown-role']) {
         const log = setupLog();
+        const shim = installBundledHarnessShim(FIXTURE_PATH, scenario, log.logPath);
         try {
           const error = yield* Effect.gen(function* () {
             const host = yield* RoleHost;
             yield* host.capabilities({ schemaVersion: ROLE_HOST_PROTOCOL_VERSION });
-          }).pipe(Effect.provide(adapterLayer(scenario, log.logPath)), Effect.flip);
+          }).pipe(Effect.provide(adapterLayer()), Effect.flip);
           expect(error, scenario).toBeInstanceOf(RoleHostOperationalError);
         } finally {
+          shim.restore();
           log.cleanup();
         }
       }
@@ -349,13 +350,15 @@ describe('role-host capability preflight', () => {
     Effect.gen(function* () {
       const configuration = yield* decodeProjectConfiguration(goldenDocument('/target'), '/work');
       const log = setupLog();
+      const shim = installBundledHarnessShim(FIXTURE_PATH, 'nonzero', log.logPath);
       try {
         const failingLauncher = Layer.succeed(
           RoleHostLauncher,
           RoleHostLauncher.of({
             launch: () =>
               roleHostProcessLayer({
-                command: [process.execPath, FIXTURE_PATH, 'nonzero', log.logPath],
+                harness: 'codex',
+                model: 'gpt-5-codex',
                 cwd: REPOSITORY_ROOT,
                 environmentAllowlist: [],
                 timeoutMs: 10_000,
@@ -372,6 +375,7 @@ describe('role-host capability preflight', () => {
           expect(error.reason).toBe('unavailable');
         }
       } finally {
+        shim.restore();
         log.cleanup();
       }
     }),

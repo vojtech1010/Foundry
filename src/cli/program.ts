@@ -48,7 +48,10 @@ import type {
   ReadinessHost,
 } from '../application/readiness/index.js';
 import type { RunIdentityStore } from '../application/run-identity/index.js';
-import type { RoleHostLauncher } from '../application/role-conversations/index.js';
+import type {
+  RoleHostBinaryResolver,
+  RoleHostLauncher,
+} from '../application/role-conversations/index.js';
 import type { RoleTurnResourceObserver } from '../application/role-permissions/index.js';
 
 const UNKNOWN_COMMAND_LABEL = 'foundry';
@@ -293,10 +296,6 @@ const InitPreviewReportData = Schema.Struct({
   }),
   branch: Schema.String,
   workspace: Schema.String,
-  roleHarness: Schema.Struct({
-    protocol: Schema.String,
-    command: Schema.NonEmptyArray(Schema.String),
-  }),
   roleRouting: Schema.Array(RoleRoutingReportData),
   artifacts: Schema.Struct({
     root: Schema.String,
@@ -1076,8 +1075,6 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         `data.source.commit: ${data.source.commit}`,
         `data.branch: ${data.branch}`,
         `data.workspace: ${data.workspace}`,
-        `data.roleHarness.protocol: ${data.roleHarness.protocol}`,
-        `data.roleHarness.command: ${data.roleHarness.command.join(' ')}`,
         `data.artifacts.root: ${data.artifacts.root}`,
         `data.artifacts.retentionDays: ${data.artifacts.retentionDays}`,
         `data.artifacts.maxRequestBytes: ${data.artifacts.maxRequestBytes}`,
@@ -1448,10 +1445,6 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
     },
     branch: report.branch,
     workspace: report.workspace,
-    roleHarness: {
-      protocol: report.roleHarness.protocol,
-      command: [...report.roleHarness.command],
-    },
     roleRouting: report.roleRouting.map((route) => ({ ...route })),
     artifacts: {
       root: report.artifacts.root,
@@ -1484,6 +1477,7 @@ export const runCli = Effect.fn('runCli')(function* (
   | RepositoryLeaseStore
   | RepositoryHostIdentity
   | RoleHostLauncher
+  | RoleHostBinaryResolver
   | RoleTurnResourceObserver
   | RunGit
   | GuidanceGit

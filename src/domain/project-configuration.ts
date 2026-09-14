@@ -8,14 +8,23 @@ export const ROLE_HARNESS_PROTOCOL = 'foundry-role-host-v1' as const;
  * Harnesses Foundry knows how to launch. The configuration names one per
  * role; the exact launch argv and the accepted model catalog per harness are
  * hardcoded in the role-host adapter (see `src/platform/role-host.ts`), never
- * carried in configuration. The vocabulary is intentionally small: task 054
- * owns vendor-accurate launch details and drops the legacy `roleHarness`
- * block, while this task only establishes the closed per-role selection
- * contract.
+ * carried in configuration. The legacy `roleHarness` block left the
+ * configuration document in task 054: per-role selection is the only
+ * harness-related configuration.
  */
 export const ROLE_HARNESS_NAMES = ['codex', 'opencode'] as const;
 
 export type RoleHarnessName = (typeof ROLE_HARNESS_NAMES)[number];
+
+/**
+ * The exact provider credential names the Foundry process reads from its own
+ * environment and forwards to bundled harnesses at launch. Both shipped
+ * harnesses serve OpenAI models, so the set is one name; it is documented in
+ * `docs/features/protocol-contracts.md`, and any addition is a deliberate
+ * catalog change, never per-project configuration. Credential values never
+ * reach configuration, prompts, or logs.
+ */
+export const BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES: ReadonlyArray<string> = ['OPENAI_API_KEY'];
 
 /**
  * The per-role harness and model selection carried in configuration. `model`
@@ -48,12 +57,6 @@ export const VERIFICATION_COMMANDS = ['formatCheck', 'lint', 'typecheck', 'test'
 export type VerificationCommand = (typeof VERIFICATION_COMMANDS)[number];
 
 export type CommandVector = readonly [string, ...Array<string>];
-
-export interface RoleHarnessConfiguration {
-  readonly protocol: typeof ROLE_HARNESS_PROTOCOL;
-  readonly command: CommandVector;
-  readonly environmentAllowlist: ReadonlyArray<string>;
-}
 
 export interface TimeoutConfiguration {
   readonly roleMs: number;
@@ -145,7 +148,6 @@ export interface ProjectConfiguration {
   readonly sourceRemote: string;
   readonly sourceBranch: string;
   readonly taskBranchPolicy: string;
-  readonly roleHarness: RoleHarnessConfiguration;
   readonly roles: RoleHarnessSelections;
   readonly timeouts: TimeoutConfiguration;
   readonly retryBudgets: RetryBudgetConfiguration;

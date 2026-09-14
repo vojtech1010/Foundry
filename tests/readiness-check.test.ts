@@ -35,17 +35,15 @@ import {
 import { BRANCH_PROTECTION_NOT_CONFIGURED } from '../src/domain/run-locations.js';
 import { EXIT_CODES } from '../src/domain/public-commands.js';
 import { ReadinessFilesLive, ReadinessGitLive } from '../src/platform/readiness.js';
-import {
-  capableRoleHostLauncher,
-  incapableRoleHostLauncher,
-} from './fixtures/role-host/role-host-launcher.js';
+import { capableRoleHostLauncher } from './fixtures/role-host/role-host-launcher.js';
 
 import type {
   PublicationProbeObservation,
   PublicationProbeRequest,
 } from '../src/application/readiness/index.js';
 import type { ProjectConfiguration } from '../src/domain/project-configuration.js';
-import type { RoleHostLauncher } from '../src/application/role-conversations/index.js';
+import { RoleHostBinaryResolver } from '../src/application/role-conversations/index.js';
+import { RoleHostLauncher } from '../src/application/role-conversations/index.js';
 
 const ReportEnvelopeJson = Schema.fromJsonString(ReportEnvelope);
 
@@ -92,11 +90,6 @@ function goldenDocument(targetRepository: string) {
     sourceRemote: 'origin',
     sourceBranch: 'main',
     taskBranchPolicy: 'foundry/<task-id>',
-    roleHarness: {
-      protocol: 'foundry-role-host-v1',
-      command: ['foundry-role-host'],
-      environmentAllowlist: ['OPENAI_API_KEY'],
-    },
     roles: {
       architect: { harness: 'codex', model: 'gpt-5-codex' },
       coder: { harness: 'codex', model: 'gpt-5-codex' },
@@ -203,6 +196,7 @@ interface BuiltWorld {
     | ReadinessGit
     | ProjectCommandProcess
     | RoleHostLauncher
+    | RoleHostBinaryResolver
     | PublicationProbe
   >;
   readonly gitCalls: Array<{ readonly args: ReadonlyArray<string>; readonly cwd: string }>;
@@ -274,9 +268,18 @@ const UnusedProcess = Layer.succeed(
   }),
 );
 
+const bundledBinariesLayer = Layer.succeed(
+  RoleHostBinaryResolver,
+  RoleHostBinaryResolver.of({
+    resolveExecutable: (harness) => Effect.succeed(`/fake/bin/${harness}`),
+    resolveModel: (_harness, model) => Effect.succeed(model.trim()),
+  }),
+);
+
 function buildWorld(
   world: FakeWorld,
   roleHostLayer: Layer.Layer<RoleHostLauncher> = capableRoleHostLauncher(),
+  binariesLayer: Layer.Layer<RoleHostBinaryResolver> = bundledBinariesLayer,
 ): BuiltWorld {
   const gitCalls: BuiltWorld['gitCalls'] = [];
   const layer = Layer.mergeAll(
@@ -380,6 +383,7 @@ function buildWorld(
     ),
     UnusedProcess,
     roleHostLayer,
+    binariesLayer,
     world.publication.provided
       ? Layer.succeed(
           PublicationProbe,
@@ -512,6 +516,28 @@ describe('per-role routing resolution', () => {
 });
 
 describe('readiness check with fake services', () => {
+  it.effect('verifies the bundled host without launching any role host process', () =>
+    Effect.gen(function* () {
+      const hostileLauncher = Layer.succeed(
+        RoleHostLauncher,
+        RoleHostLauncher.of({
+          launch: () => {
+            throw new Error('doctor must not launch a role host process');
+          },
+        }),
+      );
+      const built = buildWorld(defaultWorld(), hostileLauncher);
+      const report = yield* checkReadiness({ configArg: CONFIG_ARG, cwd: CONFIG_DIR }).pipe(
+        Effect.provide(built.layer),
+      );
+
+      expect(report.roleHost.protocol).toBe('foundry-role-host-v1');
+      expect(report.roleHost.resumable).toBe(true);
+      expect(report.roleRouting).toHaveLength(5);
+      expectNoBranchMutation(built.gitCalls);
+    }),
+  );
+
   it.effect('reports host, configuration, storage, and repository identity when ready', () =>
     Effect.gen(function* () {
       const { built, check } = checkWith(defaultWorld());
@@ -945,49 +971,49 @@ describe('readiness check with fake services', () => {
     }),
   );
 
-  it.effect('fails clearly when the role host cannot attest sessions or required profiles', () =>
+  it.effect('fails clearly when a bundled binary or model does not resolve', () =>
     Effect.gen(function* () {
-      const incapableCases = [
+      const failingCases = [
         {
-          label: 'non-resumable',
-          launcher: incapableRoleHostLauncher({ resumable: false }),
-          reason: 'not-resumable',
-          fragment: 'resumable',
+          label: 'missing binary',
+          binaries: Layer.succeed(
+            RoleHostBinaryResolver,
+            RoleHostBinaryResolver.of({
+              resolveExecutable: () =>
+                Effect.fail(
+                  new RoleHostCapabilityError({
+                    message:
+                      'Bundled role harness "codex" executable (codex) was not found on the process PATH.',
+                    reason: 'unavailable',
+                  }),
+                ),
+              resolveModel: (_harness, model) => Effect.succeed(model.trim()),
+            }),
+          ),
+          fragment: '"codex"',
         },
         {
-          label: 'unsupported protocol',
-          launcher: incapableRoleHostLauncher({ protocol: 'foundry-role-host-v0' }),
-          reason: 'unsupported-protocol',
-          fragment: 'foundry-role-host-v0',
-        },
-        {
-          label: 'missing role',
-          launcher: incapableRoleHostLauncher({
-            availableRoles: ['architect', 'coder', 'lead_coder', 'reviewer'],
-          }),
-          reason: 'missing-role',
-          fragment: '"tester"',
-        },
-        {
-          label: 'missing network profile',
-          launcher: incapableRoleHostLauncher({
-            capabilityProfiles: {
-              filesystem: [
-                'read_only_snapshot',
-                'run_owned_worktree',
-                'owned_scratch',
-                'owned_capture_scratch',
-              ],
-              network: ['network_denied'],
-            },
-          }),
-          reason: 'missing-profile',
-          fragment: 'runtime_origin_only',
+          label: 'unknown model',
+          binaries: Layer.succeed(
+            RoleHostBinaryResolver,
+            RoleHostBinaryResolver.of({
+              resolveExecutable: (harness) => Effect.succeed(`/fake/bin/${harness}`),
+              resolveModel: () =>
+                Effect.fail(
+                  new RoleHostCapabilityError({
+                    message:
+                      'Unknown model "custom-model" for bundled role harness "opencode": supported models are openai/gpt-5.',
+                    reason: 'unavailable',
+                  }),
+                ),
+            }),
+          ),
+          fragment: 'custom-model',
         },
       ];
 
-      for (const testCase of incapableCases) {
-        const built = buildWorld(defaultWorld(), testCase.launcher);
+      for (const testCase of failingCases) {
+        const built = buildWorld(defaultWorld(), capableRoleHostLauncher(), testCase.binaries);
         const error = yield* checkReadiness({ configArg: CONFIG_ARG, cwd: CONFIG_DIR }).pipe(
           Effect.provide(built.layer),
           Effect.flip,
@@ -996,26 +1022,41 @@ describe('readiness check with fake services', () => {
         if (!(error instanceof RoleHostCapabilityError)) {
           throw new Error(`Expected a RoleHostCapabilityError for ${testCase.label}.`);
         }
-        expect(error.reason, testCase.label).toBe(testCase.reason);
+        expect(error.reason, testCase.label).toBe('unavailable');
         expect(error.message, testCase.label).toContain(testCase.fragment);
       }
     }),
   );
 
-  it.effect('maps an incapable role host to a failed report rather than an argument error', () =>
-    Effect.gen(function* () {
-      const built = buildWorld(defaultWorld(), incapableRoleHostLauncher({ resumable: false }));
-      const result = yield* runCli(['doctor', '--config', CONFIG_PATH, '--json']).pipe(
-        Effect.provide(built.layer),
-      );
+  it.effect(
+    'maps an unresolvable bundled host to a failed report rather than an argument error',
+    () =>
+      Effect.gen(function* () {
+        const binaries = Layer.succeed(
+          RoleHostBinaryResolver,
+          RoleHostBinaryResolver.of({
+            resolveExecutable: () =>
+              Effect.fail(
+                new RoleHostCapabilityError({
+                  message: 'Bundled role harness "codex" executable (codex) was not found.',
+                  reason: 'unavailable',
+                }),
+              ),
+            resolveModel: (_harness, model) => Effect.succeed(model.trim()),
+          }),
+        );
+        const built = buildWorld(defaultWorld(), capableRoleHostLauncher(), binaries);
+        const result = yield* runCli(['doctor', '--config', CONFIG_PATH, '--json']).pipe(
+          Effect.provide(built.layer),
+        );
 
-      expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
-      const envelope = expectDoctorFailure(result.stdout);
-      expect(envelope.command).toBe('doctor');
-      expect(envelope.error.kind).toBe('failed');
-      expect(envelope.error.retryable).toBe(false);
-      expect(envelope.error.message).toContain('resumable');
-    }),
+        expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
+        const envelope = expectDoctorFailure(result.stdout);
+        expect(envelope.command).toBe('doctor');
+        expect(envelope.error.kind).toBe('failed');
+        expect(envelope.error.retryable).toBe(false);
+        expect(envelope.error.message).toContain('codex');
+      }),
   );
 });
 
@@ -1366,6 +1407,7 @@ const integrationLayer = Layer.mergeAll(
   ReadinessFilesLive,
   ReadinessGitLive,
   capableRoleHostLauncher(),
+  bundledBinariesLayer,
 );
 
 describe('doctor against real temporary git repositories', () => {

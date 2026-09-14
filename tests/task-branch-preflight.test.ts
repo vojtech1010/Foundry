@@ -122,11 +122,6 @@ function goldenDocument(targetRepository: string, publicationConfigured: boolean
     sourceRemote: 'origin',
     sourceBranch: 'main',
     taskBranchPolicy: 'foundry/<task-id>',
-    roleHarness: {
-      protocol: 'foundry-role-host-v1',
-      command: ['foundry-role-host'],
-      environmentAllowlist: ['OPENAI_API_KEY'],
-    },
     roles: {
       architect: { harness: 'codex', model: 'gpt-5-codex' },
       coder: { harness: 'codex', model: 'gpt-5-codex' },

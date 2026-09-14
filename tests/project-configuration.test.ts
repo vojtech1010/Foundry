@@ -28,11 +28,6 @@ const exampleConfiguration = {
   sourceRemote: 'origin',
   sourceBranch: 'main',
   taskBranchPolicy: 'foundry/<task-id>',
-  roleHarness: {
-    protocol: 'foundry-role-host-v1',
-    command: ['foundry-role-host'],
-    environmentAllowlist: ['OPENAI_API_KEY'],
-  },
   roles: {
     architect: { harness: 'codex', model: 'gpt-5-codex' },
     coder: { harness: 'codex', model: 'gpt-5-codex' },
@@ -106,7 +101,6 @@ function withoutKey(source: Record<string, Schema.Json>, key: string): Schema.Js
 }
 
 const sections: ReadonlyArray<readonly [string, Record<string, Schema.Json>]> = [
-  ['roleHarness', exampleConfiguration.roleHarness],
   ['roles', exampleConfiguration.roles],
   ['timeouts', exampleConfiguration.timeouts],
   ['retryBudgets', exampleConfiguration.retryBudgets],
@@ -155,14 +149,6 @@ const unknownFieldCases: ReadonlyArray<InvalidCase> = [
     label: 'operating mode field',
     document: { ...exampleConfiguration, operatingMode: 'autonomous' },
     field: 'operatingMode',
-  },
-  {
-    label: 'unknown role harness field',
-    document: {
-      ...exampleConfiguration,
-      roleHarness: { ...exampleConfiguration.roleHarness, retries: 2 },
-    },
-    field: 'roleHarness.retries',
   },
   {
     label: 'unknown timeout field',
@@ -271,46 +257,6 @@ const mistypedFieldCases: ReadonlyArray<InvalidCase> = [
     label: 'empty source branch',
     document: { ...exampleConfiguration, sourceBranch: '' },
     field: 'sourceBranch',
-  },
-  {
-    label: 'wrong role harness protocol',
-    document: {
-      ...exampleConfiguration,
-      roleHarness: { ...exampleConfiguration.roleHarness, protocol: 'openai-role-host-v2' },
-    },
-    field: 'roleHarness.protocol',
-  },
-  {
-    label: 'role harness command as string',
-    document: {
-      ...exampleConfiguration,
-      roleHarness: { ...exampleConfiguration.roleHarness, command: 'foundry-role-host' },
-    },
-    field: 'roleHarness.command',
-  },
-  {
-    label: 'empty role harness command vector',
-    document: {
-      ...exampleConfiguration,
-      roleHarness: { ...exampleConfiguration.roleHarness, command: [] },
-    },
-    field: 'roleHarness.command.0',
-  },
-  {
-    label: 'empty role harness executable',
-    document: {
-      ...exampleConfiguration,
-      roleHarness: { ...exampleConfiguration.roleHarness, command: [''] },
-    },
-    field: 'roleHarness.command.0',
-  },
-  {
-    label: 'empty role harness environment name',
-    document: {
-      ...exampleConfiguration,
-      roleHarness: { ...exampleConfiguration.roleHarness, environmentAllowlist: [''] },
-    },
-    field: 'roleHarness.environmentAllowlist.0',
   },
   {
     label: 'timeout as float',
@@ -507,11 +453,6 @@ describe('project configuration contract', () => {
       expect(decoded.sourceRemote).toBe('origin');
       expect(decoded.sourceBranch).toBe('main');
       expect(decoded.taskBranchPolicy).toBe('foundry/<task-id>');
-      expect(decoded.roleHarness).toEqual({
-        protocol: 'foundry-role-host-v1',
-        command: ['foundry-role-host'],
-        environmentAllowlist: ['OPENAI_API_KEY'],
-      });
       expect(decoded.roles).toEqual({
         architect: { harness: 'codex', model: 'gpt-5-codex' },
         coder: { harness: 'codex', model: 'gpt-5-codex' },
@@ -556,6 +497,23 @@ describe('project configuration contract', () => {
         'artifacts block',
       );
       expect(error.field).toBe('artifacts');
+    }),
+  );
+
+  it.effect('rejects a document carrying the removed roleHarness block', () =>
+    Effect.gen(function* () {
+      const error = yield* expectInvalidConfiguration(
+        {
+          ...exampleConfiguration,
+          roleHarness: {
+            protocol: 'foundry-role-host-v1',
+            command: ['foundry-role-host'],
+            environmentAllowlist: ['OPENAI_API_KEY'],
+          },
+        },
+        'roleHarness block',
+      );
+      expect(error.field).toBe('roleHarness');
     }),
   );
 
@@ -721,15 +679,10 @@ describe('project configuration contract', () => {
 
   it.effect('resolves configuration-relative paths and leaves other commands alone', () =>
     Effect.gen(function* () {
-      const relativeCommand = './bin/role-host';
       const decoded = yield* decodeProjectConfiguration(
         {
           ...exampleConfiguration,
           targetRepository: '..',
-          roleHarness: {
-            ...exampleConfiguration.roleHarness,
-            command: [relativeCommand, '--stdio'],
-          },
           projectProfile: {
             ...exampleConfiguration.projectProfile,
             guidancePaths: ['AGENTS.md', 'docs/agents.md'],
@@ -739,36 +692,12 @@ describe('project configuration contract', () => {
       );
 
       expect(decoded.targetRepository).toBe(resolve(configDirectory, '..'));
-      expect(decoded.roleHarness.command).toEqual([
-        resolve(configDirectory, relativeCommand),
-        '--stdio',
-      ]);
       expect(decoded.projectProfile.guidancePaths).toEqual([
         resolve(configDirectory, 'AGENTS.md'),
         resolve(configDirectory, 'docs/agents.md'),
       ]);
       expect(decoded.projectProfile.commands).toEqual(exampleConfiguration.projectProfile.commands);
       expect(decoded.runtimeProfile?.reset).toEqual(exampleConfiguration.runtimeProfile.reset);
-    }),
-  );
-
-  it.effect('resolves role harness executables written with either path separator', () =>
-    Effect.gen(function* () {
-      const windowsSeparatorCommand = 'tools\\role-host';
-      const decoded = yield* decodeProjectConfiguration(
-        {
-          ...exampleConfiguration,
-          roleHarness: {
-            ...exampleConfiguration.roleHarness,
-            command: [windowsSeparatorCommand, 'serve'],
-          },
-        },
-        configDirectory,
-      );
-      expect(decoded.roleHarness.command).toEqual([
-        resolve(configDirectory, windowsSeparatorCommand),
-        'serve',
-      ]);
     }),
   );
 

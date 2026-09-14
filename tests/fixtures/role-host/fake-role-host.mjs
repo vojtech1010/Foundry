@@ -117,6 +117,7 @@ if (logPath.length > 0) {
       env: {
         FOUNDRY_FAKE_TOKEN: process.env.FOUNDRY_FAKE_TOKEN ?? null,
         FOUNDRY_FAKE_UNLISTED: process.env.FOUNDRY_FAKE_UNLISTED ?? null,
+        PATH: process.env.PATH ?? null,
       },
       request,
     })}\n`,

@@ -85,8 +85,10 @@ error remain retained.
 ## Role-host protocol
 
 The first release supports one vendor-neutral command adapter,
-`foundry-role-host-v1`. The configured executable is launched directly, never
-through a shell, with one of these operations appended to its argument vector:
+`foundry-role-host-v1`. Foundry ships its role host instead of spawning an
+externally configured one: the bundled harness executable is launched
+directly, never through a shell, with one of these operations appended to its
+argument vector:
 
 - `capabilities` reports protocol version, resumable-session support, and the
   enforceable filesystem/network capability profiles;
@@ -140,18 +142,29 @@ matrix, and both `doctor` and a live `run` fail clearly on an unsupported
 protocol, non-resumable sessions, a missing role, or a missing profile.
 
 Per-role harness and model selection belongs to Foundry configuration, which
-names one harness and model per role; the exact command line used to launch
-each harness stays hardcoded in the role-host adapter per harness and runtime
-and is never carried in configuration. `doctor` and `init --dry-run` report
-the resolved per-role routing without launching anything. A live adapter
-rejects an unknown model against its own catalog and fails closed; Foundry
-never invents a substitute model. The same document resolves the same routing
-on Linux and Windows; only executable resolution follows existing platform
-rules. `doctor` requires every role and capability profile, and `runtimeIdentity`
-is exactly `{ adapterVersion, provider, model, toolProfile }`, recording the
-non-empty strings actually assigned to the session. Foundry retains that value
-as provenance without changing route semantics when different conforming hosts
-are used.
+names one harness and model per role and nothing else harness-related; a
+document carrying the removed `roleHarness` block is rejected as an unknown
+field. The exact command line used to launch each harness stays hardcoded in
+Foundry per harness and platform and is never carried in configuration: the
+bundled catalog names the executable, argv, served models, and forwarded
+credential names for `codex` and `opencode`, and only executable resolution
+(`codex` vs `codex.exe`/`codex.cmd` on Windows) varies by platform.
+`doctor` verifies the bundled host directly without spawning anything:
+required harness binaries are present on the process `PATH`, every listed
+model resolves against its harness catalog, and the bundled static
+attestation covers every role plus the required capability profiles.
+`init --dry-run` reports the resolved per-role routing from the bundled host
+without launching anything. A live adapter rejects an unknown model against
+its own catalog and fails closed; Foundry never invents a substitute model.
+The same document resolves the same routing on Linux and Windows. Live runs
+gate each distinct harness's attestation before source provisioning, and
+`runtimeIdentity` is exactly `{ adapterVersion, provider, model, toolProfile }`,
+recording the non-empty strings actually assigned to the session. Foundry
+retains that value as provenance without changing route semantics when
+different conforming hosts are used.
+
+The accepted costs are explicit: Foundry releases now track vendor CLI
+changes, and the credential and workflow trust domains share one process.
 
 `create` returns a session ID, ownership token, conversation generation, and
 initial sequence. Foundry persists that identity before `submit`. `submit` is
@@ -178,8 +191,9 @@ is rejected before the host is launched.
 
 The role host must enforce these roots against absolute paths, `..`, symlinks,
 junctions, case-folding, and alternate Windows path forms. `doctor` rejects a
-live adapter that cannot attest support for resumable sessions and the required
-capability profiles. Foundry compares Git and owned-resource state before and
+bundled host whose binaries, models, roles, or capability profiles do not
+verify, and a live `run` additionally gates each distinct harness's
+attestation before source provisioning. Foundry compares Git and owned-resource state before and
 after every read-only turn as an additional detection layer, but detection does
 not replace host enforcement. A changed project or worktree records a
 `project-mutation` violation; changed run-owned scratch or run-directory
@@ -191,8 +205,9 @@ Reviewer. Tester receives only the origin derived from `runtimeProfile.baseUrl`.
 The adapter's own transport to its configured model provider is outside that
 agent-visible allowlist but may not be exposed as a general network tool.
 
-Only environment-variable names listed in `environmentAllowlist` are forwarded
-to the role host; values are read from Foundry's environment and are never
+Only the hardcoded credential name `OPENAI_API_KEY` (plus `PATH`, forwarded so
+launched CLIs resolve their own runtime) reaches a harness process
+environment; values are read from Foundry's own environment and are never
 written to configuration, prompts, events, or diagnostics. Role-host protocol
 documents and reference conformance tests are part of Foundry, so vendor-specific
 adapters do not change workflow semantics.

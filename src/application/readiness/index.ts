@@ -22,7 +22,7 @@ import { BRANCH_PROTECTION_NOT_CONFIGURED } from '../../domain/run-locations.js'
 
 import { invalidRedactionPatterns } from '../evidence-limits/index.js';
 import { decodeProjectConfiguration } from '../project-configuration.js';
-import { preflightRoleHostCapabilities } from '../role-conversations/index.js';
+import { verifyBundledRoleHostCapabilities } from '../role-conversations/index.js';
 
 import { ROLE_HOST_ROLES, resolveAllRoleHostRoutes } from '../../domain/role-host.js';
 import type {
@@ -36,7 +36,10 @@ import type {
 } from '../../domain/readiness.js';
 import type { BranchProtectionEvidence } from '../../domain/run-locations.js';
 import type { RoleHostRole } from '../../domain/role-host.js';
-import type { RoleHostCapabilityError, RoleHostLauncher } from '../role-conversations/index.js';
+import type {
+  RoleHostBinaryResolver,
+  RoleHostCapabilityError,
+} from '../role-conversations/index.js';
 
 export class ReadinessError extends Schema.TaggedError<ReadinessError>()('ReadinessError', {
   message: Schema.String,
@@ -447,7 +450,7 @@ export const checkReadiness = Effect.fn('checkReadiness')(function* (
 ): Effect.fn.Return<
   DoctorReport,
   ReadinessError | RoleHostCapabilityError,
-  ReadinessHost | ReadinessFiles | ReadinessGit | RoleHostLauncher
+  ReadinessHost | ReadinessFiles | ReadinessGit | RoleHostBinaryResolver
 > {
   const host = yield* ReadinessHost;
   const files = yield* ReadinessFiles;
@@ -619,7 +622,7 @@ export const checkReadiness = Effect.fn('checkReadiness')(function* (
     }
   }
 
-  const capabilities = yield* preflightRoleHostCapabilities({ configuration });
+  const capabilities = yield* verifyBundledRoleHostCapabilities({ configuration });
 
   const publication = yield* describePublicationReadiness(
     configuration.decisionPublication,

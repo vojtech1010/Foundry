@@ -10,8 +10,8 @@ branches, execution worktrees, and ignored `.agent` run data.
 - a clean target Git repository;
 - a reachable authoritative source remote and branch;
 - project-owned deterministic verification commands;
-- one configured live role host plus one harness and model per role for real
-  runs; and
+- one harness and model per role for real runs, served by the bundled role
+  host (required harness binaries installed: `codex`, `opencode`); and
 - a `GITHUB_TOKEN` environment credential only if Reviewer decision escalation
   may publish a draft PR.
 
@@ -36,17 +36,12 @@ command always drives the autonomous workflow.
   "sourceRemote": "origin",
   "sourceBranch": "main",
   "taskBranchPolicy": "foundry/<task-id>",
-  "roleHarness": {
-    "protocol": "foundry-role-host-v1",
-    "command": ["foundry-role-host"],
-    "environmentAllowlist": ["OPENAI_API_KEY"]
-  },
   "roles": {
-    "architect": { "harness": "pi", "model": "pi-default" },
-    "coder": { "harness": "pi", "model": "pi-default" },
-    "lead_coder": { "harness": "pi", "model": "pi-default" },
-    "tester": { "harness": "pi", "model": "pi-default" },
-    "reviewer": { "harness": "pi", "model": "pi-default" }
+    "architect": { "harness": "codex", "model": "gpt-5-codex" },
+    "coder": { "harness": "codex", "model": "gpt-5-codex" },
+    "lead_coder": { "harness": "opencode", "model": "openai/gpt-5" },
+    "tester": { "harness": "opencode", "model": "openai/gpt-5" },
+    "reviewer": { "harness": "codex", "model": "gpt-5-codex" }
   },
   "timeouts": {
     "roleMs": 1800000,
@@ -113,12 +108,26 @@ the omission form.
 
 `roles` names one harness and model per role (`architect`, `coder`,
 `lead_coder`, `tester`, `reviewer`). Each harness is a supported harness name
-and each model is a non-empty model string resolved against that harness's own
-catalog. A valid document is accepted only when every role names a supported
-harness and model; unknown harnesses, missing roles, or extra fields fail
-before work starts. The exact command line used to launch each harness is
-hardcoded in the role-host adapter per harness and runtime, never carried in
-configuration. There is still one operating model and one role-host protocol.
+(`codex`, `opencode`) and each model is a non-empty model string resolved
+against that harness's own catalog. A valid document is accepted only when
+every role names a supported harness and model; unknown harnesses, missing
+roles, or extra fields fail before work starts. Per-role selection is the
+only harness-related configuration: a document containing the removed
+`roleHarness` block (`protocol`, `command`, `environmentAllowlist`) is
+rejected as an unknown field under the closed-document rule. Foundry ships
+its role host instead of spawning an externally configured one: the exact
+command line used to launch each harness is hardcoded in Foundry per harness
+and platform (only executable resolution varies between Linux and Windows),
+never carried in configuration. There is still one operating model and one
+role-host protocol.
+
+Provider credentials are read by the Foundry process itself from its own
+environment and forwarded to launched harnesses. Exactly one credential name
+is read: `OPENAI_API_KEY`. Credential values never reach configuration,
+prompts, or logs; only the hardcoded name list plus `PATH` (forwarded so
+launched CLIs resolve their own runtime) reach a harness process. The
+accepted costs are explicit: Foundry releases now track vendor CLI changes,
+and the credential and workflow trust domains share one process.
 
 Artifact bounds are hardcoded, not configured. A document containing an
 `artifacts` block is rejected as an unknown field under the closed-document
@@ -150,8 +159,8 @@ node dist/cli/index.js profile-check --config .\target\.agent\foundry.config.jso
 
 - `doctor` validates tooling, configuration, storage, target identity, runtime,
   and optional GitHub decision-publication readiness.
-- `init --dry-run` displays resolved source, branch, worktree, harness, and
-  artifact paths without mutation. It first reuses the `doctor` readiness check,
+- `init --dry-run` displays resolved source, branch, worktree, per-role routing,
+  and artifact paths without mutation. It first reuses the `doctor` readiness check,
   so every configuration and identity problem `doctor` would catch also fails
   the preview. It then reports:
   - `source`: the configured `sourceRemote` and `sourceBranch` plus the reachable
@@ -160,18 +169,20 @@ node dist/cli/index.js profile-check --config .\target\.agent\foundry.config.jso
     by the invocation task ID, which must be a legal Git branch ref and must not
     equal the source branch;
   - `workspace`: `<target>/.agent/worktrees/<task-id>`;
-  - `roleHarness`: the configured `protocol` and resolved `command` vector;
-  - `roles`: the resolved per-role routing (harness and model) without
-    launching anything; and
+  - `roleRouting`: the resolved per-role routing (harness and model) from the
+    bundled host without launching anything; and
   - `artifacts.root`: `<target>/.agent/runs`, under which later run directories
     appear, plus the effective hardcoded artifact bounds. The preview creates
     nothing and leaves Git status, HEAD, and the current branch unchanged.
 - `profile-check` runs configured project commands in order and fails if they
   mutate tracked Git state.
 
-`doctor` also calls the role host's `capabilities` operation. A live run is
-rejected before source provisioning when the adapter cannot resume sessions or
-enforce the role capability profiles. Both `doctor` and `init --dry-run` report
+`doctor` verifies the bundled role host directly, without spawning anything:
+required harness binaries are present on the process `PATH`, every listed
+model resolves against its harness catalog, and every role plus the required
+capability profiles are covered. A live run is additionally gated before
+source provisioning on the bundled host attesting resumable sessions and the
+role capability profiles. Both `doctor` and `init --dry-run` report
 the resolved per-role routing (harness and model) and the effective hardcoded
 artifact bounds without launching anything.
 

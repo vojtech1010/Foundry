@@ -76,7 +76,11 @@ import type {
   DiagnosticBundleReport,
 } from './diagnostic-bundle/index.js';
 import type { RepositoryHostIdentity, RepositoryLeaseStore } from './repository-lease/index.js';
-import type { RoleHostCapabilityError, RoleHostLauncher } from './role-conversations/index.js';
+import type {
+  RoleHostBinaryResolver,
+  RoleHostCapabilityError,
+  RoleHostLauncher,
+} from './role-conversations/index.js';
 import type { RoleTurnResourceObserver } from './role-permissions/index.js';
 
 export interface StubCommandReport {
@@ -220,6 +224,7 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
   | RepositoryLeaseStore
   | RepositoryHostIdentity
   | RoleHostLauncher
+  | RoleHostBinaryResolver
   | RoleTurnResourceObserver
   | RunGit
   | GuidanceGit
