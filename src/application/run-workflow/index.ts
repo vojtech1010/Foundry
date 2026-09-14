@@ -55,6 +55,7 @@ import {
   RoleHostLauncher,
   stopRoleSession,
 } from '../role-conversations/index.js';
+import { publishResultPr } from '../result-publication/index.js';
 import { RunGit } from '../git-provisioning/index.js';
 import { describePublicationReadiness } from '../readiness/index.js';
 import { RunIdentityStore, RunIdentityStorageError } from '../run-identity/index.js';
@@ -85,6 +86,7 @@ import type {
   RecoveryFacts,
   RecoveryDisposition,
 } from '../recovery/index.js';
+import type { ResultPublicationReport } from '../result-publication/index.js';
 import type { RoleConversationFailureReason } from '../role-conversations/index.js';
 import type { ImplementationObservation, WorktreeObservation } from '../git-provisioning/index.js';
 import type { WorkerWorktreeDisposal } from '../run-cleanup/index.js';
@@ -135,6 +137,7 @@ export interface RunWorkflowOutcome {
   readonly testerSkipped: boolean;
   readonly decision: RunWorkflowDecisionReport | null;
   readonly recovery: RunWorkflowRecoveryReport | null;
+  readonly resultPublication: ResultPublicationReport | null;
 }
 
 function errorMessage(error: { readonly message: string }): string {
@@ -176,6 +179,7 @@ function summaryOf(history: VerifiedRunHistory): RunWorkflowOutcome {
     testerSkipped: history.derived.testerSkips.length > 0,
     decision: null,
     recovery: null,
+    resultPublication: null,
   };
 }
 
@@ -1398,6 +1402,39 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
         });
         return summaryOf(after);
       }
+      if (state === 'completed') {
+        /**
+         * A completed run whose result publication is uncertain resumes the
+         * same run: the recorded result-publication journal is reconciled in
+         * place by the same idempotent publication, never a second run or a
+         * duplicate result pull request. A settled run returns its summary.
+         */
+        const unsettled =
+          configuration.decisionPublication !== null &&
+          (history.derived.resultPrRecorded ?? null) === null &&
+          (history.derived.resultPrCheckpoints ?? []).length > 0;
+        if (options.allowResume && !resumed && unsettled) {
+          const github = yield* Effect.serviceOption(GitHubPublication);
+          if (Option.isSome(github)) {
+            const reconciled = yield* publishResultPr({
+              runDirectory,
+              runId,
+              configuration,
+            }).pipe(Effect.provideService(GitHubPublication, github.value), Effect.result);
+            const after = yield* readVerifiedRunHistory({
+              runDirectory,
+              runId,
+              createIfMissing: false,
+            });
+            const resultPublication: ResultPublicationReport = Result.isSuccess(reconciled)
+              ? reconciled.success
+              : { outcome: 'uncertain', problem: errorMessage(reconciled.failure) };
+            resumed = true;
+            return { ...summaryOf(after), resultPublication };
+          }
+        }
+        return summaryOf(history);
+      }
       if (!isActiveWorkflowState(state)) {
         return summaryOf(history);
       }
@@ -1445,6 +1482,39 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     }).pipe(Effect.ignore);
   });
 
+  /**
+   * Publishes the ordinary result pull request for an approved changed result
+   * once the run has settled. The adapter is optional, and publication is
+   * idempotent, so an unavailable adapter or an uncertain transaction never
+   * fails an otherwise-complete run: the run reports the outcome and a later
+   * `resume` reconciles in place.
+   */
+  const publishApprovedResult = Effect.fn('advanceRun.publishApprovedResult')(function* (
+    summary: RunWorkflowOutcome,
+  ) {
+    if (summary.workflowState !== 'completed') {
+      return null;
+    }
+    const github = yield* Effect.serviceOption(GitHubPublication);
+    if (Option.isNone(github)) {
+      return {
+        outcome: 'skipped',
+        reason: 'The GitHub publication adapter is not available for this run',
+      } satisfies ResultPublicationReport;
+    }
+    const published = yield* publishResultPr({ runDirectory, runId, configuration }).pipe(
+      Effect.provideService(GitHubPublication, github.value),
+      Effect.result,
+    );
+    if (Result.isFailure(published)) {
+      return {
+        outcome: 'uncertain',
+        problem: errorMessage(published.failure),
+      } satisfies ResultPublicationReport;
+    }
+    return published.success;
+  });
+
   const finalize = Effect.gen(function* () {
     const completed = yield* body.pipe(Effect.result);
     const summary = Result.isSuccess(completed)
@@ -1454,6 +1524,15 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     yield* disposeOwnedResources(summary);
 
     /**
+     * After the owned resources are released, an approved changed result is
+     * published from the owning repository (the task branch survives cleanup).
+     * Publication runs before the handoff so the canonical report sees the
+     * settled result pull request.
+     */
+    const resultPublication = yield* publishApprovedResult(summary);
+    const settled: RunWorkflowOutcome = { ...summary, resultPublication };
+
+    /**
      * A completed or no-change run owns exactly one canonical handoff. The write
      * is idempotent: it reconciles from verified history, so an already-settled
      * run (including `resume`) rewrites identical bytes or repairs a missing
@@ -1461,7 +1540,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
      * a no-op.
      */
     yield* reconcileHandoff({ runDirectory, runId });
-    return summary;
+    return settled;
   });
 
   return yield* finalize.pipe(Effect.ensuring(disposeRuntime().pipe(Effect.ignore)));

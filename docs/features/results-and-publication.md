@@ -1,8 +1,9 @@
 # Results and decision publication
 
 Foundry's normal deliverable is a local, validated task-branch commit plus a
-human-readable handoff. GitHub publication is reserved for Reviewer decisions
-that genuinely need a person.
+human-readable handoff. GitHub publication covers the ordinary approved-result
+pull request when publication is configured, while decision pull requests remain
+the only channel for a Reviewer decision that genuinely needs a person.
 
 ## Normal result
 
@@ -25,6 +26,13 @@ Report a required Tester result separately from an explicit plan-authorized
 Tester skip. Keep rejected attempts, discounted evidence, non-blocking
 limitations, and cleanup warnings discoverable even after successful completion.
 
+When Reviewer approves a changed implementation and publication is configured,
+Foundry publishes one ordinary (non-draft) result pull request for the task
+branch and the exact accepted result commit, and records its URL against that
+task branch and accepted commit. It is distinct from a decision pull request: it
+presents the approved result for the team's normal GitHub process and is never a
+Foundry decision channel.
+
 ## Canonical handoff
 
 At `completed` or `completed_no_change`, Foundry writes exactly one
@@ -37,8 +45,9 @@ A change handoff names the frozen source and result commits, the task branch, th
 Git-derived changed-file list, the accepted plan and its criterion coverage, the
 current commit-bound verification checks, the required Tester observation or an
 explicit skip or retained limitation, findings, correction and rejected-attempt
-evidence, limitations, cleanup warnings, the Reviewer outcome and narrative, and
-any recorded authenticated human decision. A no-change handoff explains why the
+evidence, limitations, cleanup warnings, the Reviewer outcome and narrative, any
+recorded authenticated human decision, and the recorded ordinary result pull
+request URL when one was published. A no-change handoff explains why the
 verified source already satisfies the request and records no Coder result commit
 and no pull request.
 
@@ -46,9 +55,12 @@ Promised coverage that is unavailable is listed in `missingCoverage` and sets
 `coverageComplete` false rather than presenting a sparse summary as complete.
 The handoff is a report: editing it never changes workflow state.
 
-Reviewer approval completes the run locally. Foundry does not create a PR for
-an ordinary approved result. Teams may consume the commit through a separate
-integration process outside Foundry.
+Reviewer approval completes the run locally. When publication is configured,
+Foundry then publishes a normal (non-draft) result pull request for the exact
+accepted commit after completion. An unconfigured run completes locally and
+reports that no result pull request was opened. If a push or pull-request
+creation is uncertain, the same run is resumed and reconciled in place; Foundry
+never opens a second run or a duplicate result pull request.
 
 An authenticated human `accept` decision also completes locally and retains the
 decision evidence and unresolved risk in the handoff; it is never rewritten as
@@ -57,12 +69,14 @@ Reviewer approval.
 An already-satisfied request completes as `completed_no_change`, with no Coder
 commit and no PR.
 
-## When Foundry creates a PR
+## When Foundry creates a decision draft PR
 
 Supported: the `publishing` workflow stage performs this transaction.
 
-Foundry creates or reuses a draft GitHub PR only when Reviewer returns
-`human_decision_required` for a reviewable implementation commit.
+A draft GitHub PR is created or reused only when Reviewer returns
+`human_decision_required` for a reviewable implementation commit. The ordinary
+result PR is a separate, non-draft surface published after an approval, never a
+decision channel.
 
 Before remote side effects, Foundry verifies:
 
@@ -109,20 +123,26 @@ The PR must not imply approval, completion, or merge readiness.
 
 ## Publication outcomes
 
-| Outcome                       | Durable state             | Meaning                                                          |
-| ----------------------------- | ------------------------- | ---------------------------------------------------------------- |
-| Reviewer approved             | `completed`               | Local result is complete; no PR created                          |
-| Authenticated `accept` option | `completed`               | Human accepted the recorded decision risk; draft PR remains open |
-| Exact draft PR created/reused | `human_decision_required` | Await one authenticated option command                           |
-| GitHub publication fails      | `publish_failed`          | Reconcile the same run; do not create another run or PR          |
-| Remote is not eligible GitHub | `blocked`                 | Decision cannot be published through the required channel        |
+| Outcome                           | Durable state             | Meaning                                                          |
+| --------------------------------- | ------------------------- | ---------------------------------------------------------------- |
+| Reviewer approved, unconfigured   | `completed`               | Local result is complete; no result PR opened                    |
+| Result PR published               | `completed`               | Ordinary result PR URL recorded for the accepted commit          |
+| Result publication uncertain      | `completed`               | Resume the same run to reconcile; never a duplicate result PR    |
+| Authenticated `accept` option     | `completed`               | Human accepted the recorded decision risk; draft PR remains open |
+| Exact draft PR created/reused     | `human_decision_required` | Await one authenticated option command                           |
+| GitHub decision publication fails | `publish_failed`          | Reconcile the same run; do not create another run or PR          |
+| Remote is not eligible GitHub     | `blocked`                 | Decision cannot be published through the required channel        |
 
 Because PR creation has remote side effects, publication uses a durable
-transaction journal. The journal records the checkpoints `pre-push`,
+transaction journal. The decision journal records the checkpoints `pre-push`,
 `pushed`, `pull-request-located`, `pull-request-created`, and `url-recorded`;
 only `url-recorded` carries the authoritative draft PR URL, so recovery resumes
 from the recorded checkpoint and never infers success from a branch or
-arbitrary PR alone.
+arbitrary PR alone. The result publication uses its own `result-pr-checkpoint`
+journal with the same stage vocabulary plus a settled `result-pr-recorded` fact;
+the result journal is permitted only after a Reviewer-approved changed result,
+and `result-pr-recorded` makes a resumed reconciliation a no-op instead of a
+duplicate result pull request.
 
 Publication uses the GitHub HTTPS API with `GITHUB_TOKEN` supplied from the
 process environment. The required repository permissions are Metadata read,

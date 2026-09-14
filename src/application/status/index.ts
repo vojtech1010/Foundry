@@ -225,6 +225,10 @@ function eventDetail(event: RunEvent): string {
       );
     case 'recovery-recorded':
       return boundedDetail(`recovery ${event.payload.disposition}: ${event.payload.reason}`);
+    case 'result-pr-checkpoint':
+      return boundedDetail(`result publication ${event.payload.stage}: ${event.payload.detail}`);
+    case 'result-pr-recorded':
+      return boundedDetail(`result pull request recorded at ${event.payload.url}`);
   }
 }
 

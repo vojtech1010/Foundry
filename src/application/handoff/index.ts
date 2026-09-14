@@ -141,6 +141,8 @@ const HandoffHumanDecisionSchema = Schema.Struct({
 
 const HandoffPublicationSchema = Schema.Struct({
   created: Schema.Boolean,
+  url: Schema.NullOr(Schema.NonEmptyString),
+  kind: Schema.Literals(['result', 'none']),
   reason: Schema.NonEmptyString,
 });
 
@@ -542,6 +544,54 @@ function discountedCriterionIds(derived: RunHistoryDerivedState): ReadonlyArray<
 }
 
 /**
+ * Records the publication surface of a completed run from durable evidence
+ * only. A no-change run never publishes. A changed run whose exact result pull
+ * request is recorded names it; a changed run with a recorded publication
+ * attempt is reported unsettled so a later resume reconciles the same run; and
+ * a changed run with no attempt completed locally. Handoff never infers a
+ * result pull request, and it never records the decision draft channel here.
+ */
+function publicationOf(
+  kind: HandoffKind,
+  derived: RunHistoryDerivedState,
+): HandoffDocument['publication'] {
+  if (kind === 'no_change') {
+    return {
+      created: false,
+      url: null,
+      kind: 'none',
+      reason: 'A completed no-change run records no Coder commit and creates no pull request.',
+    };
+  }
+  const recorded = derived.resultPrRecorded ?? null;
+  if (recorded !== null) {
+    return {
+      created: true,
+      url: recorded.url,
+      kind: 'result',
+      reason: `Reviewer approval recorded result pull request ${recorded.url} for the accepted commit ${recorded.commit}.`,
+    };
+  }
+  const attempted = (derived.resultPrCheckpoints ?? []).length > 0;
+  if (attempted) {
+    return {
+      created: false,
+      url: null,
+      kind: 'result',
+      reason:
+        'Reviewer approval completed the run locally; result publication is not settled, so resume the same run to reconcile it in place without a duplicate pull request.',
+    };
+  }
+  return {
+    created: false,
+    url: null,
+    kind: 'none',
+    reason:
+      'Reviewer approval completes the run locally; no result pull request is recorded. A draft decision pull request remains the only channel for a recorded human_decision_required outcome.',
+  };
+}
+
+/**
  * Builds the deterministic handoff document for a completed run. Every field is
  * derived from verified canonical history, never from a Coder-reported file
  * list, role prose, or a current wall-clock instant, so rebuilding the report
@@ -604,13 +654,7 @@ export function buildHandoff(
 
   const captures = capturesOf(derived);
 
-  const publication = {
-    created: false,
-    reason:
-      kind === 'no_change'
-        ? 'A completed no-change run records no Coder commit and creates no pull request.'
-        : 'Reviewer approval completes the run locally; Foundry creates a draft pull request only for a recorded human_decision_required outcome.',
-  };
+  const publication = publicationOf(kind, derived);
 
   return {
     schemaVersion: HANDOFF_SCHEMA_VERSION,

@@ -424,6 +424,8 @@ function githubHarness(lookup: GitHubPullRequestLookup = { kind: 'absent' }): Gi
         calls.create.push(options);
         return Effect.succeed(createdPullRequest(options));
       },
+      openResultPullRequest: () =>
+        Effect.die(new Error('decision publication recovery must not open a result pull request')),
       refreshOwnedDraftPullRequestBody: (options) => {
         calls.refresh.push(options);
         return Effect.succeed({

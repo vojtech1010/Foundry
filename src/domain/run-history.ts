@@ -97,6 +97,8 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'integration-completed',
   'evidence-manifest',
   'recovery-recorded',
+  'result-pr-checkpoint',
+  'result-pr-recorded',
 ] as const;
 
 export type RunHistoryEventType = (typeof RUN_HISTORY_EVENT_TYPES)[number];
@@ -577,6 +579,36 @@ export const RecoveryRecordedPayloadSchema = Schema.Struct({
 
 export type RecoveryRecordedPayload = (typeof RecoveryRecordedPayloadSchema)['Type'];
 
+/**
+ * One durable step of the approved-result publication transaction. A result PR
+ * is published for a changed, already-approved result after the run reached a
+ * terminal success state, so it reuses the decision-publication stage
+ * vocabulary but is never part of the decision channel. Only `url-recorded` may
+ * carry the authoritative pull request URL.
+ */
+export const ResultPrCheckpointPayloadSchema = Schema.Struct({
+  stage: Schema.Literals(PUBLICATION_CHECKPOINT_STAGES),
+  url: Schema.NullOr(Schema.NonEmptyString),
+  commit: GitCommitId,
+  detail: Schema.String,
+});
+
+export type ResultPrCheckpointPayload = (typeof ResultPrCheckpointPayloadSchema)['Type'];
+
+/**
+ * The settled fact that an approved changed result has exactly one ordinary
+ * (non-draft) result pull request for the task branch and accepted commit.
+ * Recording it makes a resumed reconciliation a no-op and lets the handoff and
+ * run report name the exact URL without touching GitHub again.
+ */
+export const ResultPrRecordedPayloadSchema = Schema.Struct({
+  url: Schema.NonEmptyString,
+  commit: GitCommitId,
+  taskBranch: Schema.NonEmptyString,
+});
+
+export type ResultPrRecordedPayload = (typeof ResultPrRecordedPayloadSchema)['Type'];
+
 const RunEventEnvelopeFields = {
   schemaVersion: Schema.Literal(RUN_HISTORY_SCHEMA_VERSION),
   runId: Identifier,
@@ -791,6 +823,18 @@ export const RecoveryRecordedEventSchema = Schema.Struct({
   payload: RecoveryRecordedPayloadSchema,
 });
 
+export const ResultPrCheckpointEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('result-pr-checkpoint'),
+  payload: ResultPrCheckpointPayloadSchema,
+});
+
+export const ResultPrRecordedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('result-pr-recorded'),
+  payload: ResultPrRecordedPayloadSchema,
+});
+
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
@@ -826,6 +870,8 @@ export const RunEventSchema = Schema.Union([
   IntegrationCompletedEventSchema,
   EvidenceManifestEventSchema,
   RecoveryRecordedEventSchema,
+  ResultPrCheckpointEventSchema,
+  ResultPrRecordedEventSchema,
 ]);
 
 export type RunEvent = (typeof RunEventSchema)['Type'];
@@ -906,7 +952,9 @@ export type RunEventDraft =
       readonly payload: IntegrationCompletedPayload;
     }
   | { readonly type: 'evidence-manifest'; readonly payload: EvidenceManifestPayload }
-  | { readonly type: 'recovery-recorded'; readonly payload: RecoveryRecordedPayload };
+  | { readonly type: 'recovery-recorded'; readonly payload: RecoveryRecordedPayload }
+  | { readonly type: 'result-pr-checkpoint'; readonly payload: ResultPrCheckpointPayload }
+  | { readonly type: 'result-pr-recorded'; readonly payload: ResultPrRecordedPayload };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
 
@@ -944,6 +992,8 @@ export interface RunHistoryDerivedState {
   readonly integrationCompleted?: IntegrationCompletedPayload | null;
   readonly evidenceManifests: ReadonlyArray<EvidenceManifestPayload>;
   readonly recoveryDispositions: ReadonlyArray<RecoveryRecordedPayload>;
+  readonly resultPrCheckpoints?: ReadonlyArray<ResultPrCheckpointPayload>;
+  readonly resultPrRecorded?: ResultPrRecordedPayload | null;
 }
 
 export type RunHistoryVerification =
@@ -1639,6 +1689,37 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'result-pr-checkpoint':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          commit: event.payload.commit,
+          detail: event.payload.detail,
+          stage: event.payload.stage,
+          url: event.payload.url,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
+    case 'result-pr-recorded':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          commit: event.payload.commit,
+          taskBranch: event.payload.taskBranch,
+          url: event.payload.url,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
   }
 }
 
@@ -1736,6 +1817,10 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'evidence-manifest', payload: event.payload };
     case 'recovery-recorded':
       return { ...envelope, type: 'recovery-recorded', payload: event.payload };
+    case 'result-pr-checkpoint':
+      return { ...envelope, type: 'result-pr-checkpoint', payload: event.payload };
+    case 'result-pr-recorded':
+      return { ...envelope, type: 'result-pr-recorded', payload: event.payload };
   }
 }
 
@@ -1850,6 +1935,11 @@ export function verifyRunHistoryEvents(
   let integrationCompleted: IntegrationCompletedPayload | null = null;
   const evidenceManifests: Array<EvidenceManifestPayload> = [];
   const recoveryDispositions: Array<RecoveryRecordedPayload> = [];
+  const resultPrCheckpoints: Array<ResultPrCheckpointPayload> = [];
+  const resultPrCheckpointStageIndex = new Map<string, number>();
+  let resultPrRecorded: ResultPrRecordedPayload | null = null;
+  const recordedResultPrCommits = new Set<string>();
+  let changedResultApproved = false;
   const retiredRevisions = new Set<number>();
   const findings: Array<FindingRecord> = [];
   let acceptedPlan: PlanAcceptedPayload | null = null;
@@ -1992,6 +2082,9 @@ export function verifyRunHistoryEvents(
         }
         state = event.payload.to;
         checkpoint = event.payload.checkpoint;
+        if (event.payload.route === 'review-approved') {
+          changedResultApproved = true;
+        }
         break;
       }
       case 'workflow-attempt': {
@@ -3036,6 +3129,86 @@ export function verifyRunHistoryEvents(
         recoveryDispositions.push(event.payload);
         break;
       }
+      case 'result-pr-checkpoint': {
+        if (state !== 'completed' || !changedResultApproved) {
+          return {
+            ok: false,
+            problem: `${label} records a result publication checkpoint outside an approved changed result`,
+          };
+        }
+        const resultCommit = currentResultCommit();
+        if (resultCommit === null || event.payload.commit !== resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} records a result publication checkpoint for a commit other than the current result head`,
+          };
+        }
+        const stageIndex = PUBLICATION_CHECKPOINT_STAGES.indexOf(event.payload.stage);
+        const previousIndex = resultPrCheckpointStageIndex.get(event.payload.commit) ?? -1;
+        if (stageIndex <= previousIndex) {
+          return {
+            ok: false,
+            problem: `${label} records an out-of-order result publication checkpoint`,
+          };
+        }
+        if (event.payload.stage !== 'url-recorded' && event.payload.url !== null) {
+          return {
+            ok: false,
+            problem: `${label} records a result pull request URL before the url-recorded checkpoint`,
+          };
+        }
+        resultPrCheckpointStageIndex.set(event.payload.commit, stageIndex);
+        resultPrCheckpoints.push(event.payload);
+        break;
+      }
+      case 'result-pr-recorded': {
+        if (state !== 'completed' || !changedResultApproved) {
+          return {
+            ok: false,
+            problem: `${label} records a result pull request outside an approved changed result`,
+          };
+        }
+        const resultCommit = currentResultCommit();
+        if (resultCommit === null || event.payload.commit !== resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} records a result pull request for a commit other than the current result head`,
+          };
+        }
+        if (sourceFrozen !== null && event.payload.taskBranch !== sourceFrozen.taskBranch) {
+          return {
+            ok: false,
+            problem: `${label} records a result pull request for a branch other than the frozen task branch`,
+          };
+        }
+        const recordedUrl = [...resultPrCheckpoints]
+          .reverse()
+          .find(
+            (checkpoint) =>
+              checkpoint.stage === 'url-recorded' && checkpoint.commit === event.payload.commit,
+          )?.url;
+        if (recordedUrl === undefined || recordedUrl === null) {
+          return {
+            ok: false,
+            problem: `${label} records a result pull request before the exact URL is durable`,
+          };
+        }
+        if (recordedUrl !== event.payload.url) {
+          return {
+            ok: false,
+            problem: `${label} records a result pull request URL that differs from its url-recorded checkpoint`,
+          };
+        }
+        if (recordedResultPrCommits.has(event.payload.commit)) {
+          return {
+            ok: false,
+            problem: `${label} records a second result pull request for the same commit`,
+          };
+        }
+        recordedResultPrCommits.add(event.payload.commit);
+        resultPrRecorded = event.payload;
+        break;
+      }
     }
     previousHash = event.eventHash;
   }
@@ -3084,6 +3257,8 @@ export function verifyRunHistoryEvents(
       integrationCompleted,
       evidenceManifests,
       recoveryDispositions,
+      resultPrCheckpoints,
+      resultPrRecorded,
     },
   };
 }

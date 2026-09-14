@@ -1231,6 +1231,7 @@ describe('run command through the cli envelope', () => {
             'outcome',
             'provenance',
             'request',
+            'resultPullRequest',
             'runDirectory',
             'runId',
             'stages',
