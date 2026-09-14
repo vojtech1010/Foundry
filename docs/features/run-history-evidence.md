@@ -190,7 +190,8 @@ Applied to [inspection](inspection-and-reporting.md),
   Their `publish-transaction.json` and state/events describe the old policy,
   not Foundry's [decision-only publication](results-and-publication.md) or
   [ADR-0008](../adr/0008-reviewer-completion-and-pr.md). Ordinary Foundry
-  approval remains local. No selected run demonstrates a genuine Reviewer
+  approval completes locally and publishes through the configured result
+  publication. No selected run demonstrates a genuine Reviewer
   `human_decision_required` escalation.
 - **Quality Engineer:** P1 has a legacy Quality Engineer worker and an extra
   accepted commit. P2–P4 do not establish that role merely because a plan or

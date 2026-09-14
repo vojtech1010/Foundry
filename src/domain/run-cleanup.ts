@@ -32,7 +32,7 @@ const DISPOSITION_TEXT: Readonly<Record<RunCleanupDisposition, string>> = {
   failed: 'disposal failed',
 };
 
-export function describeRunCleanupResource(resource: RunCleanupResource): string {
+function describeRunCleanupResource(resource: RunCleanupResource): string {
   return `${resource.kind} "${resource.name}" ${DISPOSITION_TEXT[resource.disposition]}`;
 }
 
