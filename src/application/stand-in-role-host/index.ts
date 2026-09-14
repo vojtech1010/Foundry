@@ -41,6 +41,11 @@ import type {
  * or a deliberately misbehaving read-only mutation that the governed-turn
  * resource observer must detect. The module never performs filesystem work
  * itself; the caller supplies that capability from its own layer.
+ *
+ * The stand-in is argv-free by design: it ignores launch routing entirely,
+ * so per-role `harness`/`model` launch options resolve to this same host and
+ * its `runtimeIdentity` keeps reporting the actually assigned stand-in
+ * provenance (`stand-in-1`/`stand-in`/`stand-in`/`stand-in`).
  */
 
 export const STAND_IN_ROLE_HOST_ADAPTER_VERSION = 'stand-in-1';

@@ -3,6 +3,8 @@ import { Schema } from 'effect';
 import { ROLE_HARNESS_PROTOCOL } from './project-configuration.js';
 import { Identifier } from './run-identity.js';
 
+import type { RoleHarnessName, RoleHarnessSelections } from './project-configuration.js';
+
 export const ROLE_HOST_PROTOCOL_VERSION = 1 as const;
 
 export const ROLE_HOST_PROTOCOL_NAME = ROLE_HARNESS_PROTOCOL;
@@ -20,6 +22,47 @@ export type RoleHostOperation = (typeof ROLE_HOST_OPERATIONS)[number];
 export const ROLE_HOST_ROLES = ['architect', 'coder', 'lead_coder', 'tester', 'reviewer'] as const;
 
 export type RoleHostRole = (typeof ROLE_HOST_ROLES)[number];
+
+/**
+ * The resolved routing for one role: which harness to launch and which model
+ * it must serve. Resolution is a pure projection of the configuration
+ * document, so the same document resolves the same routing on Linux and
+ * Windows; only executable resolution inside the adapter follows platform
+ * rules. This is the stable contract that reporting (`doctor`,
+ * `init --dry-run`) and launching consume.
+ */
+export interface RoleHostRoute {
+  readonly role: RoleHostRole;
+  readonly harness: RoleHarnessName;
+  readonly model: string;
+}
+
+export function resolveRoleHostRoute(
+  selections: RoleHarnessSelections,
+  role: RoleHostRole,
+): RoleHostRoute {
+  const selection = selections[role];
+  return { role, harness: selection.harness, model: selection.model };
+}
+
+/** The resolved routing for every role, keyed by role. */
+export interface RoleHostRoutes {
+  readonly architect: RoleHostRoute;
+  readonly coder: RoleHostRoute;
+  readonly lead_coder: RoleHostRoute;
+  readonly tester: RoleHostRoute;
+  readonly reviewer: RoleHostRoute;
+}
+
+export function resolveAllRoleHostRoutes(selections: RoleHarnessSelections): RoleHostRoutes {
+  return {
+    architect: resolveRoleHostRoute(selections, 'architect'),
+    coder: resolveRoleHostRoute(selections, 'coder'),
+    lead_coder: resolveRoleHostRoute(selections, 'lead_coder'),
+    tester: resolveRoleHostRoute(selections, 'tester'),
+    reviewer: resolveRoleHostRoute(selections, 'reviewer'),
+  };
+}
 
 export const ROLE_HOST_FILESYSTEM_PROFILES = [
   'read_only_snapshot',

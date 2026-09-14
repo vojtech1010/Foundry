@@ -1,6 +1,37 @@
+import type { RoleHostRole } from './role-host.js';
+
 export const PROJECT_CONFIGURATION_SCHEMA_VERSION = 1 as const;
 
 export const ROLE_HARNESS_PROTOCOL = 'foundry-role-host-v1' as const;
+
+/**
+ * Harnesses Foundry knows how to launch. The configuration names one per
+ * role; the exact launch argv and the accepted model catalog per harness are
+ * hardcoded in the role-host adapter (see `src/platform/role-host.ts`), never
+ * carried in configuration. The vocabulary is intentionally small: task 054
+ * owns vendor-accurate launch details and drops the legacy `roleHarness`
+ * block, while this task only establishes the closed per-role selection
+ * contract.
+ */
+export const ROLE_HARNESS_NAMES = ['codex', 'opencode'] as const;
+
+export type RoleHarnessName = (typeof ROLE_HARNESS_NAMES)[number];
+
+/**
+ * The per-role harness and model selection carried in configuration. `model`
+ * is stored trimmed and must be non-empty; whether the trimmed value names a
+ * real model is decided by the harness adapter against its own catalog at
+ * launch time, never by inventing a substitute.
+ */
+export interface RoleHarnessSelection {
+  readonly harness: RoleHarnessName;
+  readonly model: string;
+}
+
+/** Every role names its harness and model; missing roles fail closed. */
+export type RoleHarnessSelections = {
+  readonly [role in RoleHostRole]: RoleHarnessSelection;
+};
 
 export const PUBLICATION_DRAFT = true as const;
 
@@ -115,6 +146,7 @@ export interface ProjectConfiguration {
   readonly sourceBranch: string;
   readonly taskBranchPolicy: string;
   readonly roleHarness: RoleHarnessConfiguration;
+  readonly roles: RoleHarnessSelections;
   readonly timeouts: TimeoutConfiguration;
   readonly retryBudgets: RetryBudgetConfiguration;
   readonly operationalRetryBudgets: OperationalRetryBudgetConfiguration;
