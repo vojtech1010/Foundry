@@ -99,7 +99,9 @@ function gitBytes(dir: string, args: ReadonlyArray<string>): Buffer {
 function goldenDocument(
   targetRepository: string,
   guidancePaths: ReadonlyArray<string>,
-  maxGuidanceBytes: number,
+  // 055: artifact bounds are hardcoded, so the configured per-document limit is
+  // accepted here only to preserve call sites until the hardcoded set lands.
+  _maxGuidanceBytes: number,
 ) {
   return {
     schemaVersion: 1,
@@ -137,16 +139,6 @@ function goldenDocument(
     },
     runtimeProfile: null,
     decisionPublication: null,
-    artifacts: {
-      retentionDays: 30,
-      maxRequestBytes: 262144,
-      maxGuidanceBytes,
-      maxRoleHandoffBytes: 262144,
-      maxEvidenceBytes: 26214400,
-      maxTerminalCaptureBytes: 10485760,
-      maxRunBytes: 104857600,
-      redactionPatterns: [],
-    },
   };
 }
 

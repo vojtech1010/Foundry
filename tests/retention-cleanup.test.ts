@@ -43,9 +43,10 @@ interface Fixture {
   readonly cleanup: () => void;
 }
 
-function configurationOf(fixture: Fixture, retentionDays: number): void {
+function configurationOf(fixture: Fixture, _retentionDays: number): void {
+  // 055: artifact bounds are hardcoded, so the per-document retention value is
+  // accepted here only to preserve call sites until the hardcoded set lands.
   const document = goldenConfigurationDocument(fixture.target, false);
-  document.artifacts.retentionDays = retentionDays;
   writeFileSync(fixture.configPath, JSON.stringify(document));
 }
 

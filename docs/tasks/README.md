@@ -83,6 +83,9 @@ orchestration behavior does not.
 | [050](050-checks-before-runtime.md)             | Project checks finish before the application is started                |
 | [051](051-head-advance-invalidates-evidence.md) | Any new accepted result commit retires older checks and observations   |
 | [052](052-captures-count-by-content.md)         | Captures count by content, not by filename or caption                  |
+| [053](053-per-role-harness-models.md)           | Configuration names one harness and model per role                     |
+| [054](054-bundled-role-host.md)                 | Foundry ships the role host; no external adapter in config             |
+| [055](055-hardcoded-artifact-bounds.md)         | Artifact bounds are hardcoded, not configured                          |
 
 ## Walkable sequential workflow
 

@@ -122,16 +122,6 @@ function goldenDocument(
     },
     runtimeProfile: null,
     decisionPublication: null,
-    artifacts: {
-      retentionDays: 30,
-      maxRequestBytes: 262144,
-      maxGuidanceBytes: 1048576,
-      maxRoleHandoffBytes: 262144,
-      maxEvidenceBytes: 26214400,
-      maxTerminalCaptureBytes: 10485760,
-      maxRunBytes: 104857600,
-      redactionPatterns: [],
-    },
   };
 }
 
