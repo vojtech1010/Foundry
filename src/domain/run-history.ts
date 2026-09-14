@@ -33,6 +33,7 @@ import {
   WorkflowStateSchema,
   allowsWorkflowRouteFrom,
   isActiveWorkflowState,
+  isTerminalWorkflowState,
 } from './workflow.js';
 
 import type {
@@ -95,6 +96,7 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'integration-declared',
   'integration-completed',
   'evidence-manifest',
+  'recovery-recorded',
 ] as const;
 
 export type RunHistoryEventType = (typeof RUN_HISTORY_EVENT_TYPES)[number];
@@ -552,6 +554,29 @@ export const EvidenceManifestPayloadSchema = Schema.Struct({
 
 export type EvidenceManifestPayload = (typeof EvidenceManifestPayloadSchema)['Type'];
 
+export const RECOVERY_DISPOSITIONS = [
+  'accept',
+  'continue_waiting',
+  'retry',
+  'blocked',
+  'human_recovery',
+] as const;
+
+export type RecoveryDisposition = (typeof RECOVERY_DISPOSITIONS)[number];
+
+/**
+ * Durable record of one recovery disposition chosen for a resumable run. The
+ * disposition is an audit fact about how Foundry reconciled recorded evidence;
+ * it is never a workflow transition by itself. A `human_recovery` disposition
+ * is an integrity stop for a person, not a manual workflow mode.
+ */
+export const RecoveryRecordedPayloadSchema = Schema.Struct({
+  disposition: Schema.Literals(RECOVERY_DISPOSITIONS),
+  reason: Schema.NonEmptyString,
+});
+
+export type RecoveryRecordedPayload = (typeof RecoveryRecordedPayloadSchema)['Type'];
+
 const RunEventEnvelopeFields = {
   schemaVersion: Schema.Literal(RUN_HISTORY_SCHEMA_VERSION),
   runId: Identifier,
@@ -760,6 +785,12 @@ export const EvidenceManifestEventSchema = Schema.Struct({
   payload: EvidenceManifestPayloadSchema,
 });
 
+export const RecoveryRecordedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('recovery-recorded'),
+  payload: RecoveryRecordedPayloadSchema,
+});
+
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
@@ -794,6 +825,7 @@ export const RunEventSchema = Schema.Union([
   IntegrationDeclaredEventSchema,
   IntegrationCompletedEventSchema,
   EvidenceManifestEventSchema,
+  RecoveryRecordedEventSchema,
 ]);
 
 export type RunEvent = (typeof RunEventSchema)['Type'];
@@ -873,7 +905,8 @@ export type RunEventDraft =
       readonly type: 'integration-completed';
       readonly payload: IntegrationCompletedPayload;
     }
-  | { readonly type: 'evidence-manifest'; readonly payload: EvidenceManifestPayload };
+  | { readonly type: 'evidence-manifest'; readonly payload: EvidenceManifestPayload }
+  | { readonly type: 'recovery-recorded'; readonly payload: RecoveryRecordedPayload };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
 
@@ -910,6 +943,7 @@ export interface RunHistoryDerivedState {
   readonly integrationDeclared?: IntegrationDeclaredPayload | null;
   readonly integrationCompleted?: IntegrationCompletedPayload | null;
   readonly evidenceManifests: ReadonlyArray<EvidenceManifestPayload>;
+  readonly recoveryDispositions: ReadonlyArray<RecoveryRecordedPayload>;
 }
 
 export type RunHistoryVerification =
@@ -1591,6 +1625,20 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'recovery-recorded':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          disposition: event.payload.disposition,
+          reason: event.payload.reason,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
   }
 }
 
@@ -1686,6 +1734,8 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'integration-completed', payload: event.payload };
     case 'evidence-manifest':
       return { ...envelope, type: 'evidence-manifest', payload: event.payload };
+    case 'recovery-recorded':
+      return { ...envelope, type: 'recovery-recorded', payload: event.payload };
   }
 }
 
@@ -1799,6 +1849,7 @@ export function verifyRunHistoryEvents(
   let integrationDeclared: IntegrationDeclaredPayload | null = null;
   let integrationCompleted: IntegrationCompletedPayload | null = null;
   const evidenceManifests: Array<EvidenceManifestPayload> = [];
+  const recoveryDispositions: Array<RecoveryRecordedPayload> = [];
   const retiredRevisions = new Set<number>();
   const findings: Array<FindingRecord> = [];
   let acceptedPlan: PlanAcceptedPayload | null = null;
@@ -2975,6 +3026,16 @@ export function verifyRunHistoryEvents(
         evidenceManifests.push(event.payload);
         break;
       }
+      case 'recovery-recorded': {
+        if (state === null || isTerminalWorkflowState(state)) {
+          return {
+            ok: false,
+            problem: `${label} records a recovery disposition for a terminal or unstarted run`,
+          };
+        }
+        recoveryDispositions.push(event.payload);
+        break;
+      }
     }
     previousHash = event.eventHash;
   }
@@ -3022,6 +3083,7 @@ export function verifyRunHistoryEvents(
       integrationDeclared,
       integrationCompleted,
       evidenceManifests,
+      recoveryDispositions,
     },
   };
 }
