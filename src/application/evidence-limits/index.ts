@@ -64,7 +64,7 @@ export function admitOptionalEvidence(options: {
   return { ok: true };
 }
 
-export function compileRedactionPattern(pattern: string): RegExp | null {
+function compileRedactionPattern(pattern: string): RegExp | null {
   try {
     return new RegExp(pattern, 'gu');
   } catch {

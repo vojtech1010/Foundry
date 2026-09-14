@@ -24,8 +24,8 @@ one requirement a later agent can deliver without reading the whole product.
 - Technical shape is intentionally omitted. Behavior lives in the linked
   feature pages.
 
-These tasks assume the current skeleton: toolchain and boundaries exist;
-orchestration behavior does not.
+These tasks assume the implemented baseline: the toolchain and architectural
+boundaries exist, and autonomous orchestration is in place.
 
 ## Recommended order
 

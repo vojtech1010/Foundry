@@ -55,7 +55,9 @@ history is never reported. Cleanup progress is rebuilt the same way from cleanup
 events without changing the accepted result. An incomplete or invalid stream or
 witness fails the command with a typed integrity report naming the canonical
 history and never repairs, truncates, appends, or synthesizes state.
-Resume/recovery is not delivered yet.
+Resume/recovery reconciles an interrupted or waiting run in place rather than
+starting a second run: it reattaches a settled role attempt, applies an
+authenticated human decision, or abandons the run with a recorded reason.
 
 ## Inspect artifacts and findings
 
@@ -143,7 +145,9 @@ decision-publication events when they exist. Before those records exist the
 fields stay null or placeholders and the decision section says so, rather than
 inferring a decision from prose or file presence.
 
-Normal approved runs have no human decision and no Foundry-created PR.
+Normal approved runs have no human decision; when publication is configured they
+publish the approved result through the configured result publication rather than
+creating a decision draft PR.
 
 ## Statistics and retained information
 
