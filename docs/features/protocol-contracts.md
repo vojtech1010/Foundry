@@ -325,6 +325,16 @@ created. An operator interruption uses the platform's conventional interrupt
 exit code after checkpointing; it never converts an active role into failure or
 resubmits it.
 
+An approved changed result is taken forward by the resolved result-publication
+mode: `draft-pr`, `non-draft-pr`, `non-draft-pr-auto-merge`, or `direct-merge`.
+A `run` or `resume` envelope for a result pull request carries
+`data.resultPullRequest` with the recorded URL. `direct-merge` holds that field
+at `null` and instead carries the additive `data.resultMerged` object with the
+merged `commit`, `sourceBranch`, and `fastForward` facts. Auto-merge enablement
+is a journaled checkpoint, not a separate envelope field. Every mode ends
+`completed` (exit `0`), and an uncertain result publication stays `completed`
+for a later resume to reconcile the same run.
+
 The complete public command surface is:
 
 - `run`, `resume`, `status`, and `inspect`;

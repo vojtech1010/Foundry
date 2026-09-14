@@ -36,7 +36,9 @@ import type { RunEvent } from '../src/domain/run-history.js';
 import type { VerifiedRunHistory } from '../src/application/run-history/index.js';
 import type {
   GitHubCreatePullRequestOptions,
+  GitHubEnableAutoMergeOptions,
   GitHubPullRequest,
+  GitHubPushSourceBranchOptions,
   GitHubPushTaskBranchOptions,
 } from '../src/application/decision-publication/index.js';
 
@@ -100,6 +102,21 @@ function setupFixture(label: string): Fixture {
     workspace: join(target, '.agent', 'worktrees', TASK_ID),
     cleanup: () => rmSync(base, { recursive: true, force: true }),
   };
+}
+
+/**
+ * Rewrites the fixture configuration with an explicit result-publication mode so
+ * a routing walk can exercise a non-default mode end to end.
+ */
+function configureResultMode(fixture: Fixture, mode: string, mergeMethod?: string): void {
+  writeFileSync(
+    fixture.configPath,
+    JSON.stringify({
+      ...goldenConfigurationDocument(fixture.target, true),
+      decisionPublication: { remote: 'origin', draft: true, maintainersCanModify: false },
+      resultPublication: mergeMethod === undefined ? { mode } : { mode, mergeMethod },
+    }),
+  );
 }
 
 function selectTurn(
@@ -291,6 +308,8 @@ interface RoutingGitHubCalls {
   readonly open: Array<GitHubCreatePullRequestOptions>;
   readonly push: Array<GitHubPushTaskBranchOptions>;
   readonly draft: Array<GitHubCreatePullRequestOptions>;
+  readonly sourcePush: Array<GitHubPushSourceBranchOptions>;
+  readonly autoMerge: Array<GitHubEnableAutoMergeOptions>;
 }
 
 interface RoutingGitHubHarness {
@@ -298,46 +317,79 @@ interface RoutingGitHubHarness {
   readonly calls: RoutingGitHubCalls;
 }
 
+interface RoutingGitHubOptions {
+  readonly draft?: boolean;
+  readonly autoMerge?: boolean;
+}
+
 /**
- * A minimal GitHub publication adapter for the green-path routing walk. It
- * records the non-force push and returns the one ordinary (non-draft) result
- * pull request for the task branch, resolving the branch head from the real
- * repository so the publication can confirm the exact accepted commit.
+ * A minimal GitHub publication adapter for a green-path routing walk. It records
+ * the non-force push and returns one result pull request for the task branch,
+ * using the requested draft flag and resolving the branch head from the real
+ * repository so the publication can confirm the exact accepted commit. When
+ * `autoMerge` is enabled it records the auto-merge enablement instead of
+ * refusing it.
  */
-function routingGitHubPublication(fixture: Fixture): RoutingGitHubHarness {
-  const calls: RoutingGitHubCalls = { open: [], push: [], draft: [] };
+function routingGitHubPublication(
+  fixture: Fixture,
+  options: RoutingGitHubOptions = {},
+): RoutingGitHubHarness {
+  const draft = options.draft ?? false;
+  const calls: RoutingGitHubCalls = {
+    open: [],
+    push: [],
+    draft: [],
+    sourcePush: [],
+    autoMerge: [],
+  };
   const pullRequestNumber = 42;
   const layer = Layer.succeed(
     GitHubPublication,
     GitHubPublication.of({
-      lookupRepositoryIdentity: (options) => Effect.succeed({ repository: options.repository }),
+      lookupRepositoryIdentity: (lookup) => Effect.succeed({ repository: lookup.repository }),
       lookupExactPullRequest: () =>
         Effect.die(new Error('result publication must not look up a draft PR')),
       createDraftPullRequest: () =>
         Effect.die(new Error('result publication must not create a draft PR')),
-      openResultPullRequest: (options) => {
-        calls.open.push(options);
+      openResultPullRequest: (open) => {
+        calls.open.push(open);
         return Effect.sync(() => {
           const headCommit = gitExec(fixture.target, [
             'rev-parse',
-            `refs/heads/${options.headBranch}`,
+            `refs/heads/${open.headBranch}`,
           ]).trim();
           return {
             number: pullRequestNumber,
             url: `${PUBLICATION_REMOTE_URL.replace(/\.git$/u, '')}/pull/${pullRequestNumber}`,
-            draft: false,
-            headBranch: options.headBranch,
+            draft,
+            headBranch: open.headBranch,
             headCommit,
-            baseBranch: options.baseBranch,
+            baseBranch: open.baseBranch,
           } satisfies GitHubPullRequest;
         });
       },
       refreshOwnedDraftPullRequestBody: () =>
         Effect.die(new Error('result publication must not refresh a draft PR')),
-      pushTaskBranch: (options) => {
-        calls.push.push(options);
+      enablePullRequestAutoMerge: (enable) => {
+        if (options.autoMerge !== true) {
+          return Effect.die(new Error('result publication must not enable auto-merge'));
+        }
+        calls.autoMerge.push(enable);
+        return Effect.succeed({
+          number: enable.pullRequestNumber,
+          url: `${PUBLICATION_REMOTE_URL.replace(/\.git$/u, '')}/pull/${enable.pullRequestNumber}`,
+          draft,
+          headBranch: '',
+          headCommit: '',
+          baseBranch: '',
+        } satisfies GitHubPullRequest);
+      },
+      pushTaskBranch: (push) => {
+        calls.push.push(push);
         return Effect.void;
       },
+      pushSourceBranch: () =>
+        Effect.die(new Error('result publication must not push the source branch')),
       listIssueCommentsAfter: () => Effect.succeed({ comments: [], truncated: false }),
       collaboratorPermission: () => Effect.succeed({ permission: 'maintain' }),
     }),
@@ -361,7 +413,10 @@ function routingDefaultPublication(): Layer.Layer<GitHubPublication> {
       openResultPullRequest: () => Effect.die(new Error('no result PR is expected for this run')),
       refreshOwnedDraftPullRequestBody: () =>
         Effect.die(new Error('no draft PR is expected for this run')),
+      enablePullRequestAutoMerge: () =>
+        Effect.die(new Error('no auto-merge is expected for this run')),
       pushTaskBranch: () => Effect.die(new Error('no push is expected for this run')),
+      pushSourceBranch: () => Effect.die(new Error('no source push is expected for this run')),
       listIssueCommentsAfter: () => Effect.succeed({ comments: [], truncated: false }),
       collaboratorPermission: () => Effect.succeed({ permission: 'maintain' }),
     }),
@@ -375,7 +430,13 @@ function routingDefaultPublication(): Layer.Layer<GitHubPublication> {
  * reconcile the exact URL in place.
  */
 function routingDraftPrPublication(): RoutingGitHubHarness {
-  const calls: RoutingGitHubCalls = { open: [], push: [], draft: [] };
+  const calls: RoutingGitHubCalls = {
+    open: [],
+    push: [],
+    draft: [],
+    sourcePush: [],
+    autoMerge: [],
+  };
   const pullRequestNumber = 7;
   const layer = Layer.succeed(
     GitHubPublication,
@@ -396,10 +457,63 @@ function routingDraftPrPublication(): RoutingGitHubHarness {
       openResultPullRequest: () => Effect.die(new Error('result publication must not open a PR')),
       refreshOwnedDraftPullRequestBody: () =>
         Effect.die(new Error('result publication must not refresh a draft PR')),
+      enablePullRequestAutoMerge: () =>
+        Effect.die(new Error('result publication must not enable auto-merge')),
       pushTaskBranch: (options) => {
         calls.push.push(options);
         return Effect.void;
       },
+      pushSourceBranch: () =>
+        Effect.die(new Error('result publication must not push the source branch')),
+      listIssueCommentsAfter: () => Effect.succeed({ comments: [], truncated: false }),
+      collaboratorPermission: () => Effect.succeed({ permission: 'maintain' }),
+    }),
+  );
+  return { layer, calls };
+}
+
+/**
+ * A deterministic GitHub adapter for `direct-merge`: it refuses every
+ * pull-request mutation and performs the real leased source-branch push against
+ * the fixture remote so the walk's Git facts are genuine.
+ */
+function routingDirectMergePublication(): RoutingGitHubHarness {
+  const calls: RoutingGitHubCalls = {
+    open: [],
+    push: [],
+    draft: [],
+    sourcePush: [],
+    autoMerge: [],
+  };
+  const layer = Layer.succeed(
+    GitHubPublication,
+    GitHubPublication.of({
+      lookupRepositoryIdentity: (options) => Effect.succeed({ repository: options.repository }),
+      lookupExactPullRequest: () =>
+        Effect.die(new Error('direct-merge must not look up a decision draft PR')),
+      createDraftPullRequest: () =>
+        Effect.die(new Error('direct-merge must not create a draft PR')),
+      openResultPullRequest: () => Effect.die(new Error('direct-merge must not open a PR')),
+      refreshOwnedDraftPullRequestBody: () =>
+        Effect.die(new Error('direct-merge must not refresh a draft PR')),
+      enablePullRequestAutoMerge: () =>
+        Effect.die(new Error('direct-merge must not enable auto-merge')),
+      pushTaskBranch: () => Effect.die(new Error('direct-merge must not push the task branch')),
+      pushSourceBranch: (options) =>
+        Effect.sync(() => {
+          calls.sourcePush.push(options);
+          execFileSync(
+            'git',
+            [
+              'push',
+              '--porcelain',
+              `--force-with-lease=refs/heads/${options.sourceBranch}:${options.expectedRemoteCommit}`,
+              options.remote,
+              `${options.commit}:refs/heads/${options.sourceBranch}`,
+            ],
+            { cwd: options.repositoryPath, encoding: 'utf8' },
+          );
+        }),
       listIssueCommentsAfter: () => Effect.succeed({ comments: [], truncated: false }),
       collaboratorPermission: () => Effect.succeed({ permission: 'maintain' }),
     }),
@@ -582,6 +696,7 @@ describe('automatic routing after review', () => {
           throw new Error(`Expected a run workflow envelope: ${result.stdout}`);
         }
         expect(envelope.data.resultPullRequest).toBe(expectedUrl);
+        expect(envelope.data.resultMerged ?? null).toBeNull();
 
         const history = yield* readHistory(fixture, runId);
         expect(history.derived.state).toBe('completed');
@@ -606,6 +721,185 @@ describe('automatic routing after review', () => {
         expect(handoff.publication.created).toBe(true);
         expect(handoff.publication.kind).toBe('result');
         expect(handoff.publication.url).toBe(expectedUrl);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.live('direct-merge takes the approved result forward without opening a PR', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture('direct-merge');
+      try {
+        configureResultMode(fixture, 'direct-merge');
+        const runId = 'RUN-ROUTE-DIRECT';
+        const github = routingDirectMergePublication();
+        const result = yield* runRouting(
+          fixture,
+          runId,
+          {
+            architect: ROUTING_ARCHITECT,
+            coder: {
+              narrative: 'Implemented the change.',
+              control: { schemaVersion: 1, outcome: 'implemented' },
+            },
+            reviewer: {
+              narrative: 'The changed commit satisfies the request.',
+              control: { schemaVersion: 1, outcome: 'approved' },
+            },
+          },
+          true,
+          { runGit: publicationRunGit(), github: github.layer },
+        );
+        expect(result.exitCode).toBe(0);
+
+        const history = yield* readHistory(fixture, runId);
+        expect(history.derived.state).toBe('completed');
+        const resultCommit = history.derived.implementation?.commit ?? null;
+        expect(resultCommit).not.toBeNull();
+        expect(history.derived.resultMergeRecorded).toEqual({
+          commit: resultCommit,
+          taskBranch: history.derived.worktreeReady?.taskBranch,
+          remote: 'origin',
+          sourceBranch: 'main',
+          fastForward: true,
+        });
+        expect(history.derived.resultPrRecorded ?? null).toBeNull();
+        expect(history.events.some((event) => event.type === 'result-pr-recorded')).toBe(false);
+        expect(github.calls.open).toHaveLength(0);
+        expect(github.calls.push).toHaveLength(0);
+        expect(github.calls.sourcePush).toHaveLength(1);
+        expect(github.calls.sourcePush[0]?.commit).toBe(resultCommit);
+
+        const envelope = Schema.decodeUnknownSync(ReportEnvelopeJson)(result.stdout);
+        if (!envelope.ok || !('workflowState' in envelope.data)) {
+          throw new Error(`Expected a run workflow envelope: ${result.stdout}`);
+        }
+        expect(envelope.data.resultPullRequest ?? null).toBeNull();
+        expect(envelope.data.resultMerged).toEqual({
+          commit: resultCommit,
+          sourceBranch: 'main',
+          fastForward: true,
+        });
+
+        const remoteHead = gitExec(fixture.target, ['ls-remote', 'origin', 'refs/heads/main'])
+          .split('\t')[0]
+          ?.trim();
+        expect(remoteHead).toBe(resultCommit);
+
+        const handoff = Schema.decodeUnknownSync(HandoffDocumentJson)(
+          readFileSync(join(fixture.target, '.agent', 'runs', runId, HANDOFF_FILENAME), 'utf8'),
+        );
+        expect(handoff.publication.created).toBe(false);
+        expect(handoff.publication.merged).toEqual({
+          commit: resultCommit,
+          sourceBranch: 'main',
+          fastForward: true,
+        });
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.live('draft-pr mode publishes a draft result PR through a full run', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture('draft-pr');
+      try {
+        configureResultMode(fixture, 'draft-pr');
+        const runId = 'RUN-ROUTE-DRAFT';
+        const github = routingGitHubPublication(fixture, { draft: true });
+        const result = yield* runRouting(
+          fixture,
+          runId,
+          {
+            architect: ROUTING_ARCHITECT,
+            coder: {
+              narrative: 'Implemented the change.',
+              control: { schemaVersion: 1, outcome: 'implemented' },
+            },
+            reviewer: {
+              narrative: 'The changed commit satisfies the request.',
+              control: { schemaVersion: 1, outcome: 'approved' },
+            },
+          },
+          true,
+          { runGit: publicationRunGit(), github: github.layer },
+        );
+        expect(result.exitCode).toBe(0);
+
+        const expectedUrl = 'https://github.com/example/target/pull/42';
+        const envelope = Schema.decodeUnknownSync(ReportEnvelopeJson)(result.stdout);
+        if (!envelope.ok || !('request' in envelope.data) || !('workflowState' in envelope.data)) {
+          throw new Error(`Expected a run workflow envelope: ${result.stdout}`);
+        }
+        expect(envelope.data.resultPullRequest).toBe(expectedUrl);
+        expect(envelope.data.resultMerged ?? null).toBeNull();
+
+        const history = yield* readHistory(fixture, runId);
+        expect(history.derived.resultPrRecorded?.url).toBe(expectedUrl);
+        expect(github.calls.open).toHaveLength(1);
+        expect(github.calls.open[0]?.draft).toBe(true);
+        expect(github.calls.autoMerge).toHaveLength(0);
+        expect(history.derived.resultPrCheckpoints?.map((checkpoint) => checkpoint.stage)).toEqual([
+          'pre-push',
+          'pushed',
+          'pull-request-created',
+          'url-recorded',
+        ]);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.live('non-draft-pr-auto-merge mode enables auto-merge through a full run', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture('auto-merge');
+      try {
+        configureResultMode(fixture, 'non-draft-pr-auto-merge', 'squash');
+        const runId = 'RUN-ROUTE-AUTOMERGE';
+        const github = routingGitHubPublication(fixture, { autoMerge: true });
+        const result = yield* runRouting(
+          fixture,
+          runId,
+          {
+            architect: ROUTING_ARCHITECT,
+            coder: {
+              narrative: 'Implemented the change.',
+              control: { schemaVersion: 1, outcome: 'implemented' },
+            },
+            reviewer: {
+              narrative: 'The changed commit satisfies the request.',
+              control: { schemaVersion: 1, outcome: 'approved' },
+            },
+          },
+          true,
+          { runGit: publicationRunGit(), github: github.layer },
+        );
+        expect(result.exitCode).toBe(0);
+
+        const expectedUrl = 'https://github.com/example/target/pull/42';
+        const history = yield* readHistory(fixture, runId);
+        expect(history.derived.resultPrRecorded?.url).toBe(expectedUrl);
+        expect(github.calls.open[0]?.draft).toBe(false);
+        expect(github.calls.autoMerge).toEqual([
+          { repository: 'example/target', pullRequestNumber: 42, mergeMethod: 'squash' },
+        ]);
+        expect(history.derived.resultPrCheckpoints?.map((checkpoint) => checkpoint.stage)).toEqual([
+          'pre-push',
+          'pushed',
+          'pull-request-created',
+          'url-recorded',
+          'auto-merge-enabled',
+        ]);
+
+        const envelope = Schema.decodeUnknownSync(ReportEnvelopeJson)(result.stdout);
+        if (!envelope.ok || !('workflowState' in envelope.data)) {
+          throw new Error(`Expected a run workflow envelope: ${result.stdout}`);
+        }
+        expect(envelope.data.resultPullRequest).toBe(expectedUrl);
+        expect(envelope.data.resultMerged ?? null).toBeNull();
       } finally {
         fixture.cleanup();
       }

@@ -12,21 +12,35 @@ import { RunGit } from '../git-provisioning/index.js';
 import { ReadinessGit, describePublicationReadiness } from '../readiness/index.js';
 import { appendRunEvent, readVerifiedRunHistory } from '../run-history/index.js';
 
-import type { PublicationCheckpointStage } from '../../domain/decision-publication.js';
-import type { ProjectConfiguration } from '../../domain/project-configuration.js';
-import type { RunEvent, RunHistoryDerivedState } from '../../domain/run-history.js';
+import type {
+  ProjectConfiguration,
+  ResultPublicationMode,
+} from '../../domain/project-configuration.js';
+import type {
+  ResultPublicationCheckpointStage,
+  RunEvent,
+  RunHistoryDerivedState,
+} from '../../domain/run-history.js';
 import type { RunHistoryError, RunHistoryStorage } from '../run-history/index.js';
 
 /**
- * The outcome of publishing the ordinary result pull request for an approved
- * changed result. `published` names the exact result PR URL; `skipped` means
- * the run legitimately completed without a result PR (publication not
- * configured or not eligible, no changed result, or no ordinary approval);
- * `uncertain` means the transaction could not be settled safely, and the same
- * run must be resumed so the journal and GitHub can be reconciled in place.
+ * The outcome of publishing the ordinary result for an approved changed result.
+ * `published` names the exact result pull request URL; `merged` records that the
+ * accepted commit was taken forward by updating the configured source branch;
+ * `skipped` means the run legitimately completed without a remote result
+ * (publication not configured or not eligible, no changed result, or no ordinary
+ * approval); `uncertain` means the transaction could not be settled safely, and
+ * the same run must be resumed so the journal and remote can be reconciled in
+ * place.
  */
 export type ResultPublicationReport =
   | { readonly outcome: 'published'; readonly url: string }
+  | {
+      readonly outcome: 'merged';
+      readonly commit: string;
+      readonly sourceBranch: string;
+      readonly fastForward: boolean;
+    }
   | { readonly outcome: 'skipped'; readonly reason: string }
   | { readonly outcome: 'uncertain'; readonly problem: string };
 
@@ -40,6 +54,7 @@ export type ResultPublicationError = RunHistoryError;
 
 export interface ResultPullRequestBodyInput {
   readonly runId: string;
+  readonly mode: ResultPublicationMode;
   readonly sourceCommit: string;
   readonly resultCommit: string;
   readonly taskBranch: string;
@@ -47,19 +62,19 @@ export interface ResultPullRequestBodyInput {
 }
 
 /**
- * Renders the ordinary result pull request body. It presents the approved
- * result and the exact accepted commit for the team's normal GitHub process; it
- * is never a request for human judgment and carries no authenticated Foundry
- * command.
+ * Renders the ordinary result pull request body for the configured publication
+ * mode. It presents the approved result and the exact accepted commit for the
+ * team's normal GitHub process; it is never a request for human judgment and
+ * carries no authenticated Foundry command. The taking-forward text states what
+ * the mode does with the result instead of a blanket no-merge claim.
  */
 export function renderResultPullRequestBody(input: ResultPullRequestBodyInput): string {
   const lines = [
     `# Approved result for ${input.runId}`,
     '',
-    'Foundry completed this run and opened the ordinary pull request for the',
-    'exact approved result. This publishes the team result for review and merge',
-    'through their normal GitHub process; it is not a request for human',
-    'judgment and it does not mean the work is merged.',
+    'Foundry completed this run and prepared the exact approved result for this',
+    'publication mode. This is the team result surface; it is not a request for',
+    'human judgment and it does not itself mean the work is merged.',
     '',
     '## Result',
     '',
@@ -78,13 +93,23 @@ export function renderResultPullRequestBody(input: ResultPullRequestBodyInput): 
     }
     lines.push('');
   }
-  lines.push(
-    '## Taking this result forward',
-    '',
-    "Review and merge this pull request through the team's normal GitHub process.",
-    'Foundry never force-pushes, merges, closes, or rewrites history.',
-    '',
-  );
+  lines.push('## Taking this result forward', '');
+  if (input.mode === 'direct-merge') {
+    lines.push('Foundry updated the configured source branch to the accepted result commit.', '');
+  } else if (input.mode === 'non-draft-pr-auto-merge') {
+    lines.push(
+      "Review this pull request through the team's normal GitHub process.",
+      'GitHub may merge this pull request automatically once required checks pass.',
+      '',
+    );
+  } else {
+    lines.push(
+      "Review and merge this pull request through the team's normal GitHub process.",
+      'Foundry never merges a result pull request itself; the merge stays the',
+      "team's action.",
+      '',
+    );
+  }
   return lines.join('\n');
 }
 
@@ -100,6 +125,20 @@ function skipped(reason: string): ResultPublicationReport {
 
 function uncertain(problem: string): ResultPublicationReport {
   return { outcome: 'uncertain', problem };
+}
+
+/**
+ * Reads the numeric pull request id from a recorded GitHub pull request URL so a
+ * resumed auto-merge enablement can target the surviving pull request without a
+ * second lookup. A URL that does not end in a pull request number is refused by
+ * the caller as uncertain rather than guessed.
+ */
+function pullRequestNumberFromUrl(url: string): number | null {
+  const match = /\/pull\/(\d+)\/?$/u.exec(url);
+  if (match === null) {
+    return null;
+  }
+  return Number.parseInt(match[1] ?? '', 10);
 }
 
 function checkpointsFor(
@@ -250,12 +289,14 @@ export const publishResultPr = Effect.fn('publishResultPr')(function* (
     );
   }
 
+  const mode = configuration.resultPublication.mode;
+  const mergeMethod = configuration.resultPublication.mergeMethod;
   const attempt = checkpointsFor(history.derived, resultCommit);
-  const hasStage = (stage: PublicationCheckpointStage): boolean =>
+  const hasStage = (stage: ResultPublicationCheckpointStage): boolean =>
     attempt.some((checkpoint) => checkpoint.stage === stage);
 
   const appendCheckpoint = Effect.fn('publishResultPr.appendCheckpoint')(function* (
-    stage: PublicationCheckpointStage,
+    stage: ResultPublicationCheckpointStage,
     url: string | null,
     detail: string,
   ) {
@@ -270,6 +311,93 @@ export const publishResultPr = Effect.fn('publishResultPr')(function* (
         } as const),
     });
   });
+
+  const recordResultMerge = Effect.fn('publishResultPr.recordResultMerge')(function* (
+    fastForward: boolean,
+  ) {
+    yield* appendRunEvent({
+      runDirectory,
+      runId,
+      createIfMissing: false,
+      build: () =>
+        Effect.succeed({
+          type: 'result-merge-recorded',
+          payload: {
+            commit: resultCommit,
+            taskBranch,
+            remote: publication.remote,
+            sourceBranch: configuration.sourceBranch,
+            fastForward,
+          },
+        } as const),
+    });
+  });
+
+  if (mode === 'direct-merge') {
+    const settled = history.derived.resultMergeRecorded ?? null;
+    if (settled !== null && settled.commit === resultCommit) {
+      return {
+        outcome: 'merged',
+        commit: resultCommit,
+        sourceBranch: configuration.sourceBranch,
+        fastForward: settled.fastForward,
+      } as const;
+    }
+    if (hasStage('source-branch-updated')) {
+      const observed = remoteSource.success.commit;
+      if (observed === resultCommit) {
+        yield* recordResultMerge(true);
+        return {
+          outcome: 'merged',
+          commit: resultCommit,
+          sourceBranch: configuration.sourceBranch,
+          fastForward: true,
+        } as const;
+      }
+      return uncertain(
+        `Source branch "${configuration.sourceBranch}" is at ${observed} instead of the accepted result commit ${resultCommit}`,
+      );
+    }
+    if (!hasStage('pre-push')) {
+      yield* appendCheckpoint(
+        'pre-push',
+        null,
+        `verified "${taskBranch}" at ${resultCommit} for ${repository}`,
+      );
+    }
+    const ancestor = yield* readinessGit
+      .run(
+        ['merge-base', '--is-ancestor', remoteSource.success.commit, resultCommit],
+        configuration.targetRepository,
+      )
+      .pipe(Effect.result);
+    const fastForward = Result.isSuccess(ancestor) && ancestor.success.exitCode === 0;
+    const pushed = yield* github
+      .pushSourceBranch({
+        repositoryPath: configuration.targetRepository,
+        remote: publication.remote,
+        sourceBranch: configuration.sourceBranch,
+        commit: resultCommit,
+        expectedRemoteCommit: remoteSource.success.commit,
+        runId,
+      })
+      .pipe(Effect.result);
+    if (Result.isFailure(pushed)) {
+      return uncertain(pushed.failure.message);
+    }
+    yield* appendCheckpoint(
+      'source-branch-updated',
+      null,
+      `updated "${configuration.sourceBranch}" to ${resultCommit} on "${publication.remote}"`,
+    );
+    yield* recordResultMerge(fastForward);
+    return {
+      outcome: 'merged',
+      commit: resultCommit,
+      sourceBranch: configuration.sourceBranch,
+      fastForward,
+    } as const;
+  }
 
   if (!hasStage('pre-push')) {
     yield* appendCheckpoint(
@@ -304,6 +432,7 @@ export const publishResultPr = Effect.fn('publishResultPr')(function* (
   if (url === null) {
     const body = renderResultPullRequestBody({
       runId,
+      mode,
       sourceCommit: implementation.baseCommit,
       resultCommit,
       taskBranch,
@@ -317,6 +446,7 @@ export const publishResultPr = Effect.fn('publishResultPr')(function* (
         body,
         headBranch: taskBranch,
         baseBranch: configuration.sourceBranch,
+        draft: mode === 'draft-pr',
       })
       .pipe(Effect.result);
     if (Result.isFailure(opened)) {
@@ -330,10 +460,32 @@ export const publishResultPr = Effect.fn('publishResultPr')(function* (
     yield* appendCheckpoint(
       'pull-request-created',
       null,
-      `opened ordinary result pull request #${opened.success.number}`,
+      `opened ${mode === 'draft-pr' ? 'draft' : 'ordinary'} result pull request #${opened.success.number}`,
     );
     url = opened.success.url;
     yield* appendCheckpoint('url-recorded', url, `recorded ${url}`);
+  }
+
+  if (mode === 'non-draft-pr-auto-merge' && !hasStage('auto-merge-enabled')) {
+    const pullRequestNumber = pullRequestNumberFromUrl(url);
+    if (pullRequestNumber === null) {
+      return uncertain(`Cannot determine the result pull request number from ${url}`);
+    }
+    const enabled = yield* github
+      .enablePullRequestAutoMerge({
+        repository,
+        pullRequestNumber,
+        mergeMethod,
+      })
+      .pipe(Effect.result);
+    if (Result.isFailure(enabled)) {
+      return uncertain(enabled.failure.message);
+    }
+    yield* appendCheckpoint(
+      'auto-merge-enabled',
+      null,
+      `enabled ${mergeMethod} auto-merge on pull request #${pullRequestNumber}`,
+    );
   }
 
   yield* appendRunEvent({

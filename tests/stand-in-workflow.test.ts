@@ -178,7 +178,10 @@ function standInDefaultPublication(): EffectLayer.Layer<GitHubPublication> {
       openResultPullRequest: () => Effect.die(new Error('no result PR is expected for this run')),
       refreshOwnedDraftPullRequestBody: () =>
         Effect.die(new Error('no draft PR is expected for this run')),
+      enablePullRequestAutoMerge: () =>
+        Effect.die(new Error('no auto-merge is expected for this run')),
       pushTaskBranch: () => Effect.die(new Error('no push is expected for this run')),
+      pushSourceBranch: () => Effect.die(new Error('no source push is expected for this run')),
       listIssueCommentsAfter: () => Effect.succeed({ comments: [], truncated: false }),
       collaboratorPermission: () => Effect.succeed({ permission: 'maintain' }),
     }),
@@ -210,10 +213,14 @@ function standInDraftPrPublication(): StandInGitHubHarness {
       openResultPullRequest: () => Effect.die(new Error('result publication must not open a PR')),
       refreshOwnedDraftPullRequestBody: () =>
         Effect.die(new Error('result publication must not refresh a draft PR')),
+      enablePullRequestAutoMerge: () =>
+        Effect.die(new Error('result publication must not enable auto-merge')),
       pushTaskBranch: (options) => {
         calls.push.push(options);
         return Effect.void;
       },
+      pushSourceBranch: () =>
+        Effect.die(new Error('result publication must not push the source branch')),
       listIssueCommentsAfter: () => Effect.succeed({ comments: [], truncated: false }),
       collaboratorPermission: () => Effect.succeed({ permission: 'maintain' }),
     }),

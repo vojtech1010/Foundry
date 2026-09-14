@@ -1382,9 +1382,12 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
          * place by the same idempotent publication, never a second run or a
          * duplicate result pull request. A settled run returns its summary.
          */
+        const resultSettled =
+          (history.derived.resultPrRecorded ?? null) !== null ||
+          (history.derived.resultMergeRecorded ?? null) !== null;
         const unsettled =
           configuration.decisionPublication !== null &&
-          (history.derived.resultPrRecorded ?? null) === null &&
+          !resultSettled &&
           (history.derived.resultPrCheckpoints ?? []).length > 0;
         if (options.allowResume && !resumed && unsettled) {
           const reconciled = yield* publishResultPr({

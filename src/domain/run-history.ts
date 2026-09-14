@@ -99,6 +99,7 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'recovery-recorded',
   'result-pr-checkpoint',
   'result-pr-recorded',
+  'result-merge-recorded',
   'abandonment-note',
 ] as const;
 
@@ -581,6 +582,33 @@ export const RecoveryRecordedPayloadSchema = Schema.Struct({
 export type RecoveryRecordedPayload = (typeof RecoveryRecordedPayloadSchema)['Type'];
 
 /**
+ * The result channel's own publication-checkpoint vocabulary. It is deliberately
+ * narrower than the decision journal's `PUBLICATION_CHECKPOINT_STAGES`: the
+ * result channel never locates a reusable draft PR, and its `direct-merge` mode
+ * updates the source branch instead of opening a pull request, while
+ * `non-draft-pr-auto-merge` records the additional `auto-merge-enabled` stage.
+ */
+export const RESULT_PUBLICATION_CHECKPOINT_STAGES = [
+  'pre-push',
+  'pushed',
+  'pull-request-created',
+  'url-recorded',
+  'auto-merge-enabled',
+  'source-branch-updated',
+] as const;
+
+export type ResultPublicationCheckpointStage =
+  (typeof RESULT_PUBLICATION_CHECKPOINT_STAGES)[number];
+
+/**
+ * The result stages that only a pull-request mode can record. The `direct-merge`
+ * mode shares `pre-push` and `source-branch-updated`, so a direct merge may
+ * legitimately follow a `pre-push` checkpoint but never a pull-request stage.
+ */
+const RESULT_PULL_REQUEST_CHECKPOINT_STAGES: ReadonlySet<ResultPublicationCheckpointStage> =
+  new Set(['pushed', 'pull-request-created', 'url-recorded', 'auto-merge-enabled']);
+
+/**
  * One durable step of the approved-result publication transaction. A result PR
  * is published for a changed, already-approved result after the run reached a
  * terminal success state, so it reuses the decision-publication stage
@@ -588,7 +616,7 @@ export type RecoveryRecordedPayload = (typeof RecoveryRecordedPayloadSchema)['Ty
  * carry the authoritative pull request URL.
  */
 export const ResultPrCheckpointPayloadSchema = Schema.Struct({
-  stage: Schema.Literals(PUBLICATION_CHECKPOINT_STAGES),
+  stage: Schema.Literals(RESULT_PUBLICATION_CHECKPOINT_STAGES),
   url: Schema.NullOr(Schema.NonEmptyString),
   commit: GitCommitId,
   detail: Schema.String,
@@ -609,6 +637,25 @@ export const ResultPrRecordedPayloadSchema = Schema.Struct({
 });
 
 export type ResultPrRecordedPayload = (typeof ResultPrRecordedPayloadSchema)['Type'];
+
+/**
+ * The settled fact that an approved changed result was taken forward by updating
+ * the configured source branch instead of opening a pull request. `fastForward`
+ * records whether the source branch moved to a descendant of its previous head;
+ * `false` means the leased force-with-lease push authorized a non-fast-forward
+ * overwrite from Gits own observed state. Recording it makes a resumed
+ * reconciliation a no-op and lets the handoff and run report name the exact
+ * merged commit without touching the remote again.
+ */
+export const ResultMergeRecordedPayloadSchema = Schema.Struct({
+  commit: GitCommitId,
+  taskBranch: Schema.NonEmptyString,
+  remote: Schema.NonEmptyString,
+  sourceBranch: Schema.NonEmptyString,
+  fastForward: Schema.Boolean,
+});
+
+export type ResultMergeRecordedPayload = (typeof ResultMergeRecordedPayloadSchema)['Type'];
 
 /**
  * Durable operator reason for an explicit abandonment. Abandonment is explicit
@@ -848,6 +895,12 @@ export const ResultPrRecordedEventSchema = Schema.Struct({
   payload: ResultPrRecordedPayloadSchema,
 });
 
+export const ResultMergeRecordedEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('result-merge-recorded'),
+  payload: ResultMergeRecordedPayloadSchema,
+});
+
 export const AbandonmentNoteEventSchema = Schema.Struct({
   ...RunEventEnvelopeFields,
   type: Schema.Literal('abandonment-note'),
@@ -891,6 +944,7 @@ export const RunEventSchema = Schema.Union([
   RecoveryRecordedEventSchema,
   ResultPrCheckpointEventSchema,
   ResultPrRecordedEventSchema,
+  ResultMergeRecordedEventSchema,
   AbandonmentNoteEventSchema,
 ]);
 
@@ -975,6 +1029,7 @@ export type RunEventDraft =
   | { readonly type: 'recovery-recorded'; readonly payload: RecoveryRecordedPayload }
   | { readonly type: 'result-pr-checkpoint'; readonly payload: ResultPrCheckpointPayload }
   | { readonly type: 'result-pr-recorded'; readonly payload: ResultPrRecordedPayload }
+  | { readonly type: 'result-merge-recorded'; readonly payload: ResultMergeRecordedPayload }
   | { readonly type: 'abandonment-note'; readonly payload: AbandonmentNotePayload };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
@@ -1015,6 +1070,7 @@ export interface RunHistoryDerivedState {
   readonly recoveryDispositions: ReadonlyArray<RecoveryRecordedPayload>;
   readonly resultPrCheckpoints?: ReadonlyArray<ResultPrCheckpointPayload>;
   readonly resultPrRecorded?: ResultPrRecordedPayload | null;
+  readonly resultMergeRecorded?: ResultMergeRecordedPayload | null;
   readonly abandonmentNotes?: ReadonlyArray<AbandonmentNotePayload>;
 }
 
@@ -1742,6 +1798,23 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'result-merge-recorded':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          commit: event.payload.commit,
+          fastForward: event.payload.fastForward,
+          remote: event.payload.remote,
+          sourceBranch: event.payload.sourceBranch,
+          taskBranch: event.payload.taskBranch,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
     case 'abandonment-note':
       return JSON.stringify({
         eventId: event.eventId,
@@ -1856,6 +1929,8 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'result-pr-checkpoint', payload: event.payload };
     case 'result-pr-recorded':
       return { ...envelope, type: 'result-pr-recorded', payload: event.payload };
+    case 'result-merge-recorded':
+      return { ...envelope, type: 'result-merge-recorded', payload: event.payload };
     case 'abandonment-note':
       return { ...envelope, type: 'abandonment-note', payload: event.payload };
   }
@@ -1976,6 +2051,8 @@ export function verifyRunHistoryEvents(
   const resultPrCheckpointStageIndex = new Map<string, number>();
   let resultPrRecorded: ResultPrRecordedPayload | null = null;
   const recordedResultPrCommits = new Set<string>();
+  let resultMergeRecorded: ResultMergeRecordedPayload | null = null;
+  const recordedResultMergeCommits = new Set<string>();
   const abandonmentNotes: Array<AbandonmentNotePayload> = [];
   let changedResultApproved = false;
   const retiredRevisions = new Set<number>();
@@ -3181,7 +3258,7 @@ export function verifyRunHistoryEvents(
             problem: `${label} records a result publication checkpoint for a commit other than the current result head`,
           };
         }
-        const stageIndex = PUBLICATION_CHECKPOINT_STAGES.indexOf(event.payload.stage);
+        const stageIndex = RESULT_PUBLICATION_CHECKPOINT_STAGES.indexOf(event.payload.stage);
         const previousIndex = resultPrCheckpointStageIndex.get(event.payload.commit) ?? -1;
         if (stageIndex <= previousIndex) {
           return {
@@ -3243,8 +3320,76 @@ export function verifyRunHistoryEvents(
             problem: `${label} records a second result pull request for the same commit`,
           };
         }
+        if (resultMergeRecorded !== null && resultMergeRecorded.commit === event.payload.commit) {
+          return {
+            ok: false,
+            problem: `${label} records a result pull request after a direct merge of the same commit`,
+          };
+        }
         recordedResultPrCommits.add(event.payload.commit);
         resultPrRecorded = event.payload;
+        break;
+      }
+      case 'result-merge-recorded': {
+        if (state !== 'completed' || !changedResultApproved) {
+          return {
+            ok: false,
+            problem: `${label} records a direct merge outside an approved changed result`,
+          };
+        }
+        const resultCommit = currentResultCommit();
+        if (resultCommit === null || event.payload.commit !== resultCommit) {
+          return {
+            ok: false,
+            problem: `${label} records a direct merge for a commit other than the current result head`,
+          };
+        }
+        if (sourceFrozen !== null) {
+          if (event.payload.taskBranch !== sourceFrozen.taskBranch) {
+            return {
+              ok: false,
+              problem: `${label} records a direct merge for a branch other than the frozen task branch`,
+            };
+          }
+          if (event.payload.remote !== sourceFrozen.sourceRemote) {
+            return {
+              ok: false,
+              problem: `${label} records a direct merge through a remote other than the frozen source remote`,
+            };
+          }
+          if (event.payload.sourceBranch !== sourceFrozen.sourceBranch) {
+            return {
+              ok: false,
+              problem: `${label} records a direct merge into a branch other than the frozen source branch`,
+            };
+          }
+        }
+        if (
+          resultPrCheckpoints.some(
+            (checkpoint) =>
+              checkpoint.commit === event.payload.commit &&
+              RESULT_PULL_REQUEST_CHECKPOINT_STAGES.has(checkpoint.stage),
+          )
+        ) {
+          return {
+            ok: false,
+            problem: `${label} records a direct merge after a result pull request attempt for the same commit`,
+          };
+        }
+        if (recordedResultPrCommits.has(event.payload.commit)) {
+          return {
+            ok: false,
+            problem: `${label} records a direct merge for a commit that already has a result pull request`,
+          };
+        }
+        if (recordedResultMergeCommits.has(event.payload.commit)) {
+          return {
+            ok: false,
+            problem: `${label} records a second direct merge for the same commit`,
+          };
+        }
+        recordedResultMergeCommits.add(event.payload.commit);
+        resultMergeRecorded = event.payload;
         break;
       }
       case 'abandonment-note': {
@@ -3313,6 +3458,7 @@ export function verifyRunHistoryEvents(
       recoveryDispositions,
       resultPrCheckpoints,
       resultPrRecorded,
+      resultMergeRecorded,
       abandonmentNotes,
     },
   };

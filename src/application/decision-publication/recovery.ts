@@ -351,6 +351,7 @@ export const reconcilePublication = Effect.fn('reconcilePublication')(function* 
         body,
         headBranch: implementation.taskBranch,
         baseBranch: configuration.sourceBranch,
+        draft: true,
       })
       .pipe(Effect.result);
     if (Result.isFailure(created)) {

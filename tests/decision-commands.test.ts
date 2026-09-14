@@ -419,6 +419,10 @@ function githubStub(options: GitHubStubOptions = {}): GitHubStub {
         calls.push('refreshOwnedDraftPullRequestBody');
         return Effect.die(new Error('decision commands must not refresh a pull request'));
       },
+      enablePullRequestAutoMerge: () =>
+        Effect.die(new Error('decision commands must not enable auto-merge')),
+      pushSourceBranch: () =>
+        Effect.die(new Error('decision commands must not push the source branch')),
       pushTaskBranch: () => {
         calls.push('pushTaskBranch');
         return Effect.die(new Error('decision commands must not push a branch'));

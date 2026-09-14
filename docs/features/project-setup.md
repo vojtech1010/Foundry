@@ -93,6 +93,9 @@ command always drives the autonomous workflow.
     "draft": true,
     "maintainersCanModify": false
   },
+  "resultPublication": {
+    "mode": "non-draft-pr"
+  },
   "artifacts": {
     "retentionDays": 30,
     "maxRequestBytes": 262144,
@@ -122,6 +125,18 @@ timeout meanings are defined in [protocol contracts](protocol-contracts.md).
 Every command is a non-empty argument vector of non-empty strings. The five
 verification commands are required; `bootstrap` may be `null`. A non-null
 `runtimeProfile` contains every displayed field.
+
+`resultPublication` is an optional additive key. Omitting it preserves the
+legacy behavior with effective mode `non-draft-pr`, so existing version-1
+documents decode unchanged. When the object is present, `mode` is required and
+must be one of `draft-pr`, `non-draft-pr`, `non-draft-pr-auto-merge`, or
+`direct-merge`. `mergeMethod` (`merge`, `squash`, or `rebase`, default `merge`)
+is only legal with `non-draft-pr-auto-merge`; supplying it with any other mode is
+rejected. Because every mode reuses `decisionPublication.remote` for repository
+identity and credentials, `resultPublication` requires `decisionPublication` to
+be configured; declaring the mode while decision publication is `null` is
+rejected. The resolved `resultPublication` is always present for consumers, with
+mode `non-draft-pr` and merge method `merge` when the key is absent.
 
 ## Validate before work
 
@@ -274,6 +289,29 @@ When `decisionPublication` is configured, `doctor` reports a closed
   `unknown`; and
 - `reason` is a specific, bounded explanation whenever publication is not
   eligible, or `null` when it is eligible.
+
+When a result-publication mode is configured (or defaulted), `doctor` also
+reports `publication.resultPublication` with the effective `mode`, its
+`mergeMethod` (`null` unless the mode is `non-draft-pr-auto-merge`), `eligible`,
+a specific `reason` whenever it is ineligible, and the probed
+`autoMergeAllowed` and `sourceBranchProtected` facts (`null` when the probe
+could not establish them). The modes gate as follows:
+
+- `draft-pr` and `non-draft-pr` are eligible exactly when the decision-channel
+  `publication` report is eligible;
+- `non-draft-pr-auto-merge` additionally requires repository auto-merge
+  (`autoMergeAllowed === true`) and a protected source branch
+  (`sourceBranchProtected === true`); GitHub silently ignores auto-merge without
+  branch protection, so an unconfirmed protection fact is ineligible;
+- `direct-merge` requires push authority and an unprotected source branch
+  (`sourceBranchProtected === false`); a protected or unconfirmed branch is
+  ineligible because branch protection rejects direct pushes and Foundry never
+  bypasses it.
+
+An unknown capability is ineligible rather than assumed, matching the decision
+channel. Branch protection is probed with an additional read-only `GET` only for
+the `non-draft-pr-auto-merge` and `direct-merge` modes, so the other modes make
+no extra call.
 
 The readiness probe is read-only: it looks up repository identity, the
 authenticated viewer's repository permission and advertised token scopes, and
