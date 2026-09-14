@@ -3,7 +3,6 @@ import { Effect, Result, Schema } from 'effect';
 import { executePublicCommand } from '../application/public-commands.js';
 import {
   INVALID_INVOCATION_KIND,
-  NOT_AVAILABLE,
   PUBLIC_COMMANDS,
   REPORT_FAILURE_KINDS,
   REPORT_SCHEMA_VERSION,
@@ -211,13 +210,6 @@ const ReportError = Schema.Struct({
   runId: Schema.optional(Schema.String),
 });
 
-const StubReportData = Schema.Struct({
-  availability: Schema.Literal(NOT_AVAILABLE),
-  message: Schema.String,
-  runId: Schema.optional(Schema.String),
-  taskId: Schema.optional(Schema.String),
-});
-
 const PublicationCapabilityReadinessData = Schema.Struct({
   capability: Schema.Literals(PUBLICATION_CAPABILITIES),
   state: Schema.Literals(['granted', 'denied', 'unknown']),
@@ -226,6 +218,7 @@ const PublicationCapabilityReadinessData = Schema.Struct({
 const PublicationReadinessData = Schema.Struct({
   configured: Schema.Boolean,
   eligible: Schema.Boolean,
+  remote: Schema.NullOr(Schema.String),
   repository: Schema.NullOr(Schema.String),
   repositoryScope: Schema.Literals(['repository', 'broad', 'unknown']),
   reason: Schema.NullOr(Schema.String),
@@ -318,14 +311,6 @@ const RecordedRequestData = Schema.Struct({
   originalContentHash: Schema.String,
   normalizedByteLength: Schema.Number,
   normalizedPromptHash: Schema.String,
-});
-
-const RecordedRunReportData = Schema.Struct({
-  runId: Schema.String,
-  taskId: Schema.String,
-  runDirectory: Schema.String,
-  provenance: RunProvenanceData,
-  request: RecordedRequestData,
 });
 
 const RunWorkflowDecisionData = Schema.Struct({
@@ -425,12 +410,10 @@ const AbandonReportData = Schema.Struct({
 });
 
 const ReportData = Schema.Union([
-  StubReportData,
   DoctorReportData,
   InitPreviewReportData,
   ProfileCheckReportData,
   RunWorkflowReportData,
-  RecordedRunReportData,
   RunStatusReportData,
   InspectReportData,
   CleanupListReportData,
@@ -859,15 +842,7 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
   ];
   if (envelope.ok) {
     const data = envelope.data;
-    if ('availability' in data) {
-      lines.push(`data.availability: ${data.availability}`, `data.message: ${data.message}`);
-      if (data.runId !== undefined) {
-        lines.push(`data.runId: ${data.runId}`);
-      }
-      if (data.taskId !== undefined) {
-        lines.push(`data.taskId: ${data.taskId}`);
-      }
-    } else if ('readiness' in data) {
+    if ('readiness' in data) {
       lines.push(
         `data.readiness: ${data.readiness}`,
         `data.host.platform: ${data.host.platform}`,
@@ -893,6 +868,7 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         lines.push(
           `data.publication.configured: ${data.publication.configured}`,
           `data.publication.eligible: ${data.publication.eligible}`,
+          `data.publication.remote: ${data.publication.remote ?? 'none'}`,
           `data.publication.repository: ${data.publication.repository ?? 'none'}`,
           `data.publication.repositoryScope: ${data.publication.repositoryScope}`,
           `data.publication.reason: ${data.publication.reason ?? 'none'}`,
@@ -1057,6 +1033,13 @@ function failureKindFor(error: PublicCommandError): ReportFailureKind {
   switch (error._tag) {
     case 'RunWorkflowError':
       return error.kind;
+    case 'ReadinessError':
+    case 'PreviewLocationsError':
+    case 'ProfileCheckError':
+    case 'InvalidRunRequest':
+    case 'DuplicateRunId':
+    case 'RunIdentityStorageError':
+    case 'InvalidProjectConfiguration':
     case 'RunStateUnavailable':
     case 'RunHistoryIntegrityError':
     case 'RunHistoryStorageError':
@@ -1166,34 +1149,6 @@ function toDomainInvocation(
 }
 
 function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'] {
-  if ('availability' in report) {
-    if (report.runId !== undefined && report.taskId !== undefined) {
-      return {
-        availability: report.availability,
-        message: report.message,
-        runId: report.runId,
-        taskId: report.taskId,
-      };
-    }
-    if (report.runId !== undefined) {
-      return {
-        availability: report.availability,
-        message: report.message,
-        runId: report.runId,
-      };
-    }
-    if (report.taskId !== undefined) {
-      return {
-        availability: report.availability,
-        message: report.message,
-        taskId: report.taskId,
-      };
-    }
-    return {
-      availability: report.availability,
-      message: report.message,
-    };
-  }
   if ('host' in report) {
     const base: (typeof DoctorReportData)['Type'] = {
       readiness: 'ready',
@@ -1258,55 +1213,46 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       normalizedByteLength: report.request.normalizedByteLength,
       normalizedPromptHash: report.request.normalizedPromptHash,
     };
-    if ('workflowState' in report) {
-      const workflowReport = {
-        runId: report.runId,
-        taskId: report.taskId,
-        runDirectory: report.runDirectory,
-        request,
-        provenance: { ...report.provenance },
-        workflowState: report.workflowState,
-        outcome: report.outcome,
-        stages: [...report.stages],
-        testerSkipped: report.testerSkipped,
-        resultPullRequest: report.resultPullRequest ?? null,
-      };
-      if (report.decision === undefined && report.recovery === undefined) {
-        return workflowReport;
-      }
-      const decisionData =
-        report.decision === undefined
-          ? null
-          : {
-              applied: report.decision.applied,
-              waiting: report.decision.waiting,
-              draftPrUrl: report.decision.draftPrUrl,
-            };
-      const recoveryData =
-        report.recovery === undefined
-          ? null
-          : {
-              disposition: report.recovery.disposition,
-              reason: report.recovery.reason,
-            };
-      if (decisionData !== null && recoveryData !== null) {
-        return { ...workflowReport, decision: decisionData, recovery: recoveryData };
-      }
-      if (decisionData !== null) {
-        return { ...workflowReport, decision: decisionData };
-      }
-      if (recoveryData !== null) {
-        return { ...workflowReport, recovery: recoveryData };
-      }
-      return workflowReport;
-    }
-    return {
+    const workflowReport = {
       runId: report.runId,
       taskId: report.taskId,
       runDirectory: report.runDirectory,
-      provenance: { ...report.provenance },
       request,
+      provenance: { ...report.provenance },
+      workflowState: report.workflowState,
+      outcome: report.outcome,
+      stages: [...report.stages],
+      testerSkipped: report.testerSkipped,
+      resultPullRequest: report.resultPullRequest ?? null,
     };
+    if (report.decision === undefined && report.recovery === undefined) {
+      return workflowReport;
+    }
+    const decisionData =
+      report.decision === undefined
+        ? null
+        : {
+            applied: report.decision.applied,
+            waiting: report.decision.waiting,
+            draftPrUrl: report.decision.draftPrUrl,
+          };
+    const recoveryData =
+      report.recovery === undefined
+        ? null
+        : {
+            disposition: report.recovery.disposition,
+            reason: report.recovery.reason,
+          };
+    if (decisionData !== null && recoveryData !== null) {
+      return { ...workflowReport, decision: decisionData, recovery: recoveryData };
+    }
+    if (decisionData !== null) {
+      return { ...workflowReport, decision: decisionData };
+    }
+    if (recoveryData !== null) {
+      return { ...workflowReport, recovery: recoveryData };
+    }
+    return workflowReport;
   }
   if ('manifest' in report) {
     return Schema.decodeUnknownSync(DiagnosticBundleReportData)(report);

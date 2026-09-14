@@ -755,6 +755,7 @@ describe('readiness check with fake services', () => {
       expect(data.publication).toEqual({
         configured: false,
         eligible: false,
+        remote: null,
         repository: null,
         repositoryScope: 'unknown',
         reason: null,
@@ -801,7 +802,7 @@ describe('readiness check with fake services', () => {
     }),
   );
 
-  it.effect('maps doctor failures to exit code 2 with an invalid invocation error', () =>
+  it.effect('maps doctor failures to a failed report rather than an argument error', () =>
     Effect.gen(function* () {
       const world = defaultWorld();
       const built = buildWorld({
@@ -812,10 +813,10 @@ describe('readiness check with fake services', () => {
         Effect.provide(built.layer),
       );
 
-      expect(result.exitCode).toBe(EXIT_CODES.invalidInvocation);
+      expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
       const envelope = expectDoctorFailure(result.stdout);
       expect(envelope.command).toBe('doctor');
-      expect(envelope.error.kind).toBe('invalid_invocation');
+      expect(envelope.error.kind).toBe('failed');
       expect(envelope.error.retryable).toBe(false);
       expect(envelope.error.message).toContain('is not clean');
     }),
@@ -952,6 +953,7 @@ describe('publication readiness with fake services', () => {
       expect(data.publication).toEqual({
         configured: true,
         eligible: true,
+        remote: 'origin',
         repository: 'foundry/target',
         repositoryScope: 'repository',
         reason: null,
@@ -964,6 +966,7 @@ describe('publication readiness with fake services', () => {
       });
       expect(humanResult.stdout).toContain('data.publication.configured: true');
       expect(humanResult.stdout).toContain('data.publication.eligible: true');
+      expect(humanResult.stdout).toContain('data.publication.remote: origin');
       expect(humanResult.stdout).toContain('data.publication.repository: foundry/target');
       expect(humanResult.stdout).toContain('data.publication.repositoryScope: repository');
       expect(humanResult.stdout).toContain('data.publication.reason: none');
