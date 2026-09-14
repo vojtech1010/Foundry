@@ -8,6 +8,7 @@ import {
   REQUEST_ORIGINAL_FILENAME,
 } from '../domain/run-identity.js';
 import { PRODUCT_NAME } from '../domain/workflow.js';
+import { abandonRun } from './abandonment/index.js';
 import { checkProjectProfile } from './profile-check/index.js';
 import { checkReadiness } from './readiness/index.js';
 import { previewRunLocations } from './preview-run-locations/index.js';
@@ -28,10 +29,12 @@ import {
 import { readRunStatus } from './status/index.js';
 
 import type { PublicCommandInvocation } from '../domain/public-commands.js';
+import type { AbandonReport } from './abandonment/index.js';
 import type { RunWorkflowOutcome } from './run-workflow/index.js';
 import type { RequestIdentityDocument } from '../domain/run-identity.js';
 import type { RecoveryDisposition } from '../domain/run-history.js';
 import type { WorkflowState } from '../domain/workflow.js';
+import type { IllegalWorkflowTransition } from './workflow-transitions/index.js';
 import type {
   RunHistoryConflict,
   RunHistoryIntegrityError,
@@ -126,6 +129,7 @@ export type PublicCommandReport =
   | RunStatusReport
   | RunInspectReport
   | RunWorkflowReport
+  | AbandonReport
   | CleanupListReport
   | CleanupRunReport
   | DiagnosticBundleReport;
@@ -139,6 +143,7 @@ export type PublicCommandError =
   | RunWorkspaceBlocked
   | RoleHostCapabilityError
   | RunWorkflowError
+  | IllegalWorkflowTransition
   | RunInspectError
   | CreateDiagnosticBundleError
   | RunHistoryIntegrityError
@@ -289,7 +294,17 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       return stubReport(invocation);
     }
     if (invocation.abandon === true) {
-      return stubReport(invocation);
+      const reason = invocation.reason;
+      if (reason === undefined) {
+        return stubReport(invocation);
+      }
+      const context = yield* resolveRunContext({ configArg, cwd, runId });
+      return yield* abandonRun({
+        runDirectory: context.runDirectory,
+        runId,
+        configuration: context.configuration,
+        reason,
+      });
     }
     const configDirectory = dirname(resolve(cwd, configArg));
     const context = yield* resolveRunContext({ configArg, cwd, runId });

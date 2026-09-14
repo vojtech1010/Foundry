@@ -270,7 +270,7 @@ function latestSettledTester(history: RunHistoryDerivedState): RoleHostSessionSt
  * alongside the run worktree; a run that never ran parallel objectives reports
  * none.
  */
-function workerWorktreesFor(
+export function workerWorktreesFor(
   history: VerifiedRunHistory | null,
   runId: string,
 ): ReadonlyArray<WorkerWorktreeDisposal> {
