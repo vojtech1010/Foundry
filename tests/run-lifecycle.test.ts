@@ -7,6 +7,7 @@ import { join } from 'node:path';
 
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
 import { HANDOFF_FILENAME, HandoffDocumentSchema } from '../src/application/handoff/index.js';
+import { GitHubPublication } from '../src/application/decision-publication/index.js';
 import { readVerifiedRunHistory } from '../src/application/run-history/index.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
 import { ReadinessHost } from '../src/application/readiness/index.js';
@@ -102,6 +103,20 @@ const capabilityLayers = Layer.mergeAll(
   RoleTurnResourceObserverLive,
   RunGitLive,
   GuidanceLive,
+  Layer.succeed(
+    GitHubPublication,
+    GitHubPublication.of({
+      lookupRepositoryIdentity: (options) => Effect.succeed({ repository: options.repository }),
+      lookupExactPullRequest: () => Effect.die(new Error('no draft PR is expected for this run')),
+      createDraftPullRequest: () => Effect.die(new Error('no draft PR is expected for this run')),
+      openResultPullRequest: () => Effect.die(new Error('no result PR is expected for this run')),
+      refreshOwnedDraftPullRequestBody: () =>
+        Effect.die(new Error('no draft PR is expected for this run')),
+      pushTaskBranch: () => Effect.die(new Error('no push is expected for this run')),
+      listIssueCommentsAfter: () => Effect.succeed({ comments: [], truncated: false }),
+      collaboratorPermission: () => Effect.succeed({ permission: 'maintain' }),
+    }),
+  ),
 );
 
 function withRoleHost(roleHost: Layer.Layer<RoleHostLauncher>) {

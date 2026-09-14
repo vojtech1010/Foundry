@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { HANDOFF_FILENAME, HandoffDocumentSchema } from '../src/application/handoff/index.js';
+import { GitHubPublication } from '../src/application/decision-publication/index.js';
+import { RunGit } from '../src/application/git-provisioning/index.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
 import {
   PublicationProbe,
@@ -42,6 +44,10 @@ import { scriptedRoleHostLauncher } from './fixtures/role-host/role-host-launche
 
 import type { Layer as EffectLayer } from 'effect';
 import type { RoleHostLauncher } from '../src/application/role-conversations/index.js';
+import type {
+  GitHubPullRequest,
+  GitHubPushTaskBranchOptions,
+} from '../src/application/decision-publication/index.js';
 import type { RoleHostCreateRequest } from '../src/domain/role-host.js';
 import type { VerifiedRunHistory } from '../src/application/run-history/index.js';
 
@@ -125,6 +131,96 @@ function publicationGit(): EffectLayer.Layer<ReadinessGit> {
   ).pipe(Layer.provide(ReadinessGitLive));
 }
 
+/**
+ * Reports the configured publication remote as a GitHub repository to the
+ * workflow's Git adapter, so the ordinary result and decision publication can
+ * confirm the repository identity while every other Git operation stays real.
+ */
+function publicationRunGit(): EffectLayer.Layer<RunGit> {
+  return Layer.effect(
+    RunGit,
+    Effect.gen(function* () {
+      const live = yield* RunGit;
+      return RunGit.of({
+        ...live,
+        inspectRepository: (options) =>
+          Effect.succeed({
+            repositoryRoot: options.repositoryRoot,
+            gitDirectory: `${options.repositoryRoot}/.git`,
+            remoteUrl: PUBLICATION_REMOTE_URL,
+          }),
+      });
+    }),
+  ).pipe(Layer.provide(RunGitLive));
+}
+
+interface StandInGitHubCalls {
+  readonly push: Array<GitHubPushTaskBranchOptions>;
+}
+
+interface StandInGitHubHarness {
+  readonly layer: EffectLayer.Layer<GitHubPublication>;
+  readonly calls: StandInGitHubCalls;
+}
+
+/**
+ * A stand-in GitHub adapter for walks whose configured publication is never
+ * reached. It answers the repository identity and refuses every reachable
+ * mutation loudly so an unexpected publication cannot pass silently.
+ */
+function standInDefaultPublication(): EffectLayer.Layer<GitHubPublication> {
+  return Layer.succeed(
+    GitHubPublication,
+    GitHubPublication.of({
+      lookupRepositoryIdentity: (options) => Effect.succeed({ repository: options.repository }),
+      lookupExactPullRequest: () => Effect.die(new Error('no draft PR is expected for this run')),
+      createDraftPullRequest: () => Effect.die(new Error('no draft PR is expected for this run')),
+      openResultPullRequest: () => Effect.die(new Error('no result PR is expected for this run')),
+      refreshOwnedDraftPullRequestBody: () =>
+        Effect.die(new Error('no draft PR is expected for this run')),
+      pushTaskBranch: () => Effect.die(new Error('no push is expected for this run')),
+      listIssueCommentsAfter: () => Effect.succeed({ comments: [], truncated: false }),
+      collaboratorPermission: () => Effect.succeed({ permission: 'maintain' }),
+    }),
+  );
+}
+
+/**
+ * A deterministic GitHub adapter for an eligible human decision. It records the
+ * non-force push and creates the one draft pull request for the task branch so
+ * the publishing stage can reconcile the exact URL in place.
+ */
+function standInDraftPrPublication(): StandInGitHubHarness {
+  const calls: StandInGitHubCalls = { push: [] };
+  const pullRequestNumber = 9;
+  const layer = Layer.succeed(
+    GitHubPublication,
+    GitHubPublication.of({
+      lookupRepositoryIdentity: (options) => Effect.succeed({ repository: options.repository }),
+      lookupExactPullRequest: () => Effect.succeed({ kind: 'absent' }),
+      createDraftPullRequest: (options) =>
+        Effect.succeed({
+          number: pullRequestNumber,
+          url: `${PUBLICATION_REMOTE_URL.replace(/\.git$/u, '')}/pull/${pullRequestNumber}`,
+          draft: true,
+          headBranch: options.headBranch,
+          headCommit: options.headBranch,
+          baseBranch: options.baseBranch,
+        } satisfies GitHubPullRequest),
+      openResultPullRequest: () => Effect.die(new Error('result publication must not open a PR')),
+      refreshOwnedDraftPullRequestBody: () =>
+        Effect.die(new Error('result publication must not refresh a draft PR')),
+      pushTaskBranch: (options) => {
+        calls.push.push(options);
+        return Effect.void;
+      },
+      listIssueCommentsAfter: () => Effect.succeed({ comments: [], truncated: false }),
+      collaboratorPermission: () => Effect.succeed({ permission: 'maintain' }),
+    }),
+  );
+  return { layer, calls };
+}
+
 const capabilityLayers = Layer.mergeAll(
   Layer.succeed(
     ReadinessHost,
@@ -148,7 +244,6 @@ const capabilityLayers = Layer.mergeAll(
   RunHistoryLive,
   RepositoryLeaseLive,
   RoleTurnResourceObserverLive,
-  RunGitLive,
   GuidanceLive,
   Layer.succeed(
     PublicationProbe,
@@ -172,6 +267,8 @@ interface RunOptions {
   readonly runId: string;
   readonly taskId: string;
   readonly publish?: boolean;
+  readonly runGit?: EffectLayer.Layer<RunGit>;
+  readonly github?: EffectLayer.Layer<GitHubPublication>;
 }
 
 function runWithHost(
@@ -191,7 +288,16 @@ function runWithHost(
     '--run-id',
     options.runId,
     '--json',
-  ]).pipe(Effect.provide(Layer.mergeAll(capabilityLayers, host)));
+  ]).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        capabilityLayers,
+        host,
+        options.runGit ?? RunGitLive,
+        options.github ?? standInDefaultPublication(),
+      ),
+    ),
+  );
 }
 
 function runStandIn(fixture: Fixture, options: RunOptions, script: StandInRoleHostScript) {
@@ -750,9 +856,16 @@ describe('stand-in role host workflow walks', () => {
       const fixture = setupFixture('human');
       try {
         const runId = 'RUN-STANDIN-HUMAN';
+        const github = standInDraftPrPublication();
         const result = yield* runStandIn(
           fixture,
-          { runId, taskId: 'TASK-STANDIN-HUMAN', publish: true },
+          {
+            runId,
+            taskId: 'TASK-STANDIN-HUMAN',
+            publish: true,
+            runGit: publicationRunGit(),
+            github: github.layer,
+          },
           {
             architect: ARCHITECT_PLAN,
             coder: {
@@ -777,11 +890,14 @@ describe('stand-in role host workflow walks', () => {
           },
         );
         expect(result.exitCode).toBe(0);
-        expect(workflowStateOf(result.stdout)).toBe('publishing');
+        expect(workflowStateOf(result.stdout)).toBe('human_decision_required');
 
         const history = yield* readHistory(fixture, runId);
+        expect(history.derived.state).toBe('human_decision_required');
         expect(routesOf(history)).toContain('human-decision-required');
+        expect(routesOf(history)).toContain('draft-pr-reconciled');
         expect(routesOf(history)).not.toContain('publication-unavailable');
+        expect(github.calls.push).toHaveLength(1);
       } finally {
         fixture.cleanup();
       }

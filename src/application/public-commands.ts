@@ -76,6 +76,7 @@ import type {
   DiagnosticBundleReport,
 } from './diagnostic-bundle/index.js';
 import type { RepositoryHostIdentity, RepositoryLeaseStore } from './repository-lease/index.js';
+import type { GitHubPublication } from './decision-publication/index.js';
 import type { RoleHostCapabilityError, RoleHostLauncher } from './role-conversations/index.js';
 import type { RoleTurnResourceObserver } from './role-permissions/index.js';
 
@@ -200,6 +201,13 @@ function terminalFailureFor(outcome: RunWorkflowOutcome, runId: string): RunWork
       kind: 'failed',
     });
   }
+  if (outcome.workflowState === 'publish_failed') {
+    return new RunWorkflowError({
+      message: `Run "${runId}" could not reconcile its decision publication; its evidence is retained for recovery.`,
+      runId,
+      kind: 'publish_failed',
+    });
+  }
   return null;
 }
 
@@ -217,6 +225,7 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
   | OwnedProjectProcess
   | RunIdentityStoreService
   | RunHistoryStorage
+  | GitHubPublication
   | RepositoryLeaseStore
   | RepositoryHostIdentity
   | RoleHostLauncher
