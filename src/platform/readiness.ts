@@ -105,11 +105,16 @@ interface JsonDocumentSchema extends Schema.Constraint {
 
 const GitHubRepositorySchema = Schema.Struct({
   full_name: Schema.String,
+  allow_auto_merge: Schema.optional(Schema.Boolean),
   permissions: Schema.optional(
     Schema.Struct({
       push: Schema.optional(Schema.Boolean),
     }),
   ),
+});
+
+const GitHubBranchSchema = Schema.Struct({
+  protected: Schema.Boolean,
 });
 
 const GitHubViewerSchema = Schema.Struct({
@@ -206,6 +211,8 @@ const observePublication = Effect.fn('publicationProbe.observe')(function* (
       issueCommentReadable: null,
       tokenScopes: null,
       protectedBranches: null,
+      autoMergeAllowed: null,
+      branchProtected: null,
       limitations: [],
     };
   }
@@ -219,6 +226,8 @@ const observePublication = Effect.fn('publicationProbe.observe')(function* (
       issueCommentReadable: null,
       tokenScopes: lookup.scopes,
       protectedBranches: null,
+      autoMergeAllowed: null,
+      branchProtected: null,
       limitations: [`GitHub repository lookup failed with status ${lookup.status}.`],
     };
   }
@@ -276,6 +285,24 @@ const observePublication = Effect.fn('publicationProbe.observe')(function* (
     }
   }
 
+  let branchProtected: boolean | null = null;
+  if (request.branch !== null) {
+    const branchLookup = yield* requestGitHub(
+      `/repos/${request.repository}/branches/${encodeURIComponent(request.branch)}`,
+      token,
+    );
+    if (branchLookup.status === 200) {
+      const decoded = yield* decodeGitHubDocument(
+        GitHubBranchSchema,
+        branchLookup.body,
+        'branch',
+      ).pipe(Effect.result);
+      if (Result.isSuccess(decoded)) {
+        branchProtected = decoded.success.protected;
+      }
+    }
+  }
+
   return {
     repository: repository.full_name,
     tokenPresent: true,
@@ -284,6 +311,8 @@ const observePublication = Effect.fn('publicationProbe.observe')(function* (
     issueCommentReadable,
     tokenScopes: lookup.scopes,
     protectedBranches,
+    autoMergeAllowed: repository.allow_auto_merge ?? null,
+    branchProtected,
     limitations,
   };
 });
