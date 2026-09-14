@@ -251,7 +251,9 @@ interface Fixture {
 
 const REQUEST_TEXT = `${'SECRET-12345 '.repeat(6)}trailing payload`;
 
-function setupFixture(options?: {
+// 055: artifact bounds are hardcoded, so the per-document limit overrides are
+// accepted here only to preserve call sites until the hardcoded set lands.
+function setupFixture(_options?: {
   readonly maxRequestBytes?: number;
   readonly redactionPatterns?: ReadonlyArray<string>;
 }): Fixture {
@@ -267,13 +269,8 @@ function setupFixture(options?: {
   writeFileSync(join(runDirectory, 'request.normalized.md'), `${REQUEST_TEXT}\n`);
 
   const document = goldenConfigurationDocument(target);
-  const artifacts = {
-    ...document.artifacts,
-    maxRequestBytes: options?.maxRequestBytes ?? document.artifacts.maxRequestBytes,
-    redactionPatterns: [...(options?.redactionPatterns ?? [])],
-  };
   const configPath = join(base, 'foundry.config.json');
-  writeFileSync(configPath, JSON.stringify({ ...document, artifacts }));
+  writeFileSync(configPath, JSON.stringify(document));
 
   const events = sealChain(RUN_ID, draftsFor(logPath));
   const verification = verifyRunHistoryEvents(events, RUN_ID);

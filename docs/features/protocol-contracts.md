@@ -115,8 +115,8 @@ Roles are `architect`, `coder`, `lead_coder`, `tester`, and `reviewer`;
 attempts and generations are positive integers. `deadline` is an ISO-8601 UTC
 instant. `events` is an ordered bounded array of `{ sequence, kind, text }`
 diagnostics and may be empty. `status` is `active`, `settled`, or `lost`.
-Every listed object is closed and every string/array is subject to the configured
-handoff or terminal-capture limits.
+Every listed object is closed and every string/array is subject to the hardcoded
+handoff and terminal-capture limits.
 
 The `capabilities` response attests the host's executable surface. `protocol` is
 the literal `foundry-role-host-v1`, `resumable` is a boolean, `availableRoles`
@@ -139,8 +139,15 @@ support. A single application-owned rule compares the decoded report with this
 matrix, and both `doctor` and a live `run` fail clearly on an unsupported
 protocol, non-resumable sessions, a missing role, or a missing profile.
 
-Model/provider selection belongs to the role host, not Foundry configuration.
-`doctor` requires every role and capability profile, and `runtimeIdentity`
+Per-role harness and model selection belongs to Foundry configuration, which
+names one harness and model per role; the exact command line used to launch
+each harness stays hardcoded in the role-host adapter per harness and runtime
+and is never carried in configuration. `doctor` and `init --dry-run` report
+the resolved per-role routing without launching anything. A live adapter
+rejects an unknown model against its own catalog and fails closed; Foundry
+never invents a substitute model. The same document resolves the same routing
+on Linux and Windows; only executable resolution follows existing platform
+rules. `doctor` requires every role and capability profile, and `runtimeIdentity`
 is exactly `{ adapterVersion, provider, model, toolProfile }`, recording the
 non-empty strings actually assigned to the session. Foundry retains that value
 as provenance without changing route semantics when different conforming hosts
@@ -334,7 +341,7 @@ The complete public command surface is:
 - `resume --run-id <id> --abandon --reason <text>` for explicit abandonment.
 
 End-of-run disposal of owned processes, sessions, and worktrees is automatic.
-Retention cleanup is never automatic. `retentionDays` determines eligibility
+Retention cleanup is never automatic. The hardcoded `retentionDays` determines eligibility
 from the terminal `completed`, `completed_no_change`, `failed`, or `abandoned`
 transition time shown by `cleanup --list`; nonterminal runs are never eligible.
 `cleanup --run-id <id> --confirm <id>` refuses a nonterminal run, a run still
@@ -362,16 +369,27 @@ them on `ubuntu-latest` and `windows-latest`.
 
 ## Artifact limits
 
+Artifact bounds are hardcoded, not configured: `retentionDays` 30,
+`maxRequestBytes` 262144, `maxGuidanceBytes` 1048576, `maxRoleHandoffBytes`
+262144, `maxEvidenceBytes` 26214400, `maxTerminalCaptureBytes` 10485760, and
+`maxRunBytes` 104857600, plus the hardcoded `redactionPatterns`. The hardcoded
+bounds apply to every run on every project; requests, guidance, handoffs,
+evidence, and terminal captures keep today's limit behavior, only the source of
+the numbers changes. `doctor` and `init --dry-run` report the effective bounds
+from the hardcoded set.
+
 Mandatory state, events, journals, control envelopes, and the canonical handoff
 are never silently truncated. Terminal output and optional captures are kept up
-to their configured limits; Foundry records the original observed byte count,
+to the hardcoded limits; Foundry records the original observed byte count,
 retained byte count, content hash when fully observed, truncation, and redaction
 count. Once `maxRunBytes` is reached, optional evidence is rejected and the run
 continues using mandatory evidence when possible. If mandatory durable state
 cannot be written, the run stops safely as `blocked`.
 
-`redactionPatterns` are ECMAScript regular-expression strings validated by
-`doctor`. Redaction occurs before persistent logs and bundles are written.
+The hardcoded `redactionPatterns` are ECMAScript regular-expression strings.
+Redaction occurs before persistent logs and bundles are written. Projects can
+no longer extend the patterns with their own secret shapes; the hardcoded set
+plus never persisting credentials is the whole accidental-disclosure defense.
 Secrets remain outside the evidence contract; redaction is only a final
 accidental-disclosure defense.
 
@@ -379,9 +397,9 @@ The optional-evidence ledger is derived from verified history: retained
 terminal-capture and tracked-mutation bytes recorded for each verification
 execution. A write is admitted only while the ledger plus the incoming retained
 bytes stays within `maxRunBytes`; otherwise the write is refused with a typed
-`run-evidence-limit-reached` reason and no evidence file is created. `doctor`
-rejects a configuration whose `redactionPatterns` include an entry that does not
-compile as an ECMAScript regular expression.
+`run-evidence-limit-reached` reason and no evidence file is created. Every entry
+of the hardcoded `redactionPatterns` compiles as an ECMAScript regular
+expression.
 
 ## Durable-record minimum
 

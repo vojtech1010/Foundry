@@ -114,7 +114,12 @@ function sha256Hex(bytes: Uint8Array): string {
   return createHash('sha256').update(Buffer.from(bytes)).digest('hex');
 }
 
-function goldenDocument(targetRepository: string, maxRequestBytes = 262144) {
+function goldenDocument(
+  targetRepository: string,
+  // 055: artifact bounds are hardcoded, so the configured per-document limit is
+  // accepted here only to preserve call sites until the hardcoded set lands.
+  _maxRequestBytes = 262144,
+) {
   return {
     schemaVersion: 1,
     targetRepository,
@@ -151,16 +156,6 @@ function goldenDocument(targetRepository: string, maxRequestBytes = 262144) {
     },
     runtimeProfile: null,
     decisionPublication: null,
-    artifacts: {
-      retentionDays: 30,
-      maxRequestBytes,
-      maxGuidanceBytes: 1048576,
-      maxRoleHandoffBytes: 262144,
-      maxEvidenceBytes: 26214400,
-      maxTerminalCaptureBytes: 10485760,
-      maxRunBytes: 104857600,
-      redactionPatterns: [],
-    },
   };
 }
 

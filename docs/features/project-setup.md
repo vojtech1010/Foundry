@@ -10,7 +10,8 @@ branches, execution worktrees, and ignored `.agent` run data.
 - a clean target Git repository;
 - a reachable authoritative source remote and branch;
 - project-owned deterministic verification commands;
-- one configured live role harness for real runs; and
+- one configured live role host plus one harness and model per role for real
+  runs; and
 - a `GITHUB_TOKEN` environment credential only if Reviewer decision escalation
   may publish a draft PR.
 
@@ -39,6 +40,13 @@ command always drives the autonomous workflow.
     "protocol": "foundry-role-host-v1",
     "command": ["foundry-role-host"],
     "environmentAllowlist": ["OPENAI_API_KEY"]
+  },
+  "roles": {
+    "architect": { "harness": "pi", "model": "pi-default" },
+    "coder": { "harness": "pi", "model": "pi-default" },
+    "lead_coder": { "harness": "pi", "model": "pi-default" },
+    "tester": { "harness": "pi", "model": "pi-default" },
+    "reviewer": { "harness": "pi", "model": "pi-default" }
   },
   "timeouts": {
     "roleMs": 1800000,
@@ -92,16 +100,6 @@ command always drives the autonomous workflow.
     "remote": "origin",
     "draft": true,
     "maintainersCanModify": false
-  },
-  "artifacts": {
-    "retentionDays": 30,
-    "maxRequestBytes": 262144,
-    "maxGuidanceBytes": 1048576,
-    "maxRoleHandoffBytes": 262144,
-    "maxEvidenceBytes": 26214400,
-    "maxTerminalCaptureBytes": 10485760,
-    "maxRunBytes": 104857600,
-    "redactionPatterns": []
   }
 }
 ```
@@ -112,6 +110,25 @@ must be rejected. Projects without a safely prepared application runtime set
 `runtimeProfile` to `null`. Projects that cannot publish a decision PR set
 `decisionPublication` to `null`. Both keys are always present; JSON `null` is
 the omission form.
+
+`roles` names one harness and model per role (`architect`, `coder`,
+`lead_coder`, `tester`, `reviewer`). Each harness is a supported harness name
+and each model is a non-empty model string resolved against that harness's own
+catalog. A valid document is accepted only when every role names a supported
+harness and model; unknown harnesses, missing roles, or extra fields fail
+before work starts. The exact command line used to launch each harness is
+hardcoded in the role-host adapter per harness and runtime, never carried in
+configuration. There is still one operating model and one role-host protocol.
+
+Artifact bounds are hardcoded, not configured. A document containing an
+`artifacts` block is rejected as an unknown field under the closed-document
+rule. One hardcoded set applies to every run on every project: `retentionDays`
+30, `maxRequestBytes` 262144, `maxGuidanceBytes` 1048576, `maxRoleHandoffBytes`
+262144, `maxEvidenceBytes` 26214400, `maxTerminalCaptureBytes` 10485760, and
+`maxRunBytes` 104857600, plus the hardcoded `redactionPatterns`. The accepted
+cost is explicit: projects can no longer extend `redactionPatterns` with their
+own secret shapes; the hardcoded set plus never persisting credentials is the
+whole accidental-disclosure defense.
 
 `decisionPublication.draft` is always `true` and `maintainersCanModify` is
 always `false`; non-draft or mutable-head automated publication is unsupported.
@@ -143,16 +160,20 @@ node dist/cli/index.js profile-check --config .\target\.agent\foundry.config.jso
     by the invocation task ID, which must be a legal Git branch ref and must not
     equal the source branch;
   - `workspace`: `<target>/.agent/worktrees/<task-id>`;
-  - `roleHarness`: the configured `protocol` and resolved `command` vector; and
+  - `roleHarness`: the configured `protocol` and resolved `command` vector;
+  - `roles`: the resolved per-role routing (harness and model) without
+    launching anything; and
   - `artifacts.root`: `<target>/.agent/runs`, under which later run directories
-    appear. The preview creates nothing and leaves Git status, HEAD, and the
-    current branch unchanged.
+    appear, plus the effective hardcoded artifact bounds. The preview creates
+    nothing and leaves Git status, HEAD, and the current branch unchanged.
 - `profile-check` runs configured project commands in order and fails if they
   mutate tracked Git state.
 
 `doctor` also calls the role host's `capabilities` operation. A live run is
 rejected before source provisioning when the adapter cannot resume sessions or
-enforce the role capability profiles.
+enforce the role capability profiles. Both `doctor` and `init --dry-run` report
+the resolved per-role routing (harness and model) and the effective hardcoded
+artifact bounds without launching anything.
 
 ## Provisioning identity
 
@@ -227,8 +248,8 @@ source commit, excluding `.git` and `.agent`, plus the tracked files explicitly
 listed in `projectProfile.guidancePaths`. A missing, untracked, escaping, or
 oversized configured path fails preflight. Committed bytes are authoritative:
 a live file that differs, or an untracked live file at a listed path, never
-changes the snapshot. Each file and the aggregate are bounded by
-`artifacts.maxGuidanceBytes`, and invalid UTF-8 text is rejected. Saved guidance
+changes the snapshot. Each file and the aggregate are bounded by the hardcoded
+`maxGuidanceBytes`, and invalid UTF-8 text is rejected. Saved guidance
 is immutable for the run, hashed, size-bounded, and injected through the prompt
 contract. More deeply nested `AGENTS.md` files apply to their subtree using the
 same precedence as normal repository instructions.

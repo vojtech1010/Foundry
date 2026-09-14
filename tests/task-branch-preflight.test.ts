@@ -154,16 +154,6 @@ function goldenDocument(targetRepository: string, publicationConfigured: boolean
     decisionPublication: publicationConfigured
       ? { remote: 'origin', draft: true, maintainersCanModify: false }
       : null,
-    artifacts: {
-      retentionDays: 30,
-      maxRequestBytes: 262144,
-      maxGuidanceBytes: 1048576,
-      maxRoleHandoffBytes: 262144,
-      maxEvidenceBytes: 26214400,
-      maxTerminalCaptureBytes: 10485760,
-      maxRunBytes: 104857600,
-      redactionPatterns: [],
-    },
   };
 }
 
