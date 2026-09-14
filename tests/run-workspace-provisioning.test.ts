@@ -97,6 +97,13 @@ function goldenDocument(
       command: roleHarnessCommand,
       environmentAllowlist: [],
     },
+    roles: {
+      architect: { harness: 'codex', model: 'gpt-5-codex' },
+      coder: { harness: 'codex', model: 'gpt-5-codex' },
+      lead_coder: { harness: 'opencode', model: 'openai/gpt-5' },
+      tester: { harness: 'opencode', model: 'openai/gpt-5' },
+      reviewer: { harness: 'codex', model: 'gpt-5-codex' },
+    },
     timeouts: {
       roleMs: 1800000,
       settleMs: 30000,

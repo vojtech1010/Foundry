@@ -32,6 +32,13 @@ const exampleConfiguration = {
     command: ['foundry-role-host'],
     environmentAllowlist: ['OPENAI_API_KEY'],
   },
+  roles: {
+    architect: { harness: 'codex', model: 'gpt-5-codex' },
+    coder: { harness: 'codex', model: 'gpt-5-codex' },
+    lead_coder: { harness: 'opencode', model: 'openai/gpt-5' },
+    tester: { harness: 'opencode', model: 'openai/gpt-5' },
+    reviewer: { harness: 'codex', model: 'gpt-5-codex' },
+  },
   timeouts: {
     roleMs: 1800000,
     settleMs: 30000,
@@ -109,6 +116,7 @@ function withoutKey(source: Record<string, Schema.Json>, key: string): Schema.Js
 
 const sections: ReadonlyArray<readonly [string, Record<string, Schema.Json>]> = [
   ['roleHarness', exampleConfiguration.roleHarness],
+  ['roles', exampleConfiguration.roles],
   ['timeouts', exampleConfiguration.timeouts],
   ['retryBudgets', exampleConfiguration.retryBudgets],
   ['operationalRetryBudgets', exampleConfiguration.operationalRetryBudgets],
@@ -545,6 +553,13 @@ describe('project configuration contract', () => {
         protocol: 'foundry-role-host-v1',
         command: ['foundry-role-host'],
         environmentAllowlist: ['OPENAI_API_KEY'],
+      });
+      expect(decoded.roles).toEqual({
+        architect: { harness: 'codex', model: 'gpt-5-codex' },
+        coder: { harness: 'codex', model: 'gpt-5-codex' },
+        lead_coder: { harness: 'opencode', model: 'openai/gpt-5' },
+        tester: { harness: 'opencode', model: 'openai/gpt-5' },
+        reviewer: { harness: 'codex', model: 'gpt-5-codex' },
       });
       expect(decoded.timeouts).toEqual(exampleConfiguration.timeouts);
       expect(decoded.retryBudgets).toEqual(exampleConfiguration.retryBudgets);

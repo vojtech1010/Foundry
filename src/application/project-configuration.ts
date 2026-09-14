@@ -5,6 +5,7 @@ import {
   PROJECT_CONFIGURATION_SCHEMA_VERSION,
   PUBLICATION_DRAFT,
   PUBLICATION_MAINTAINERS_CAN_MODIFY,
+  ROLE_HARNESS_NAMES,
   ROLE_HARNESS_PROTOCOL,
   RUNTIME_DATA_POLICY,
   RUNTIME_TESTER_ACCESS,
@@ -28,6 +29,27 @@ const RoleHarnessSchema = Schema.Struct({
   protocol: Schema.Literal(ROLE_HARNESS_PROTOCOL),
   command: CommandVectorSchema,
   environmentAllowlist: StringListSchema,
+});
+
+/**
+ * A model string is stored trimmed and must be non-empty after trimming.
+ * Config-time validation cannot know a harness's model catalog, so any
+ * trimmed non-empty value is accepted here; the adapter rejects unknown
+ * models against its own catalog at launch time and fails closed.
+ */
+const RoleModelSchema = Schema.Trim.pipe(Schema.check(Schema.isNonEmpty()));
+
+const RoleHarnessSelectionSchema = Schema.Struct({
+  harness: Schema.Literals(ROLE_HARNESS_NAMES),
+  model: RoleModelSchema,
+});
+
+const RolesSchema = Schema.Struct({
+  architect: RoleHarnessSelectionSchema,
+  coder: RoleHarnessSelectionSchema,
+  lead_coder: RoleHarnessSelectionSchema,
+  tester: RoleHarnessSelectionSchema,
+  reviewer: RoleHarnessSelectionSchema,
 });
 
 const TimeoutsSchema = Schema.Struct({
@@ -110,6 +132,7 @@ export const ProjectConfigurationSchema = Schema.Struct({
   sourceBranch: Schema.NonEmptyString,
   taskBranchPolicy: Schema.NonEmptyString,
   roleHarness: RoleHarnessSchema,
+  roles: RolesSchema,
   timeouts: TimeoutsSchema,
   retryBudgets: RetryBudgetsSchema,
   operationalRetryBudgets: OperationalRetryBudgetsSchema,
@@ -154,6 +177,13 @@ function collectIssuePaths(
     }
     case 'Composite':
     case 'AnyOf': {
+      // Effect reports a failed literal union (for example an unknown harness
+      // name) as a composite with no children; attribute it to the current
+      // path instead of dropping it so field reporting stays precise.
+      if (issue.issues.length === 0) {
+        paths.push([...prefix]);
+        return;
+      }
       for (const child of issue.issues) {
         collectIssuePaths(child, prefix, paths);
       }

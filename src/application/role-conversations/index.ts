@@ -7,6 +7,7 @@ import {
   ROLE_HOST_OPERATIONS,
   ROLE_HOST_PROTOCOL_VERSION,
   evaluateRoleHostCapabilities,
+  resolveRoleHostRoute,
   roleHostEventsAreOrdered,
 } from '../../domain/role-host.js';
 import { deriveRoleHostAccessScope } from '../../domain/role-permissions.js';
@@ -32,7 +33,11 @@ import type {
   RoleHostSubmitRequest,
   RoleHostSubmitResponse,
 } from '../../domain/role-host.js';
-import type { CommandVector, ProjectConfiguration } from '../../domain/project-configuration.js';
+import type {
+  CommandVector,
+  ProjectConfiguration,
+  RoleHarnessName,
+} from '../../domain/project-configuration.js';
 import type { RoleTurnLocations } from '../../domain/role-permissions.js';
 
 export class RoleHostOperationalError extends Schema.TaggedError<RoleHostOperationalError>()(
@@ -88,7 +93,21 @@ export class RoleHost extends Context.Service<
 >()('foundry/application/role-conversations/Host') {}
 
 export interface RoleHostLaunchOptions {
-  readonly command: CommandVector;
+  /**
+   * Explicit launch argv for the legacy externally configured adapter. It is
+   * required when `harness` is absent; when `harness` is present the adapter
+   * resolves the hardcoded catalog argv for that harness and this command is
+   * ignored, so launch details are never carried in configuration.
+   */
+  readonly command?: CommandVector;
+  /**
+   * Per-role routing: the harness to launch for the role. Requires `model`;
+   * the adapter validates the model against the harness catalog and fails
+   * closed on unknown models.
+   */
+  readonly harness?: RoleHarnessName;
+  /** The model the harness must serve; required with `harness`. */
+  readonly model?: string;
   readonly cwd: string;
   readonly environmentAllowlist: ReadonlyArray<string>;
   readonly timeoutMs: number;
@@ -101,6 +120,34 @@ export class RoleHostLauncher extends Context.Service<
     readonly launch: (options: RoleHostLaunchOptions) => Layer.Layer<RoleHost>;
   }
 >()('foundry/application/role-conversations/Launcher') {}
+
+export interface RoleHostRouteLaunchOptions {
+  readonly configuration: ProjectConfiguration;
+  readonly role: RoleHostRole;
+  readonly cwd: string;
+  readonly timeoutMs?: number;
+  readonly maxOutputBytes?: number;
+}
+
+/**
+ * Builds launch options for one role from the configuration's per-role
+ * harness and model selection. The returned options carry `harness` and
+ * `model` without an explicit `command`, so the adapter resolves its
+ * hardcoded catalog argv and validates the model. Timeouts and output bounds
+ * default to the configured command and handoff budgets. This is the stable
+ * seam for per-role launching that reporting and the bundled host consume.
+ */
+export function launchOptionsForRole(options: RoleHostRouteLaunchOptions): RoleHostLaunchOptions {
+  const route = resolveRoleHostRoute(options.configuration.roles, options.role);
+  return {
+    harness: route.harness,
+    model: route.model,
+    cwd: options.cwd,
+    environmentAllowlist: options.configuration.roleHarness.environmentAllowlist,
+    timeoutMs: options.timeoutMs ?? options.configuration.timeouts.commandMs,
+    maxOutputBytes: options.maxOutputBytes ?? options.configuration.artifacts.maxRoleHandoffBytes,
+  };
+}
 
 export const ROLE_HOST_CAPABILITY_FAILURE_REASONS = [
   'unsupported-protocol',
