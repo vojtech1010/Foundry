@@ -11,6 +11,10 @@ import {
   isPublicCommand,
 } from '../domain/public-commands.js';
 import { PUBLICATION_CAPABILITIES } from '../domain/readiness.js';
+import {
+  RESULT_PUBLICATION_MERGE_METHODS,
+  RESULT_PUBLICATION_MODES,
+} from '../domain/project-configuration.js';
 import { RunInspectReportSchema } from '../domain/inspection.js';
 import { CleanupListReportSchema, CleanupRunReportSchema } from '../domain/retention-cleanup.js';
 import { DiagnosticBundleReportSchema } from '../domain/diagnostic-bundle.js';
@@ -215,6 +219,15 @@ const PublicationCapabilityReadinessData = Schema.Struct({
   state: Schema.Literals(['granted', 'denied', 'unknown']),
 });
 
+const DoctorResultPublicationData = Schema.Struct({
+  mode: Schema.Literals(RESULT_PUBLICATION_MODES),
+  mergeMethod: Schema.NullOr(Schema.Literals(RESULT_PUBLICATION_MERGE_METHODS)),
+  eligible: Schema.Boolean,
+  reason: Schema.NullOr(Schema.String),
+  autoMergeAllowed: Schema.NullOr(Schema.Boolean),
+  sourceBranchProtected: Schema.NullOr(Schema.Boolean),
+});
+
 const PublicationReadinessData = Schema.Struct({
   configured: Schema.Boolean,
   eligible: Schema.Boolean,
@@ -223,6 +236,7 @@ const PublicationReadinessData = Schema.Struct({
   repositoryScope: Schema.Literals(['repository', 'broad', 'unknown']),
   reason: Schema.NullOr(Schema.String),
   capabilities: Schema.Array(PublicationCapabilityReadinessData),
+  resultPublication: Schema.optional(DoctorResultPublicationData),
 });
 
 const DoctorReportData = Schema.Struct({
@@ -876,6 +890,17 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
             .map((capability) => `${capability.capability}=${capability.state}`)
             .join(' ')}`,
         );
+        if (data.publication.resultPublication !== undefined) {
+          const resultPublication = data.publication.resultPublication;
+          lines.push(
+            `data.publication.resultPublication.mode: ${resultPublication.mode}`,
+            `data.publication.resultPublication.mergeMethod: ${resultPublication.mergeMethod ?? 'none'}`,
+            `data.publication.resultPublication.eligible: ${resultPublication.eligible}`,
+            `data.publication.resultPublication.reason: ${resultPublication.reason ?? 'none'}`,
+            `data.publication.resultPublication.autoMergeAllowed: ${resultPublication.autoMergeAllowed ?? 'unknown'}`,
+            `data.publication.resultPublication.sourceBranchProtected: ${resultPublication.sourceBranchProtected ?? 'unknown'}`,
+          );
+        }
       }
     } else if ('profileCheck' in data) {
       lines.push(
@@ -1184,9 +1209,16 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
     if (!('publication' in report)) {
       return base;
     }
+    const { resultPublication, ...decisionPublication } = report.publication;
     return {
       ...base,
-      publication: Schema.decodeUnknownSync(PublicationReadinessData)(report.publication),
+      publication:
+        resultPublication === null
+          ? Schema.decodeUnknownSync(PublicationReadinessData)(decisionPublication)
+          : Schema.decodeUnknownSync(PublicationReadinessData)({
+              ...decisionPublication,
+              resultPublication: { ...resultPublication },
+            }),
     };
   }
   if ('profileCheck' in report) {

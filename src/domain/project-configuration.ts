@@ -86,6 +86,34 @@ export interface DecisionPublicationConfiguration {
   readonly maintainersCanModify: typeof PUBLICATION_MAINTAINERS_CAN_MODIFY;
 }
 
+export const RESULT_PUBLICATION_MODES = [
+  'draft-pr',
+  'non-draft-pr',
+  'non-draft-pr-auto-merge',
+  'direct-merge',
+] as const;
+
+export type ResultPublicationMode = (typeof RESULT_PUBLICATION_MODES)[number];
+
+export const RESULT_PUBLICATION_DEFAULT_MODE: ResultPublicationMode = 'non-draft-pr';
+
+export const RESULT_PUBLICATION_MERGE_METHODS = ['merge', 'squash', 'rebase'] as const;
+
+export type ResultPublicationMergeMethod = (typeof RESULT_PUBLICATION_MERGE_METHODS)[number];
+
+export const RESULT_PUBLICATION_DEFAULT_MERGE_METHOD: ResultPublicationMergeMethod = 'merge';
+
+/**
+ * The resolved result-publication mode. `mode` always carries an effective
+ * value; the merge method is meaningful only for `non-draft-pr-auto-merge`.
+ * Every mode reuses `decisionPublication.remote` for remote identity and
+ * credentials, so this configuration never carries a remote of its own.
+ */
+export interface ResultPublicationConfiguration {
+  readonly mode: ResultPublicationMode;
+  readonly mergeMethod: ResultPublicationMergeMethod;
+}
+
 export interface ArtifactConfiguration {
   readonly retentionDays: number;
   readonly maxRequestBytes: number;
@@ -111,6 +139,7 @@ export interface ProjectConfiguration {
   readonly projectProfile: ProjectProfileConfiguration;
   readonly runtimeProfile: RuntimeProfileConfiguration | null;
   readonly decisionPublication: DecisionPublicationConfiguration | null;
+  readonly resultPublication: ResultPublicationConfiguration;
   readonly artifacts: ArtifactConfiguration;
 }
 
