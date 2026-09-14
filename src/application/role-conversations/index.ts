@@ -35,8 +35,9 @@ import type {
   RoleHostSubmitRequest,
   RoleHostSubmitResponse,
 } from '../../domain/role-host.js';
-import { BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES } from '../../domain/project-configuration.js';
-import type { ProjectConfiguration, RoleHarnessName } from '../../domain/project-configuration.js';
+import { BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES } from '../../domain/role-harness.js';
+import type { ProjectConfiguration } from '../../domain/project-configuration.js';
+import type { RoleHarnessName } from '../../domain/role-harness.js';
 import type { RoleTurnLocations } from '../../domain/role-permissions.js';
 
 export class RoleHostOperationalError extends Schema.TaggedError<RoleHostOperationalError>()(
@@ -198,27 +199,30 @@ export interface RoleHostCapabilityPreflightOptions {
 }
 
 /**
- * Gates a run on the bundled role host: every distinct configured harness is
- * launched from its hardcoded catalog argv (never an external command) and
- * must attest the required protocol, resumable sessions, roles, and
- * capability profiles. The model each role names is validated by the adapter
- * at every launch and fails closed against the harness catalog. Returns the
- * first harness report; callers that only gate a run discard it.
+ * Gates a run on the bundled role host: every distinct configured
+ * harness-plus-model pair is launched from its hardcoded catalog argv
+ * (never an external command) and must attest the required protocol,
+ * resumable sessions, roles, and capability profiles. The model each pair
+ * names is validated by the adapter at its launch and fails closed against
+ * the harness catalog, so two roles sharing a harness with different models
+ * probe both models. Returns the first harness report; callers that only
+ * gate a run discard it.
  */
 export const preflightRoleHostCapabilities = Effect.fn('preflightRoleHostCapabilities')(function* (
   options: RoleHostCapabilityPreflightOptions,
 ): Effect.fn.Return<RoleHostCapabilitiesResponse, RoleHostCapabilityError, RoleHostLauncher> {
   const launcher = yield* RoleHostLauncher;
-  const harnesses = new Map<RoleHarnessName, string>();
+  const pairs = new Map<string, { readonly harness: RoleHarnessName; readonly model: string }>();
   for (const role of ROLE_HOST_ROLES) {
     const selection = options.configuration.roles[role];
-    if (!harnesses.has(selection.harness)) {
-      harnesses.set(selection.harness, selection.model);
+    const key = `${selection.harness} ${selection.model}`;
+    if (!pairs.has(key)) {
+      pairs.set(key, { harness: selection.harness, model: selection.model });
     }
   }
 
   let first: RoleHostCapabilitiesResponse | undefined;
-  for (const [harness, model] of harnesses) {
+  for (const { harness, model } of pairs.values()) {
     const hostLayer = launcher.launch({
       harness,
       model,

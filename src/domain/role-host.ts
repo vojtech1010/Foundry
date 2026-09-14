@@ -1,9 +1,12 @@
 import { Schema } from 'effect';
 
-import { ROLE_HARNESS_PROTOCOL } from './project-configuration.js';
+import { ROLE_HARNESS_PROTOCOL, ROLE_HOST_ROLES } from './role-harness.js';
 import { Identifier } from './run-identity.js';
 
-import type { RoleHarnessName, RoleHarnessSelections } from './project-configuration.js';
+import type { RoleHarnessName, RoleHarnessSelections, RoleHostRole } from './role-harness.js';
+
+export { ROLE_HOST_ROLES } from './role-harness.js';
+export type { RoleHostRole } from './role-harness.js';
 
 export const ROLE_HOST_PROTOCOL_VERSION = 1 as const;
 
@@ -18,10 +21,6 @@ export const ROLE_HOST_OPERATIONS = [
 ] as const;
 
 export type RoleHostOperation = (typeof ROLE_HOST_OPERATIONS)[number];
-
-export const ROLE_HOST_ROLES = ['architect', 'coder', 'lead_coder', 'tester', 'reviewer'] as const;
-
-export type RoleHostRole = (typeof ROLE_HOST_ROLES)[number];
 
 /**
  * The resolved routing for one role: which harness to launch and which model

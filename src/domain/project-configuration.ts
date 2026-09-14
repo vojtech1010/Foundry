@@ -1,46 +1,17 @@
-import type { RoleHostRole } from './role-host.js';
+import type { RoleHarnessSelections } from './role-harness.js';
+
+export {
+  BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES,
+  ROLE_HARNESS_NAMES,
+  ROLE_HARNESS_PROTOCOL,
+} from './role-harness.js';
+export type {
+  RoleHarnessName,
+  RoleHarnessSelection,
+  RoleHarnessSelections,
+} from './role-harness.js';
 
 export const PROJECT_CONFIGURATION_SCHEMA_VERSION = 1 as const;
-
-export const ROLE_HARNESS_PROTOCOL = 'foundry-role-host-v1' as const;
-
-/**
- * Harnesses Foundry knows how to launch. The configuration names one per
- * role; the exact launch argv and the accepted model catalog per harness are
- * hardcoded in the role-host adapter (see `src/platform/role-host.ts`), never
- * carried in configuration. The legacy `roleHarness` block left the
- * configuration document in task 054: per-role selection is the only
- * harness-related configuration.
- */
-export const ROLE_HARNESS_NAMES = ['codex', 'opencode'] as const;
-
-export type RoleHarnessName = (typeof ROLE_HARNESS_NAMES)[number];
-
-/**
- * The exact provider credential names the Foundry process reads from its own
- * environment and forwards to bundled harnesses at launch. Both shipped
- * harnesses serve OpenAI models, so the set is one name; it is documented in
- * `docs/features/protocol-contracts.md`, and any addition is a deliberate
- * catalog change, never per-project configuration. Credential values never
- * reach configuration, prompts, or logs.
- */
-export const BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES: ReadonlyArray<string> = ['OPENAI_API_KEY'];
-
-/**
- * The per-role harness and model selection carried in configuration. `model`
- * is stored trimmed and must be non-empty; whether the trimmed value names a
- * real model is decided by the harness adapter against its own catalog at
- * launch time, never by inventing a substitute.
- */
-export interface RoleHarnessSelection {
-  readonly harness: RoleHarnessName;
-  readonly model: string;
-}
-
-/** Every role names its harness and model; missing roles fail closed. */
-export type RoleHarnessSelections = {
-  readonly [role in RoleHostRole]: RoleHarnessSelection;
-};
 
 export const PUBLICATION_DRAFT = true as const;
 

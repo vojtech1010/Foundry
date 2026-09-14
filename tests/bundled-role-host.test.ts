@@ -8,14 +8,17 @@ import {
   RoleHostBinaryResolver,
   RoleHostCapabilityError,
 } from '../src/application/role-conversations/index.js';
+import { BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES } from '../src/domain/role-harness.js';
 import {
   BUNDLED_ROLE_HOST_ADAPTER_VERSION,
   BUNDLED_ROLE_HOST_CAPABILITIES,
   evaluateRoleHostCapabilities,
 } from '../src/domain/role-host.js';
 import {
+  ROLE_HARNESS_CATALOG,
   RoleHostBinaryResolverLive,
   bundledExecutableCandidates,
+  findBundledExecutable,
 } from '../src/platform/role-host.js';
 
 describe('bundled role-host executable candidates', () => {
@@ -29,12 +32,57 @@ describe('bundled role-host executable candidates', () => {
       'codex',
       'codex.exe',
       'codex.cmd',
+      'codex.bat',
     ]);
     expect(bundledExecutableCandidates('opencode', 'win32')).toEqual([
       'opencode',
       'opencode.exe',
       'opencode.cmd',
+      'opencode.bat',
     ]);
+  });
+});
+
+describe('bundled executable search', () => {
+  const posixJoin = (directory: string, name: string) => `${directory}/${name}`;
+
+  it('prefers the first directory and candidate in order', () => {
+    const found = findBundledExecutable(
+      ['codex', 'codex.exe', 'codex.cmd', 'codex.bat'],
+      ['/bin', '/tools'],
+      posixJoin,
+      (path) => path === '/tools/codex.exe',
+    );
+    expect(found).toBe('/tools/codex.exe');
+  });
+
+  it('falls back to .bat shims on Windows-style directories', () => {
+    const found = findBundledExecutable(
+      ['opencode', 'opencode.exe', 'opencode.cmd', 'opencode.bat'],
+      ['C:/tools', 'D:/bin'],
+      (directory, name) => `${directory}\\${name}`,
+      (path) => path === 'D:/bin\\opencode.bat',
+    );
+    expect(found).toBe('D:/bin\\opencode.bat');
+  });
+
+  it('skips empty directories and returns null when nothing matches', () => {
+    expect(findBundledExecutable(['codex'], ['', '/bin'], posixJoin, () => true)).toBe(
+      '/bin/codex',
+    );
+    expect(findBundledExecutable(['codex'], ['/bin'], posixJoin, () => false)).toBeNull();
+  });
+});
+
+describe('bundled credential names', () => {
+  it('uses one authoritative credential set in the catalog', () => {
+    expect(BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES).toEqual(['OPENAI_API_KEY']);
+    expect(ROLE_HARNESS_CATALOG.codex.environmentAllowlist).toBe(
+      BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES,
+    );
+    expect(ROLE_HARNESS_CATALOG.opencode.environmentAllowlist).toBe(
+      BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES,
+    );
   });
 });
 

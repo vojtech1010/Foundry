@@ -381,3 +381,67 @@ describe('role-host capability preflight', () => {
     }),
   );
 });
+
+describe('live capability preflight harness coverage', () => {
+  function recordingLauncher(
+    recorded: Array<{ readonly harness: string; readonly model: string }>,
+  ) {
+    return Layer.succeed(
+      RoleHostLauncher,
+      RoleHostLauncher.of({
+        launch: (options) => {
+          recorded.push({ harness: options.harness, model: options.model });
+          return Layer.succeed(
+            RoleHost,
+            RoleHost.of({
+              capabilities: () => Effect.succeed(CAPABLE_ROLE_HOST_CAPABILITIES),
+              create: () => Effect.die(new Error('preflight never creates sessions')),
+              submit: () => Effect.die(new Error('preflight never submits turns')),
+              observe: () => Effect.die(new Error('preflight never observes turns')),
+              stop: () => Effect.die(new Error('preflight never stops sessions')),
+            }),
+          );
+        },
+      }),
+    );
+  }
+
+  it.effect('probes every distinct configured harness before provisioning', () =>
+    Effect.gen(function* () {
+      const configuration = yield* decodeProjectConfiguration(goldenDocument('/target'), '/work');
+      const recorded: Array<{ readonly harness: string; readonly model: string }> = [];
+      yield* preflightRoleHostCapabilities({ configuration }).pipe(
+        Effect.provide(recordingLauncher(recorded)),
+      );
+      expect(recorded).toEqual([
+        { harness: 'codex', model: 'gpt-5-codex' },
+        { harness: 'opencode', model: 'openai/gpt-5' },
+      ]);
+    }),
+  );
+
+  it.effect('probes each distinct harness-plus-model pair', () =>
+    Effect.gen(function* () {
+      const document = goldenDocument('/target');
+      const configuration = yield* decodeProjectConfiguration(
+        {
+          ...document,
+          roles: {
+            ...document.roles,
+            coder: { harness: 'codex', model: 'gpt-5-codex-alt' },
+          },
+        },
+        '/work',
+      );
+      const recorded: Array<{ readonly harness: string; readonly model: string }> = [];
+      yield* preflightRoleHostCapabilities({ configuration }).pipe(
+        Effect.provide(recordingLauncher(recorded)),
+      );
+      expect(recorded).toEqual([
+        { harness: 'codex', model: 'gpt-5-codex' },
+        { harness: 'codex', model: 'gpt-5-codex-alt' },
+        { harness: 'opencode', model: 'openai/gpt-5' },
+      ]);
+    }),
+  );
+});

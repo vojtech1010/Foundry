@@ -32,8 +32,14 @@ import type {
   RoleHostSubmitRequest,
   RoleHostSubmitResponse,
 } from '../domain/role-host.js';
-import { ROLE_HARNESS_NAMES } from '../domain/project-configuration.js';
-import type { CommandVector, RoleHarnessName } from '../domain/project-configuration.js';
+import {
+  BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES,
+  ROLE_HARNESS_NAMES,
+} from '../domain/role-harness.js';
+import type { RoleHarnessName } from '../domain/role-harness.js';
+import type { CommandVector } from '../domain/project-configuration.js';
+
+export { BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES } from '../domain/role-harness.js';
 
 const STDERR_CAPTURE_LIMIT = 2_048;
 
@@ -63,14 +69,6 @@ export interface RoleHarnessCatalogEntry {
 }
 
 /**
- * The exact provider credential names Foundry reads for bundled harnesses.
- * Both shipped harnesses serve OpenAI models, so the set is one name; it is
- * documented in `docs/features/protocol-contracts.md` and any addition is a
- * deliberate catalog change, never per-project configuration.
- */
-export const BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES: ReadonlyArray<string> = ['OPENAI_API_KEY'];
-
-/**
  * Candidate executable names per harness and platform. Only executable
  * resolution varies by platform; argv, catalogs, and routing are identical
  * on Linux and Windows. Windows probes PATHEXT-style names because vendor
@@ -82,7 +80,12 @@ export function bundledExecutableCandidates(
 ): ReadonlyArray<string> {
   const entry = ROLE_HARNESS_CATALOG[harness];
   if (platform === 'win32') {
-    return [entry.executable, `${entry.executable}.exe`, `${entry.executable}.cmd`];
+    return [
+      entry.executable,
+      `${entry.executable}.exe`,
+      `${entry.executable}.cmd`,
+      `${entry.executable}.bat`,
+    ];
   }
   return [entry.executable];
 }
@@ -141,7 +144,7 @@ const resolveEffectiveCommand = Effect.fn('roleHost.resolveEffectiveCommand')(fu
       operation,
     });
   }
-  if (!entry.models.includes(model)) {
+  if (!isSupportedRoleHostModel(options.harness, model)) {
     return yield* new RoleHostOperationalError({
       message: `Unknown model "${model}" for role harness "${options.harness}": supported models are ${entry.models.join(', ')}.`,
       operation,
@@ -369,6 +372,33 @@ function isExecutableFile(path: string): boolean {
 }
 
 /**
+ * Pure PATH search behind live executable resolution. Tests cover this
+ * directly with a fake `exists` predicate, so Windows ordering (bare,
+ * `.exe`, `.cmd`, `.bat` across every directory) is verified
+ * deterministically without platform-skipping; the live resolver supplies
+ * the process PATH and `accessSync` underneath.
+ */
+export function findBundledExecutable(
+  candidates: ReadonlyArray<string>,
+  directories: ReadonlyArray<string>,
+  joinPath: (directory: string, name: string) => string,
+  exists: (path: string) => boolean,
+): string | null {
+  for (const directory of directories) {
+    if (directory.length === 0) {
+      continue;
+    }
+    for (const name of candidates) {
+      const candidate = joinPath(directory, name);
+      if (exists(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Live bundled-harness resolution: searches the Foundry process PATH for the
  * hardcoded per-harness, per-platform executable candidates and checks model
  * catalog membership. Used by doctor verification; live runs resolve through
@@ -381,17 +411,11 @@ export const RoleHostBinaryResolverLive: Layer.Layer<RoleHostBinaryResolver> = L
       Effect.gen(function* () {
         const candidates = bundledExecutableCandidates(harness, process.platform);
         const directories = (process.env.PATH ?? '').split(delimiter);
-        for (const directory of directories) {
-          if (directory.length === 0) {
-            continue;
-          }
-          for (const name of candidates) {
-            const candidate = join(directory, name);
-            const executable = yield* Effect.sync(() => isExecutableFile(candidate));
-            if (executable) {
-              return candidate;
-            }
-          }
+        const found = yield* Effect.sync(() =>
+          findBundledExecutable(candidates, directories, join, isExecutableFile),
+        );
+        if (found !== null) {
+          return found;
         }
         return yield* new RoleHostCapabilityError({
           message: `Bundled role harness "${harness}" executable (${candidates.join(', ')}) was not found on the process PATH.`,
@@ -402,7 +426,7 @@ export const RoleHostBinaryResolverLive: Layer.Layer<RoleHostBinaryResolver> = L
       Effect.gen(function* () {
         const entry = ROLE_HARNESS_CATALOG[harness];
         const trimmed = model.trim();
-        if (entry === undefined || !entry.models.includes(trimmed)) {
+        if (!isSupportedRoleHostModel(harness, model)) {
           const supported =
             entry === undefined ? ROLE_HARNESS_NAMES.join(', ') : entry.models.join(', ');
           return yield* new RoleHostCapabilityError({
