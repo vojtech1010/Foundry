@@ -35,10 +35,13 @@ shadow, pilot, or adoption mode.
 - **Foundry** advances accepted work and routes bounded corrections without
   asking a person to approve ordinary stages.
 
-Role-host selection is an implementation concern, not a product mode. An
-in-process fake Layer is used for deterministic development tests; a configured
-`foundry-role-host-v1` adapter performs real role work. Neither changes
-permissions or publication policy.
+Role-host selection is an implementation concern, not a product mode. A
+configured `foundry-role-host-v1` adapter performs real role work; an in-process
+stand-in Layer serves the same closed machine envelopes, permission roots, and
+session lifecycle, so a full Architect → Coder → checks → optional Tester →
+Reviewer walk can be driven without a vendor agent. Neither changes role
+permissions, Git safety, or when publication occurs. The stand-in is a Layer
+substituted in the composition root, never a CLI flag or configuration mode.
 
 Role handoffs are free-form Markdown with only a narrow machine control
 envelope for workflow routing. Agents never need to reproduce Foundry's durable
