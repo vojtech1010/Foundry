@@ -9,6 +9,7 @@ import { ReportEnvelope, runCli } from '../src/cli/program.js';
 import { RoleHostCapabilityError } from '../src/application/role-conversations/index.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
 import {
+  ADAPTER_SELECTED_MODEL,
   PublicationProbe,
   PublicationProbeError,
   ReadinessError,
@@ -19,6 +20,7 @@ import {
   checkReadiness,
   describePublicationReadiness,
   resolveBranchProtectionEvidence,
+  resolveRoleRouting,
 } from '../src/application/readiness/index.js';
 import {
   GIT_OPERATION_MARKERS,
@@ -43,6 +45,7 @@ import type {
   PublicationProbeObservation,
   PublicationProbeRequest,
 } from '../src/application/readiness/index.js';
+import type { ProjectConfiguration } from '../src/domain/project-configuration.js';
 import type { RoleHostLauncher } from '../src/application/role-conversations/index.js';
 
 const ReportEnvelopeJson = Schema.fromJsonString(ReportEnvelope);
@@ -465,6 +468,96 @@ describe('readiness domain vocabulary', () => {
   });
 });
 
+describe('per-role routing resolution', () => {
+  function asConfiguration(document: Schema.Json): ProjectConfiguration {
+    // SAFETY: the resolver only reads own string-keyed properties, so a
+    // JSON-shaped test double exercises the same code path as decoded input.
+    // Documents carrying a five-role shape would be rejected by the base
+    // closed configuration schema until 053A lands; these doubles simulate
+    // that post-053A shape for the pure resolver only.
+    return document as ProjectConfiguration;
+  }
+
+  it('shares the configured harness across all five roles when no per-role shape exists', () => {
+    const routing = resolveRoleRouting(asConfiguration(goldenDocument(TARGET)));
+
+    expect(routing).toEqual([
+      { role: 'architect', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+      { role: 'coder', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+      { role: 'lead_coder', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+      { role: 'tester', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+      { role: 'reviewer', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+    ]);
+  });
+
+  it('resolves the same routing twice and strips executable directories deterministically', () => {
+    const document = {
+      ...goldenDocument(TARGET),
+      roleHarness: {
+        protocol: 'foundry-role-host-v1',
+        command: ['C:\\tools\\harness\\custom-host.exe', '--flag'],
+        environmentAllowlist: [],
+      },
+    };
+
+    const first = resolveRoleRouting(asConfiguration(document));
+    const second = resolveRoleRouting(asConfiguration(document));
+
+    expect(second).toEqual(first);
+    expect(first.map((route) => route.harness)).toEqual([
+      'custom-host.exe',
+      'custom-host.exe',
+      'custom-host.exe',
+      'custom-host.exe',
+      'custom-host.exe',
+    ]);
+    expect(first.map((route) => route.role)).toEqual([
+      'architect',
+      'coder',
+      'lead_coder',
+      'tester',
+      'reviewer',
+    ]);
+  });
+
+  it('prefers a stable five-role routing shape when the document carries one', () => {
+    const roleRoutes = {
+      architect: { harness: 'architect-harness', model: 'architect-model' },
+      coder: { harness: 'coder-harness', model: 'coder-model' },
+      lead_coder: { harness: 'lead-harness', model: 'lead-model' },
+      tester: { harness: 'tester-harness', model: 'tester-model' },
+      reviewer: { harness: 'reviewer-harness', model: 'reviewer-model' },
+    };
+    const routing = resolveRoleRouting(asConfiguration({ ...goldenDocument(TARGET), roleRoutes }));
+
+    expect(routing).toEqual([
+      { role: 'architect', harness: 'architect-harness', model: 'architect-model' },
+      { role: 'coder', harness: 'coder-harness', model: 'coder-model' },
+      { role: 'lead_coder', harness: 'lead-harness', model: 'lead-model' },
+      { role: 'tester', harness: 'tester-harness', model: 'tester-model' },
+      { role: 'reviewer', harness: 'reviewer-harness', model: 'reviewer-model' },
+    ]);
+  });
+
+  it('falls back to the shared harness when a carried routing shape is incomplete', () => {
+    const routing = resolveRoleRouting(
+      asConfiguration({
+        ...goldenDocument(TARGET),
+        roleRoutes: { architect: { harness: 'architect-harness', model: 'architect-model' } },
+      }),
+    );
+
+    expect(routing.map((route) => route.role)).toEqual([
+      'architect',
+      'coder',
+      'lead_coder',
+      'tester',
+      'reviewer',
+    ]);
+    expect(routing.every((route) => route.model === ADAPTER_SELECTED_MODEL)).toBe(true);
+  });
+});
+
 describe('readiness check with fake services', () => {
   it.effect('reports host, configuration, storage, and repository identity when ready', () =>
     Effect.gen(function* () {
@@ -485,6 +578,13 @@ describe('readiness check with fake services', () => {
         branch: 'main',
         commit: COMMIT,
       });
+      expect(report.roleRouting).toEqual([
+        { role: 'architect', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+        { role: 'coder', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+        { role: 'lead_coder', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+        { role: 'tester', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+        { role: 'reviewer', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+      ]);
       expectNoBranchMutation(built.gitCalls);
     }),
   );
@@ -752,6 +852,13 @@ describe('readiness check with fake services', () => {
         'reviewer',
       ]);
       expect(data.roleHost.networkProfiles).toEqual(['network_denied', 'runtime_origin_only']);
+      expect(data.roleRouting).toEqual([
+        { role: 'architect', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+        { role: 'coder', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+        { role: 'lead_coder', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+        { role: 'tester', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+        { role: 'reviewer', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+      ]);
       expect(data.publication).toEqual({
         configured: false,
         eligible: false,
@@ -767,6 +874,7 @@ describe('readiness check with fake services', () => {
         'storage',
         'repository',
         'roleHost',
+        'roleRouting',
         'publication',
       ]);
       expectNoBranchMutation(built.gitCalls);
@@ -797,6 +905,11 @@ describe('readiness check with fake services', () => {
       expect(humanResult.stdout).toContain(
         `data.roleHost.availableRoles: ${data.roleHost.availableRoles.join(' ')}`,
       );
+      for (const route of data.roleRouting) {
+        expect(humanResult.stdout).toContain(
+          `data.roleRouting: ${route.role} harness=${route.harness} model=${route.model}`,
+        );
+      }
       expect(humanResult.stdout.endsWith('\n')).toBe(true);
     }),
   );

@@ -12,6 +12,7 @@ import {
   isPublicCommand,
 } from '../domain/public-commands.js';
 import { PUBLICATION_CAPABILITIES } from '../domain/readiness.js';
+import { ROLE_HOST_ROLES } from '../domain/role-host.js';
 import { RunInspectReportSchema } from '../domain/inspection.js';
 import { CleanupListReportSchema, CleanupRunReportSchema } from '../domain/retention-cleanup.js';
 import { DiagnosticBundleReportSchema } from '../domain/diagnostic-bundle.js';
@@ -231,6 +232,12 @@ const PublicationReadinessData = Schema.Struct({
   capabilities: Schema.Array(PublicationCapabilityReadinessData),
 });
 
+const RoleRoutingReportData = Schema.Struct({
+  role: Schema.Literals(ROLE_HOST_ROLES),
+  harness: Schema.NonEmptyString,
+  model: Schema.NonEmptyString,
+});
+
 const DoctorReportData = Schema.Struct({
   readiness: Schema.Literal('ready'),
   host: Schema.Struct({
@@ -261,6 +268,7 @@ const DoctorReportData = Schema.Struct({
     filesystemProfiles: Schema.Array(Schema.String),
     networkProfiles: Schema.Array(Schema.String),
   }),
+  roleRouting: Schema.Array(RoleRoutingReportData),
   publication: Schema.optional(PublicationReadinessData),
 });
 
@@ -277,6 +285,7 @@ const InitPreviewReportData = Schema.Struct({
     protocol: Schema.String,
     command: Schema.NonEmptyArray(Schema.String),
   }),
+  roleRouting: Schema.Array(RoleRoutingReportData),
   artifacts: Schema.Struct({
     root: Schema.String,
   }),
@@ -888,6 +897,9 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         `data.roleHost.filesystemProfiles: ${data.roleHost.filesystemProfiles.join(' ')}`,
         `data.roleHost.networkProfiles: ${data.roleHost.networkProfiles.join(' ')}`,
       );
+      for (const route of data.roleRouting) {
+        lines.push(`data.roleRouting: ${route.role} harness=${route.harness} model=${route.model}`);
+      }
       if (data.publication !== undefined) {
         lines.push(
           `data.publication.configured: ${data.publication.configured}`,
@@ -1038,6 +1050,9 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         `data.roleHarness.command: ${data.roleHarness.command.join(' ')}`,
         `data.artifacts.root: ${data.artifacts.root}`,
       );
+      for (const route of data.roleRouting) {
+        lines.push(`data.roleRouting: ${route.role} harness=${route.harness} model=${route.model}`);
+      }
     }
   } else {
     lines.push(
@@ -1224,6 +1239,7 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
         filesystemProfiles: [...report.roleHost.filesystemProfiles],
         networkProfiles: [...report.roleHost.networkProfiles],
       },
+      roleRouting: report.roleRouting.map((route) => ({ ...route })),
     };
     if (!('publication' in report)) {
       return base;
@@ -1388,6 +1404,7 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       protocol: report.roleHarness.protocol,
       command: [...report.roleHarness.command],
     },
+    roleRouting: report.roleRouting.map((route) => ({ ...route })),
     artifacts: {
       root: report.artifacts.root,
     },

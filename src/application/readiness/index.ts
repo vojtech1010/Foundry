@@ -24,13 +24,18 @@ import { invalidRedactionPatterns } from '../evidence-limits/index.js';
 import { decodeProjectConfiguration } from '../project-configuration.js';
 import { preflightRoleHostCapabilities } from '../role-conversations/index.js';
 
+import { ROLE_HOST_ROLES } from '../../domain/role-host.js';
+import type {
+  DecisionPublicationConfiguration,
+  ProjectConfiguration,
+} from '../../domain/project-configuration.js';
 import type {
   PublicationCapability,
   PublicationCapabilityState,
   PublicationRepositoryScope,
 } from '../../domain/readiness.js';
-import type { DecisionPublicationConfiguration } from '../../domain/project-configuration.js';
 import type { BranchProtectionEvidence } from '../../domain/run-locations.js';
+import type { RoleHostRole } from '../../domain/role-host.js';
 import type { RoleHostCapabilityError, RoleHostLauncher } from '../role-conversations/index.js';
 
 export class ReadinessError extends Schema.TaggedError<ReadinessError>()('ReadinessError', {
@@ -153,6 +158,99 @@ export interface DoctorRoleHostReport {
   readonly networkProfiles: ReadonlyArray<string>;
 }
 
+export interface RoleRoutingReport {
+  readonly role: RoleHostRole;
+  readonly harness: string;
+  readonly model: string;
+}
+
+export const ADAPTER_SELECTED_MODEL = 'adapter-selected' as const;
+
+const RoleRouteByNameSchema = Schema.Struct({
+  harness: Schema.NonEmptyString,
+  model: Schema.NonEmptyString,
+});
+
+const RoleRouteByCommandSchema = Schema.Struct({
+  command: Schema.NonEmptyArray(Schema.NonEmptyString),
+  model: Schema.NonEmptyString,
+});
+
+const RoleRouteEntrySchema = Schema.Union([RoleRouteByNameSchema, RoleRouteByCommandSchema]);
+
+const PerRoleRoutingSectionSchema = Schema.Struct({
+  architect: RoleRouteEntrySchema,
+  coder: RoleRouteEntrySchema,
+  lead_coder: RoleRouteEntrySchema,
+  tester: RoleRouteEntrySchema,
+  reviewer: RoleRouteEntrySchema,
+});
+
+const PerRoleRoutingDocumentSchema = Schema.Struct({
+  roleRoutes: Schema.optional(PerRoleRoutingSectionSchema),
+  roleHarnessByRole: Schema.optional(PerRoleRoutingSectionSchema),
+  perRoleHarness: Schema.optional(PerRoleRoutingSectionSchema),
+});
+
+function harnessBasename(executable: string): string {
+  const segments = executable.split(/[/\\]/u).filter((segment) => segment.length > 0);
+  return segments[segments.length - 1] ?? executable;
+}
+
+function toRoleRoutingReport(
+  role: RoleHostRole,
+  entry: (typeof RoleRouteEntrySchema)['Type'],
+): RoleRoutingReport {
+  if ('harness' in entry) {
+    return { role, harness: entry.harness, model: entry.model };
+  }
+  return { role, harness: harnessBasename(entry.command[0]), model: entry.model };
+}
+
+function perRoleRoutingFromDocument(
+  configuration: ProjectConfiguration,
+): ReadonlyArray<RoleRoutingReport> | undefined {
+  const document: unknown = configuration;
+  const decoded = Schema.decodeUnknownOption(PerRoleRoutingDocumentSchema, {
+    onExcessProperty: 'ignore',
+  })(document);
+  if (Option.isNone(decoded)) {
+    return undefined;
+  }
+  const section =
+    decoded.value.roleRoutes ?? decoded.value.roleHarnessByRole ?? decoded.value.perRoleHarness;
+  if (section === undefined) {
+    return undefined;
+  }
+  return ROLE_HOST_ROLES.map((role) => toRoleRoutingReport(role, section[role]));
+}
+
+/**
+ * Deterministic per-role routing for read-only reports. Resolution is pure:
+ * it reads the decoded project configuration and never launches a role
+ * session. When the configuration carries a stable five-role routing shape
+ * (053A), that shape wins; otherwise every role shares the configured
+ * harness executable name and the model is honestly reported as
+ * adapter-selected, because the base document names no model and Foundry
+ * never invents a substitute model. Either way the same document resolves
+ * the same routing on Linux and Windows: only directory separators are
+ * stripped from the harness executable, and platform executable resolution
+ * still applies when a session is actually launched.
+ */
+export function resolveRoleRouting(
+  configuration: ProjectConfiguration,
+): ReadonlyArray<RoleRoutingReport> {
+  const fallbackHarness = harnessBasename(configuration.roleHarness.command[0]);
+  return (
+    perRoleRoutingFromDocument(configuration) ??
+    ROLE_HOST_ROLES.map((role) => ({
+      role,
+      harness: fallbackHarness,
+      model: ADAPTER_SELECTED_MODEL,
+    }))
+  );
+}
+
 export interface DoctorPublicationCapabilityReport {
   readonly capability: PublicationCapability;
   readonly state: PublicationCapabilityState;
@@ -174,6 +272,7 @@ export interface DoctorReport {
   readonly storage: DoctorStorageReport;
   readonly repository: DoctorRepositoryReport;
   readonly roleHost: DoctorRoleHostReport;
+  readonly roleRouting: ReadonlyArray<RoleRoutingReport>;
   readonly publication: DoctorPublicationReport;
 }
 
@@ -615,6 +714,7 @@ export const checkReadiness = Effect.fn('checkReadiness')(function* (
       filesystemProfiles: [...capabilities.capabilityProfiles.filesystem],
       networkProfiles: [...capabilities.capabilityProfiles.network],
     },
+    roleRouting: resolveRoleRouting(configuration),
     publication,
   };
 });

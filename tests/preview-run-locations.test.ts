@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
 import {
+  ADAPTER_SELECTED_MODEL,
   PublicationProbe,
   PublicationProbeError,
   ReadinessError,
@@ -458,6 +459,13 @@ describe('preview run locations with fake services', () => {
         protocol: 'foundry-role-host-v1',
         command: ['foundry-role-host'],
       });
+      expect(report.roleRouting).toEqual([
+        { role: 'architect', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+        { role: 'coder', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+        { role: 'lead_coder', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+        { role: 'tester', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+        { role: 'reviewer', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+      ]);
       expect(report.artifacts).toEqual({ root: '/target/.agent/runs' });
       expectReadOnlyGitCalls(built.gitCalls);
     }),
@@ -653,9 +661,24 @@ describe('preview run locations with fake services', () => {
       expect(data.taskId).toBe(TASK_ID);
       expect(data.branch).toBe('foundry/example-change');
       expect(data.workspace).toBe('/target/.agent/worktrees/example-change');
+      expect(data.roleRouting).toEqual([
+        { role: 'architect', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+        { role: 'coder', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+        { role: 'lead_coder', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+        { role: 'tester', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+        { role: 'reviewer', harness: 'foundry-role-host', model: ADAPTER_SELECTED_MODEL },
+      ]);
       expect(data.artifacts).toEqual({ root: '/target/.agent/runs' });
       expect(Object.keys(data).sort()).toEqual(
-        ['artifacts', 'branch', 'roleHarness', 'source', 'taskId', 'workspace'].sort(),
+        [
+          'artifacts',
+          'branch',
+          'roleHarness',
+          'roleRouting',
+          'source',
+          'taskId',
+          'workspace',
+        ].sort(),
       );
       expectReadOnlyGitCalls(built.gitCalls);
     }),
@@ -696,6 +719,11 @@ describe('preview run locations with fake services', () => {
       expect(humanResult.stdout).toContain(
         `data.roleHarness.protocol: ${data.roleHarness.protocol}`,
       );
+      for (const route of data.roleRouting) {
+        expect(humanResult.stdout).toContain(
+          `data.roleRouting: ${route.role} harness=${route.harness} model=${route.model}`,
+        );
+      }
       expect(humanResult.stdout).toContain(`data.artifacts.root: ${data.artifacts.root}`);
       expect(humanResult.stdout.endsWith('\n')).toBe(true);
     }),

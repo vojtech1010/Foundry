@@ -13,6 +13,7 @@ import {
   checkReadiness,
   ReadinessFiles,
   resolveBranchProtectionEvidence,
+  resolveRoleRouting,
 } from '../readiness/index.js';
 import { decodeProjectConfiguration } from '../project-configuration.js';
 
@@ -20,6 +21,7 @@ import type {
   ReadinessError,
   ReadinessGit,
   ReadinessHost,
+  RoleRoutingReport,
   PublicationProbe,
 } from '../readiness/index.js';
 import type { RoleHostCapabilityError, RoleHostLauncher } from '../role-conversations/index.js';
@@ -54,6 +56,7 @@ export interface PreviewLocationsReport {
   readonly branch: string;
   readonly workspace: string;
   readonly roleHarness: PreviewRoleHarnessReport;
+  readonly roleRouting: ReadonlyArray<RoleRoutingReport>;
   readonly artifacts: PreviewArtifactsReport;
 }
 
@@ -134,6 +137,7 @@ export const previewRunLocations = Effect.fn('previewRunLocations')(function* (
       protocol: configuration.roleHarness.protocol,
       command: configuration.roleHarness.command,
     },
+    roleRouting: resolveRoleRouting(configuration),
     artifacts: {
       root: artifactsRoot,
     },
