@@ -1331,7 +1331,7 @@ describe('run command through the cli envelope', () => {
     }),
   );
 
-  it.effect('refuses a duplicate run ID with exit code 2 and keeps the first run intact', () =>
+  it.effect('refuses a duplicate run ID with exit code 1 and keeps the first run intact', () =>
     Effect.gen(function* () {
       const fixture = setupFixture();
       try {
@@ -1366,10 +1366,10 @@ describe('run command through the cli envelope', () => {
           'RUN-CLI-DUP',
           '--json',
         ]);
-        expect(second.exitCode).toBe(EXIT_CODES.invalidInvocation);
+        expect(second.exitCode).toBe(EXIT_CODES.operationFailed);
         const failure = expectRecordedFailure(second.stdout);
         expect(failure.command).toBe('run');
-        expect(failure.error.kind).toBe('invalid_invocation');
+        expect(failure.error.kind).toBe('failed');
         expect(failure.error.retryable).toBe(false);
         expect(failure.error.runId).toBe('RUN-CLI-DUP');
         expect(readFileSync(data.request.originalPath, 'utf8')).toBe(before);
@@ -1379,7 +1379,7 @@ describe('run command through the cli envelope', () => {
     }),
   );
 
-  it.effect('maps request validation failures to exit code 2 with the run ID', () =>
+  it.effect('maps request validation failures to a failed report with the run ID', () =>
     Effect.gen(function* () {
       const fixture = setupFixture();
       try {
@@ -1397,9 +1397,9 @@ describe('run command through the cli envelope', () => {
           '--json',
         ]).pipe(Effect.provide(CliLayer));
 
-        expect(result.exitCode).toBe(EXIT_CODES.invalidInvocation);
+        expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
         const failure = expectRecordedFailure(result.stdout);
-        expect(failure.error.kind).toBe('invalid_invocation');
+        expect(failure.error.kind).toBe('failed');
         expect(failure.error.retryable).toBe(false);
         expect(failure.error.runId).toBe('RUN-CLI-EMPTY');
         expect(existsSync(fixture.runDirectory('RUN-CLI-EMPTY'))).toBe(false);
@@ -1810,9 +1810,9 @@ describe('repository lease through the run command', () => {
           Effect.provide(CliLayer),
         );
 
-        expect(result.exitCode).toBe(EXIT_CODES.invalidInvocation);
+        expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
         const failure = expectRecordedFailure(result.stdout);
-        expect(failure.error.kind).toBe('invalid_invocation');
+        expect(failure.error.kind).toBe('failed');
         expect(existsSync(leasePathOf(fixture))).toBe(false);
         expect(existsSync(join(fixture.target, '.agent', 'runs'))).toBe(false);
       } finally {

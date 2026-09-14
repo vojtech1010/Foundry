@@ -143,6 +143,8 @@ function eligibleObservation(
     issueCommentReadable: true,
     tokenScopes: null,
     protectedBranches: [],
+    autoMergeAllowed: true,
+    branchProtected: true,
     limitations: [],
     ...overrides,
   };
@@ -250,6 +252,30 @@ function publicationWorld(
     },
     git: { ...world.git, ...git },
     publication: { ...world.publication, ...publication },
+  };
+}
+
+function resultPublicationWorld(
+  mode: string,
+  options: {
+    readonly mergeMethod?: string;
+    readonly publication?: Partial<PublicationScript>;
+    readonly git?: Partial<GitScript>;
+  } = {},
+): FakeWorld {
+  const world = defaultWorld();
+  const resultPublication =
+    options.mergeMethod === undefined ? { mode } : { mode, mergeMethod: options.mergeMethod };
+  return {
+    ...world,
+    files: {
+      ...world.files,
+      texts: new Map([
+        [CONFIG_PATH, JSON.stringify({ ...publicationDocument(TARGET), resultPublication })],
+      ]),
+    },
+    git: { ...world.git, ...options.git },
+    publication: { ...world.publication, ...options.publication },
   };
 }
 
@@ -867,6 +893,7 @@ describe('readiness check with fake services', () => {
       expect(data.publication).toEqual({
         configured: false,
         eligible: false,
+        remote: null,
         repository: null,
         repositoryScope: 'unknown',
         reason: null,
@@ -951,7 +978,7 @@ describe('readiness check with fake services', () => {
     }),
   );
 
-  it.effect('maps doctor failures to exit code 2 with an invalid invocation error', () =>
+  it.effect('maps doctor failures to a failed report rather than an argument error', () =>
     Effect.gen(function* () {
       const world = defaultWorld();
       const built = buildWorld({
@@ -962,10 +989,10 @@ describe('readiness check with fake services', () => {
         Effect.provide(built.layer),
       );
 
-      expect(result.exitCode).toBe(EXIT_CODES.invalidInvocation);
+      expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
       const envelope = expectDoctorFailure(result.stdout);
       expect(envelope.command).toBe('doctor');
-      expect(envelope.error.kind).toBe('invalid_invocation');
+      expect(envelope.error.kind).toBe('failed');
       expect(envelope.error.retryable).toBe(false);
       expect(envelope.error.message).toContain('is not clean');
     }),
@@ -1074,6 +1101,7 @@ describe('publication readiness with fake services', () => {
         repositoryScope: 'unknown',
         reason: null,
         capabilities: [],
+        resultPublication: null,
       });
       expect(built.gitCalls.some((call) => call.args[1] === 'get-url')).toBe(false);
     }),
@@ -1097,6 +1125,14 @@ describe('publication readiness with fake services', () => {
           { capability: 'issue_comment_read', state: 'granted' },
           { capability: 'collaborator_permission', state: 'granted' },
         ],
+        resultPublication: {
+          mode: 'non-draft-pr',
+          mergeMethod: null,
+          eligible: true,
+          reason: null,
+          autoMergeAllowed: true,
+          sourceBranchProtected: true,
+        },
       });
     }),
   );
@@ -1117,6 +1153,7 @@ describe('publication readiness with fake services', () => {
       expect(data.publication).toEqual({
         configured: true,
         eligible: true,
+        remote: 'origin',
         repository: 'foundry/target',
         repositoryScope: 'repository',
         reason: null,
@@ -1126,9 +1163,18 @@ describe('publication readiness with fake services', () => {
           { capability: 'issue_comment_read', state: 'granted' },
           { capability: 'collaborator_permission', state: 'granted' },
         ],
+        resultPublication: {
+          mode: 'non-draft-pr',
+          mergeMethod: null,
+          eligible: true,
+          reason: null,
+          autoMergeAllowed: true,
+          sourceBranchProtected: true,
+        },
       });
       expect(humanResult.stdout).toContain('data.publication.configured: true');
       expect(humanResult.stdout).toContain('data.publication.eligible: true');
+      expect(humanResult.stdout).toContain('data.publication.remote: origin');
       expect(humanResult.stdout).toContain('data.publication.repository: foundry/target');
       expect(humanResult.stdout).toContain('data.publication.repositoryScope: repository');
       expect(humanResult.stdout).toContain('data.publication.reason: none');
@@ -1261,6 +1307,172 @@ describe('publication readiness with fake services', () => {
       expect(report.publication.eligible).toBe(false);
       expect(report.publication.repository).toBe('foundry/target');
       expect(report.publication.reason).toContain('probe is unavailable');
+    }),
+  );
+});
+
+describe('result publication readiness modes', () => {
+  it.effect('defaults the absent key to non-draft-pr with the decision-channel eligibility', () =>
+    Effect.gen(function* () {
+      const { check } = checkWith(publicationWorld());
+      const report = yield* check;
+      expect(report.publication.resultPublication).toEqual({
+        mode: 'non-draft-pr',
+        mergeMethod: null,
+        eligible: true,
+        reason: null,
+        autoMergeAllowed: true,
+        sourceBranchProtected: true,
+      });
+
+      const draft = yield* checkWith(resultPublicationWorld('draft-pr')).check;
+      expect(draft.publication.resultPublication).toEqual({
+        mode: 'draft-pr',
+        mergeMethod: null,
+        eligible: true,
+        reason: null,
+        autoMergeAllowed: true,
+        sourceBranchProtected: true,
+      });
+    }),
+  );
+
+  it.effect('gates non-draft-pr-auto-merge on repository auto-merge and branch protection', () =>
+    Effect.gen(function* () {
+      const eligible = yield* checkWith(
+        resultPublicationWorld('non-draft-pr-auto-merge', {
+          mergeMethod: 'squash',
+          publication: {
+            observation: eligibleObservation({ autoMergeAllowed: true, branchProtected: true }),
+          },
+        }),
+      ).check;
+      expect(eligible.publication.resultPublication).toEqual({
+        mode: 'non-draft-pr-auto-merge',
+        mergeMethod: 'squash',
+        eligible: true,
+        reason: null,
+        autoMergeAllowed: true,
+        sourceBranchProtected: true,
+      });
+
+      const autoMergeDisabled = yield* checkWith(
+        resultPublicationWorld('non-draft-pr-auto-merge', {
+          publication: { observation: eligibleObservation({ autoMergeAllowed: false }) },
+        }),
+      ).check;
+      expect(autoMergeDisabled.publication.resultPublication?.eligible).toBe(false);
+      expect(autoMergeDisabled.publication.resultPublication?.reason).toContain('auto-merge');
+
+      const protectionUnknown = yield* checkWith(
+        resultPublicationWorld('non-draft-pr-auto-merge', {
+          publication: { observation: eligibleObservation({ branchProtected: null }) },
+        }),
+      ).check;
+      expect(protectionUnknown.publication.resultPublication?.eligible).toBe(false);
+      expect(protectionUnknown.publication.resultPublication?.reason).toContain('protected');
+    }),
+  );
+
+  it.effect('gates direct-merge on push authority and an unprotected source branch', () =>
+    Effect.gen(function* () {
+      const eligible = yield* checkWith(
+        resultPublicationWorld('direct-merge', {
+          publication: { observation: eligibleObservation({ branchProtected: false }) },
+        }),
+      ).check;
+      expect(eligible.publication.resultPublication).toEqual({
+        mode: 'direct-merge',
+        mergeMethod: null,
+        eligible: true,
+        reason: null,
+        autoMergeAllowed: true,
+        sourceBranchProtected: false,
+      });
+
+      const protectedBranch = yield* checkWith(
+        resultPublicationWorld('direct-merge', {
+          publication: { observation: eligibleObservation({ branchProtected: true }) },
+        }),
+      ).check;
+      expect(protectedBranch.publication.resultPublication?.eligible).toBe(false);
+      expect(protectedBranch.publication.resultPublication?.reason).toContain('protected');
+
+      const unknownProtection = yield* checkWith(
+        resultPublicationWorld('direct-merge', {
+          publication: { observation: eligibleObservation({ branchProtected: null }) },
+        }),
+      ).check;
+      expect(unknownProtection.publication.resultPublication?.eligible).toBe(false);
+      expect(unknownProtection.publication.resultPublication?.reason).toContain(
+        'protection could not be established',
+      );
+
+      const noPush = yield* checkWith(
+        resultPublicationWorld('direct-merge', {
+          publication: {
+            observation: eligibleObservation({ push: false, branchProtected: false }),
+          },
+        }),
+      ).check;
+      expect(noPush.publication.resultPublication?.eligible).toBe(false);
+      expect(noPush.publication.resultPublication?.reason).toContain('push');
+    }),
+  );
+
+  it.effect('treats unknown result facts as ineligible for every mode', () =>
+    Effect.gen(function* () {
+      for (const mode of ['non-draft-pr', 'non-draft-pr-auto-merge', 'direct-merge']) {
+        const { check } = checkWith(
+          resultPublicationWorld(mode, {
+            publication: { observation: eligibleObservation({ tokenPresent: false }) },
+          }),
+        );
+        const report = yield* check;
+        expect(report.publication.resultPublication?.eligible, mode).toBe(false);
+        expect(report.publication.resultPublication?.reason, mode).toContain('GITHUB_TOKEN');
+      }
+    }),
+  );
+
+  it.effect('renders the sub-report in doctor json and human output', () =>
+    Effect.gen(function* () {
+      const { built } = checkWith(
+        resultPublicationWorld('non-draft-pr-auto-merge', {
+          mergeMethod: 'squash',
+          publication: {
+            observation: eligibleObservation({ autoMergeAllowed: true, branchProtected: true }),
+          },
+        }),
+      );
+      const jsonResult = yield* runCli(['doctor', '--config', CONFIG_PATH, '--json']).pipe(
+        Effect.provide(built.layer),
+      );
+      const humanResult = yield* runCli(['doctor', '--config', CONFIG_PATH]).pipe(
+        Effect.provide(built.layer),
+      );
+
+      const { data } = expectDoctorEnvelope(jsonResult.stdout);
+      expect(data.publication?.resultPublication).toEqual({
+        mode: 'non-draft-pr-auto-merge',
+        mergeMethod: 'squash',
+        eligible: true,
+        reason: null,
+        autoMergeAllowed: true,
+        sourceBranchProtected: true,
+      });
+      expect(humanResult.stdout).toContain(
+        'data.publication.resultPublication.mode: non-draft-pr-auto-merge',
+      );
+      expect(humanResult.stdout).toContain(
+        'data.publication.resultPublication.mergeMethod: squash',
+      );
+      expect(humanResult.stdout).toContain(
+        'data.publication.resultPublication.autoMergeAllowed: true',
+      );
+      expect(humanResult.stdout).toContain(
+        'data.publication.resultPublication.sourceBranchProtected: true',
+      );
     }),
   );
 });

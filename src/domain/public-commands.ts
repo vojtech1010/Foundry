@@ -37,8 +37,6 @@ export const REPORT_FAILURE_KINDS = [
 
 export type ReportFailureKind = (typeof REPORT_FAILURE_KINDS)[number];
 
-export const NOT_AVAILABLE = 'not_available' as const;
-
 export type ReportOutcome =
   | { readonly ok: true }
   | { readonly ok: false; readonly kind: ReportFailureKind };

@@ -14,10 +14,15 @@ human interruption, strict validation, and Git safety over convenience.
   target-project files.
 - Tester has no authority to create, modify, or delete application data, and no
   mandatory visual-variant evidence system.
-- Reviewer approval completes locally. A draft GitHub PR is created only when
+- Reviewer approval completes locally and the result is taken forward by the
+  configured result-publication mode. A draft GitHub PR is created only when
   Reviewer returns a genuine `human_decision_required` outcome.
-- Foundry never force-pushes, merges, deploys, rewrites history, or infers a
-  human decision from free-form GitHub activity.
+- Foundry never merges through a GitHub merge API, never approves, closes,
+  deploys, or rewrites history, and never infers a human decision from free-form
+  GitHub activity. Enabling GitHub auto-merge on a result pull request delegates
+  the merge to GitHub rules. `--force-with-lease` is permitted only in
+  `direct-merge` mode, only against the configured source branch on the
+  configured publication remote.
 
 ## Toolchain
 

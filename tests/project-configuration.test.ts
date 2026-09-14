@@ -13,6 +13,10 @@ import {
   PROJECT_CONFIGURATION_SCHEMA_VERSION,
   PUBLICATION_DRAFT,
   PUBLICATION_MAINTAINERS_CAN_MODIFY,
+  RESULT_PUBLICATION_DEFAULT_MERGE_METHOD,
+  RESULT_PUBLICATION_DEFAULT_MODE,
+  RESULT_PUBLICATION_MERGE_METHODS,
+  RESULT_PUBLICATION_MODES,
   ROLE_HARNESS_PROTOCOL,
   RUNTIME_DATA_POLICY,
   RUNTIME_TESTER_ACCESS,
@@ -218,6 +222,14 @@ const unknownFieldCases: ReadonlyArray<InvalidCase> = [
     field: 'decisionPublication.labels',
   },
   {
+    label: 'unknown result publication field',
+    document: {
+      ...exampleConfiguration,
+      resultPublication: { mode: 'non-draft-pr', labels: ['foundry'] },
+    },
+    field: 'resultPublication.labels',
+  },
+  {
     label: 'artifacts block is not part of the configuration document',
     document: {
       ...exampleConfiguration,
@@ -407,6 +419,11 @@ const mistypedFieldCases: ReadonlyArray<InvalidCase> = [
     field: 'runtimeProfile.testerAccess',
   },
   {
+    label: 'unknown result publication mode',
+    document: { ...exampleConfiguration, resultPublication: { mode: 'auto' } },
+    field: 'resultPublication.mode',
+  },
+  {
     label: 'empty runtime base url',
     document: {
       ...exampleConfiguration,
@@ -442,6 +459,15 @@ describe('project configuration contract', () => {
     expect(RUNTIME_TESTER_ACCESS).toBe('read_only');
     expect(TASK_ID_PLACEHOLDER).toBe('<task-id>');
     expect(VERIFICATION_COMMANDS).toEqual(['formatCheck', 'lint', 'typecheck', 'test', 'build']);
+    expect(RESULT_PUBLICATION_MODES).toEqual([
+      'draft-pr',
+      'non-draft-pr',
+      'non-draft-pr-auto-merge',
+      'direct-merge',
+    ]);
+    expect(RESULT_PUBLICATION_DEFAULT_MODE).toBe('non-draft-pr');
+    expect(RESULT_PUBLICATION_MERGE_METHODS).toEqual(['merge', 'squash', 'rebase']);
+    expect(RESULT_PUBLICATION_DEFAULT_MERGE_METHOD).toBe('merge');
   });
 
   it.effect('accepts the golden configuration document', () =>
@@ -468,6 +494,7 @@ describe('project configuration contract', () => {
       expect(decoded.projectProfile.commands).toEqual(exampleConfiguration.projectProfile.commands);
       expect(decoded.runtimeProfile).toEqual(exampleConfiguration.runtimeProfile);
       expect(decoded.decisionPublication).toEqual(exampleConfiguration.decisionPublication);
+      expect(decoded.resultPublication).toEqual({ mode: 'non-draft-pr', mergeMethod: 'merge' });
       expect(decoded.artifacts).toEqual({ ...HARDCODED_ARTIFACT_BOUNDS });
     }),
   );
@@ -714,6 +741,50 @@ describe('project configuration contract', () => {
 
       const stringDocumentError = yield* expectInvalidConfiguration('{}', 'string document');
       expect(stringDocumentError.message).toContain('Invalid project configuration');
+    }),
+  );
+
+  it.effect('resolves result publication modes additively and rejects illegal combinations', () =>
+    Effect.gen(function* () {
+      const legacy = yield* decodeProjectConfiguration(exampleConfiguration, configDirectory);
+      expect(legacy.resultPublication).toEqual({ mode: 'non-draft-pr', mergeMethod: 'merge' });
+
+      const autoMerge = yield* decodeProjectConfiguration(
+        {
+          ...exampleConfiguration,
+          resultPublication: { mode: 'non-draft-pr-auto-merge', mergeMethod: 'squash' },
+        },
+        configDirectory,
+      );
+      expect(autoMerge.resultPublication).toEqual({
+        mode: 'non-draft-pr-auto-merge',
+        mergeMethod: 'squash',
+      });
+
+      const directMerge = yield* decodeProjectConfiguration(
+        { ...exampleConfiguration, resultPublication: { mode: 'direct-merge' } },
+        configDirectory,
+      );
+      expect(directMerge.resultPublication).toEqual({ mode: 'direct-merge', mergeMethod: 'merge' });
+
+      const illegalMergeMethod = yield* expectInvalidConfiguration(
+        {
+          ...exampleConfiguration,
+          resultPublication: { mode: 'direct-merge', mergeMethod: 'squash' },
+        },
+        'merge method outside auto-merge mode',
+      );
+      expect(illegalMergeMethod.field).toBe('resultPublication.mergeMethod');
+
+      const withoutPublication = yield* expectInvalidConfiguration(
+        {
+          ...exampleConfiguration,
+          decisionPublication: null,
+          resultPublication: { mode: 'non-draft-pr' },
+        },
+        'result publication without decision publication',
+      );
+      expect(withoutPublication.field).toBe('resultPublication');
     }),
   );
 });

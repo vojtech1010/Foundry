@@ -761,7 +761,7 @@ describe('preview run locations with fake services', () => {
     }),
   );
 
-  it.effect('maps preview failures to exit code 2 with an invalid invocation error', () =>
+  it.effect('maps preview failures to a failed report rather than an argument error', () =>
     Effect.gen(function* () {
       const world = defaultWorld();
       const built = buildWorld({
@@ -778,10 +778,10 @@ describe('preview run locations with fake services', () => {
         '--json',
       ]).pipe(Effect.provide(built.layer));
 
-      expect(result.exitCode).toBe(EXIT_CODES.invalidInvocation);
+      expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
       const envelope = expectPreviewFailure(result.stdout);
       expect(envelope.command).toBe('init');
-      expect(envelope.error.kind).toBe('invalid_invocation');
+      expect(envelope.error.kind).toBe('failed');
       expect(envelope.error.retryable).toBe(false);
       expect(envelope.error.message).toContain('is not clean');
     }),

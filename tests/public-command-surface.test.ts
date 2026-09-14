@@ -2,6 +2,7 @@ import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer, Schema } from 'effect';
 
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
+import { executePublicCommand } from '../src/application/public-commands.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
 import { ReadinessFiles, ReadinessGit, ReadinessHost } from '../src/application/readiness/index.js';
 import {
@@ -9,7 +10,7 @@ import {
   RepositoryLeaseStore,
 } from '../src/application/repository-lease/index.js';
 import { RunHistoryStorage } from '../src/application/run-history/index.js';
-import { RunIdentityStore } from '../src/application/run-identity/index.js';
+import { InvalidRunRequest, RunIdentityStore } from '../src/application/run-identity/index.js';
 import { RoleHostLauncher } from '../src/application/role-conversations/index.js';
 import {
   EXIT_CODES,
@@ -37,98 +38,96 @@ function expectFailureEnvelope(stdout: string) {
   return envelope;
 }
 
-function untouchedReadiness(name: string) {
-  return Effect.die(new Error(`Stub commands must not access readiness ${name}`));
+function serviceGuard(name: string) {
+  return Effect.die(new Error(`Invalid invocations must not access readiness ${name}`));
 }
 
-const UntouchedReadiness = Layer.mergeAll(
+const ServiceGuard = Layer.mergeAll(
   Layer.succeed(
     ReadinessHost,
     ReadinessHost.of({
-      platform: untouchedReadiness('host.platform'),
-      nodeVersion: untouchedReadiness('host.nodeVersion'),
-      npmVersion: untouchedReadiness('host.npmVersion'),
-      gitVersionOutput: untouchedReadiness('host.gitVersionOutput'),
+      platform: serviceGuard('host.platform'),
+      nodeVersion: serviceGuard('host.nodeVersion'),
+      npmVersion: serviceGuard('host.npmVersion'),
+      gitVersionOutput: serviceGuard('host.gitVersionOutput'),
     }),
   ),
   Layer.succeed(
     ReadinessFiles,
     ReadinessFiles.of({
-      readFile: (_path: string) => untouchedReadiness('files.readFile'),
-      statPath: (_path: string) => untouchedReadiness('files.statPath'),
-      isWritable: (_path: string) => untouchedReadiness('files.isWritable'),
+      readFile: (_path: string) => serviceGuard('files.readFile'),
+      statPath: (_path: string) => serviceGuard('files.statPath'),
+      isWritable: (_path: string) => serviceGuard('files.isWritable'),
     }),
   ),
   Layer.succeed(
     ReadinessGit,
     ReadinessGit.of({
-      run: (_args: ReadonlyArray<string>, _cwd: string) => untouchedReadiness('git.run'),
+      run: (_args: ReadonlyArray<string>, _cwd: string) => serviceGuard('git.run'),
     }),
   ),
   Layer.succeed(
     ProjectCommandProcess,
     ProjectCommandProcess.of({
       run: (_options: { readonly command: ReadonlyArray<string>; readonly cwd: string }) =>
-        untouchedReadiness('process.run'),
+        serviceGuard('process.run'),
     }),
   ),
   Layer.succeed(
     RunIdentityStore,
     RunIdentityStore.of({
-      statPath: (_path: string) => untouchedReadiness('runIdentity.statPath'),
-      readFileBytes: (_path: string) => untouchedReadiness('runIdentity.readFileBytes'),
-      ensureParentDirectory: (_path: string) =>
-        untouchedReadiness('runIdentity.ensureParentDirectory'),
+      statPath: (_path: string) => serviceGuard('runIdentity.statPath'),
+      readFileBytes: (_path: string) => serviceGuard('runIdentity.readFileBytes'),
+      ensureParentDirectory: (_path: string) => serviceGuard('runIdentity.ensureParentDirectory'),
       createRunDirectoryExclusive: (_path: string, _runId: string) =>
-        untouchedReadiness('runIdentity.createRunDirectoryExclusive'),
+        serviceGuard('runIdentity.createRunDirectoryExclusive'),
       writeFileBytes: (_path: string, _bytes: Uint8Array) =>
-        untouchedReadiness('runIdentity.writeFileBytes'),
-      removeDirectory: (_path: string) => untouchedReadiness('runIdentity.removeDirectory'),
-      listRuns: (_runsRoot: string) => untouchedReadiness('runIdentity.listRuns'),
-      readDirectory: (_path: string) => untouchedReadiness('runIdentity.readDirectory'),
+        serviceGuard('runIdentity.writeFileBytes'),
+      removeDirectory: (_path: string) => serviceGuard('runIdentity.removeDirectory'),
+      listRuns: (_runsRoot: string) => serviceGuard('runIdentity.listRuns'),
+      readDirectory: (_path: string) => serviceGuard('runIdentity.readDirectory'),
     }),
   ),
   Layer.succeed(
     RunHistoryStorage,
     RunHistoryStorage.of({
-      readHistoryFiles: (_runDirectory: string) =>
-        untouchedReadiness('runHistory.readHistoryFiles'),
-      commitHistory: (_options) => untouchedReadiness('runHistory.commitHistory'),
-      replaceDerivedReports: (_options) => untouchedReadiness('runHistory.replaceDerivedReports'),
+      readHistoryFiles: (_runDirectory: string) => serviceGuard('runHistory.readHistoryFiles'),
+      commitHistory: (_options) => serviceGuard('runHistory.commitHistory'),
+      replaceDerivedReports: (_options) => serviceGuard('runHistory.replaceDerivedReports'),
     }),
   ),
   Layer.succeed(
     RepositoryLeaseStore,
     RepositoryLeaseStore.of({
-      ensureDirectory: (_path: string) => untouchedReadiness('repositoryLease.ensureDirectory'),
-      statPath: (_path: string) => untouchedReadiness('repositoryLease.statPath'),
+      ensureDirectory: (_path: string) => serviceGuard('repositoryLease.ensureDirectory'),
+      statPath: (_path: string) => serviceGuard('repositoryLease.statPath'),
       createGuardFile: (_path: string, _bytes: Uint8Array) =>
-        untouchedReadiness('repositoryLease.createGuardFile'),
+        serviceGuard('repositoryLease.createGuardFile'),
       writeFileAtomically: (_path: string, _bytes: Uint8Array) =>
-        untouchedReadiness('repositoryLease.writeFileAtomically'),
-      removeFile: (_path: string) => untouchedReadiness('repositoryLease.removeFile'),
+        serviceGuard('repositoryLease.writeFileAtomically'),
+      removeFile: (_path: string) => serviceGuard('repositoryLease.removeFile'),
     }),
   ),
   Layer.succeed(
     RepositoryHostIdentity,
     RepositoryHostIdentity.of({
-      hostIdentity: untouchedReadiness('repositoryLease.hostIdentity'),
-      currentProcess: untouchedReadiness('repositoryLease.currentProcess'),
-      probeProcess: (_processId: number) => untouchedReadiness('repositoryLease.probeProcess'),
+      hostIdentity: serviceGuard('repositoryLease.hostIdentity'),
+      currentProcess: serviceGuard('repositoryLease.currentProcess'),
+      probeProcess: (_processId: number) => serviceGuard('repositoryLease.probeProcess'),
     }),
   ),
   Layer.succeed(
     RoleHostLauncher,
     RoleHostLauncher.of({
       launch: () => {
-        throw new Error('Stub commands must not launch the role host');
+        throw new Error('Invalid invocations must not launch the role host');
       },
     }),
   ),
 );
 
-function runStubCli(argv: ReadonlyArray<string>) {
-  return runCli(argv).pipe(Effect.provide(UntouchedReadiness));
+function runGuardedCli(argv: ReadonlyArray<string>) {
+  return runCli(argv).pipe(Effect.provide(ServiceGuard));
 }
 
 interface InvalidScenario {
@@ -287,7 +286,7 @@ describe('public command surface', () => {
   it.effect('rejects forbidden, unknown, and malformed invocations with exit code 2', () =>
     Effect.gen(function* () {
       for (const scenario of invalidScenarios) {
-        const result = yield* runStubCli(scenario.argv);
+        const result = yield* runGuardedCli(scenario.argv);
         expect(result.exitCode, scenario.label).toBe(EXIT_CODES.invalidInvocation);
         const envelope = expectFailureEnvelope(result.stdout);
         expect(envelope.schemaVersion, scenario.label).toBe(REPORT_SCHEMA_VERSION);
@@ -316,7 +315,7 @@ describe('public command surface', () => {
   it.effect('names forbidden commands without treating them as product commands', () =>
     Effect.gen(function* () {
       for (const command of NON_PRODUCT_COMMANDS) {
-        const result = yield* runStubCli([command, '--json']);
+        const result = yield* runGuardedCli([command, '--json']);
         expect(result.exitCode, command).toBe(EXIT_CODES.invalidInvocation);
         const envelope = expectFailureEnvelope(result.stdout);
         expect(envelope.command).toBe(command);
@@ -328,7 +327,7 @@ describe('public command surface', () => {
   it.effect('rejects every mode flag', () =>
     Effect.gen(function* () {
       for (const flag of ['--manual', '--pilot', '--shadow', '--adoption']) {
-        const result = yield* runStubCli([
+        const result = yield* runGuardedCli([
           flag,
           'status',
           '--config',
@@ -340,6 +339,17 @@ describe('public command surface', () => {
         expect(result.exitCode, flag).toBe(EXIT_CODES.invalidInvocation);
         expectFailureEnvelope(result.stdout);
       }
+    }),
+  );
+
+  it.effect('rejects an incomplete application invocation with a typed error', () =>
+    Effect.gen(function* () {
+      const error = yield* executePublicCommand({ command: 'doctor' }).pipe(
+        Effect.provide(ServiceGuard),
+        Effect.flip,
+      );
+      expect(error).toBeInstanceOf(InvalidRunRequest);
+      expect(error.message).toContain('doctor command requires --config');
     }),
   );
 

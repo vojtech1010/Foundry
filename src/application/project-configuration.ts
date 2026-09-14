@@ -6,6 +6,10 @@ import {
   PROJECT_CONFIGURATION_SCHEMA_VERSION,
   PUBLICATION_DRAFT,
   PUBLICATION_MAINTAINERS_CAN_MODIFY,
+  RESULT_PUBLICATION_DEFAULT_MERGE_METHOD,
+  RESULT_PUBLICATION_DEFAULT_MODE,
+  RESULT_PUBLICATION_MERGE_METHODS,
+  RESULT_PUBLICATION_MODES,
   ROLE_HARNESS_NAMES,
   RUNTIME_DATA_POLICY,
   RUNTIME_TESTER_ACCESS,
@@ -108,6 +112,11 @@ const DecisionPublicationSchema = Schema.Struct({
   maintainersCanModify: Schema.Boolean,
 });
 
+const ResultPublicationSchema = Schema.Struct({
+  mode: Schema.Literals(RESULT_PUBLICATION_MODES),
+  mergeMethod: Schema.optional(Schema.Literals(RESULT_PUBLICATION_MERGE_METHODS)),
+});
+
 const ProjectConfigurationInputSchema = Schema.Struct({
   schemaVersion: Schema.Literal(PROJECT_CONFIGURATION_SCHEMA_VERSION),
   targetRepository: Schema.NonEmptyString,
@@ -122,6 +131,7 @@ const ProjectConfigurationInputSchema = Schema.Struct({
   projectProfile: ProjectProfileSchema,
   runtimeProfile: Schema.NullOr(RuntimeProfileSchema),
   decisionPublication: Schema.NullOr(DecisionPublicationSchema),
+  resultPublication: Schema.optional(ResultPublicationSchema),
 });
 
 export const ProjectConfigurationSchema = ProjectConfigurationInputSchema;
@@ -253,6 +263,25 @@ export const decodeProjectConfiguration = Effect.fn('decodeProjectConfiguration'
     }
   }
 
+  const resultPublication = decoded.resultPublication;
+  if (resultPublication !== undefined) {
+    if (
+      resultPublication.mergeMethod !== undefined &&
+      resultPublication.mode !== 'non-draft-pr-auto-merge'
+    ) {
+      return yield* invalidProjectConfiguration(
+        'resultPublication.mergeMethod is only legal with mode "non-draft-pr-auto-merge"',
+        'resultPublication.mergeMethod',
+      );
+    }
+    if (publication === null) {
+      return yield* invalidProjectConfiguration(
+        'resultPublication requires GitHub publication to be configured',
+        'resultPublication',
+      );
+    }
+  }
+
   yield* Effect.logDebug('Decoded Foundry project configuration');
 
   return {
@@ -284,5 +313,9 @@ export const decodeProjectConfiguration = Effect.fn('decodeProjectConfiguration'
             draft: PUBLICATION_DRAFT,
             maintainersCanModify: PUBLICATION_MAINTAINERS_CAN_MODIFY,
           },
+    resultPublication: {
+      mode: resultPublication?.mode ?? RESULT_PUBLICATION_DEFAULT_MODE,
+      mergeMethod: resultPublication?.mergeMethod ?? RESULT_PUBLICATION_DEFAULT_MERGE_METHOD,
+    },
   };
 });

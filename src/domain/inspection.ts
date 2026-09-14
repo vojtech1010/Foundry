@@ -323,24 +323,6 @@ export const RunInspectReportSchema = Schema.Struct({
 
 export type RunInspectReport = (typeof RunInspectReportSchema)['Type'];
 
-export const INSPECT_DECISION_COMMAND_PREFIX = '/foundry decide';
-
-export interface InspectDecisionCommandInput {
-  readonly runId: string;
-  readonly decisionId: string;
-  readonly optionId: string;
-  readonly nonce: string;
-}
-
-/**
- * The single canonical authenticated decision command. Foundry prints exactly
- * this command per labeled option, so inspection and the decision PR can never
- * disagree about how an operator applies an option.
- */
-export function renderDecisionCommand(input: InspectDecisionCommandInput): string {
-  return `${INSPECT_DECISION_COMMAND_PREFIX} ${input.runId} ${input.decisionId} ${input.optionId} ${input.nonce}`;
-}
-
 /**
  * Forward-compatible decision/publication records introduced by decision
  * publication. Inspection is a read-only consumer of the canonical history, so

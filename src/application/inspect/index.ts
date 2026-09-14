@@ -1,7 +1,8 @@
 import { Effect, Option, Schema } from 'effect';
 import { join } from 'node:path';
 
-import { InspectForwardEventSchema, renderDecisionCommand } from '../../domain/inspection.js';
+import { decisionOptionCommand } from '../../domain/decision-publication.js';
+import { InspectForwardEventSchema } from '../../domain/inspection.js';
 import {
   decodeReviewerTurnControl,
   labelReviewerDecisionOptions,
@@ -544,7 +545,7 @@ function decisionSection(options: {
     commands: labeled.map((option) => ({
       optionId: option.id,
       action: option.action,
-      command: renderDecisionCommand({
+      command: decisionOptionCommand({
         runId: options.runId,
         decisionId: forward.decisionId ?? '<decision-id>',
         optionId: option.id,
@@ -572,9 +573,7 @@ function decisionSection(options: {
  * that predate decision publication simply do not match, so their absence
  * degrades to a null or unavailable section rather than a failure.
  */
-export function readForwardDecisionRecords(
-  events: ReadonlyArray<unknown>,
-): InspectForwardDecisionRecords {
+function readForwardDecisionRecords(events: ReadonlyArray<unknown>): InspectForwardDecisionRecords {
   let decisionId: string | null = null;
   let nonce: string | null = null;
   let resultCommit: string | null = null;

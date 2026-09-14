@@ -9,11 +9,13 @@ import {
 import type {
   GitHubCollaboratorPermission,
   GitHubCreatePullRequestOptions,
+  GitHubEnableAutoMergeOptions,
   GitHubIssueComment,
   GitHubIssueCommentPage,
   GitHubPullRequest,
   GitHubPullRequestLookup,
   GitHubPullRequestLookupRequest,
+  GitHubPushSourceBranchOptions,
   GitHubPushTaskBranchOptions,
   GitHubRefreshPullRequestBodyOptions,
   GitHubRepositoryIdentity,
@@ -270,6 +272,13 @@ const lookupExactPullRequest = Effect.fn('githubPublication.lookupExactPullReque
 const createDraftPullRequest = Effect.fn('githubPublication.createDraftPullRequest')(function* (
   options: GitHubCreatePullRequestOptions,
 ): Effect.fn.Return<GitHubPullRequest, GitHubPublicationError> {
+  if (options.draft !== true) {
+    return yield* failure(
+      'draft-pull-request-create',
+      options.repository,
+      'draft pull request creation requires draft: true',
+    );
+  }
   const token = githubToken();
   if (token.length === 0) {
     return yield* failure(
@@ -312,12 +321,13 @@ const createDraftPullRequest = Effect.fn('githubPublication.createDraftPullReque
 });
 
 /**
- * Opens the ordinary (non-draft) result pull request for an approved changed
- * result, or returns the one exact open non-draft pull request that already
- * exists for the same head branch and base. Matching only non-draft pull
- * requests keeps a decision draft pull request a different surface, and
- * returning an existing exact pull request makes a resumed reconciliation
- * idempotent instead of creating a duplicate.
+ * Opens the ordinary result pull request for an approved changed result, or
+ * returns the one exact open pull request that already exists for the same head
+ * branch, base, and requested draft state. Matching classifies per draft state:
+ * a draft-mode publication refuses an existing non-draft match as an integrity
+ * ambiguity, while a non-draft-mode publication ignores a decision draft pull
+ * request on the same branch. Returning an existing exact pull request makes a
+ * resumed reconciliation idempotent instead of creating a duplicate.
  */
 const openResultPullRequest = Effect.fn('githubPublication.openResultPullRequest')(function* (
   options: GitHubCreatePullRequestOptions,
@@ -359,18 +369,27 @@ const openResultPullRequest = Effect.fn('githubPublication.openResultPullRequest
   );
   const matching = existingDocuments.filter(
     (document) =>
-      document.head.ref === options.headBranch &&
-      document.base.ref === options.baseBranch &&
-      document.draft !== true,
+      document.head.ref === options.headBranch && document.base.ref === options.baseBranch,
   );
-  if (matching.length > 1) {
+  const wanted = matching.filter((document) => document.draft === options.draft);
+  if (wanted.length > 1) {
     return yield* failure(
       'result-pull-request-open',
       options.repository,
-      `${matching.length} open non-draft pull requests match the task branch`,
+      `${wanted.length} open ${options.draft ? 'draft' : 'non-draft'} pull requests match the task branch`,
     );
   }
-  const only = matching[0];
+  if (options.draft) {
+    const conflicting = matching.filter((document) => document.draft !== true);
+    if (conflicting.length > 0) {
+      return yield* failure(
+        'result-pull-request-open',
+        options.repository,
+        `open non-draft pull request #${conflicting[0]?.number ?? 0} matches the task branch`,
+      );
+    }
+  }
+  const only = wanted[0];
   if (only !== undefined) {
     return pullRequestOf(only);
   }
@@ -386,7 +405,7 @@ const openResultPullRequest = Effect.fn('githubPublication.openResultPullRequest
         body: options.body,
         head: options.headBranch,
         base: options.baseBranch,
-        draft: false,
+        draft: options.draft,
       },
     },
   );
@@ -443,6 +462,42 @@ const refreshOwnedDraftPullRequestBody = Effect.fn(
   return pullRequestOf(document);
 });
 
+const enablePullRequestAutoMerge = Effect.fn('githubPublication.enablePullRequestAutoMerge')(
+  function* (
+    options: GitHubEnableAutoMergeOptions,
+  ): Effect.fn.Return<GitHubPullRequest, GitHubPublicationError> {
+    const token = githubToken();
+    if (token.length === 0) {
+      return yield* failure(
+        'result-auto-merge-enable',
+        options.repository,
+        'GITHUB_TOKEN is not set for the configured publication remote',
+      );
+    }
+    const response = yield* requestGitHub(
+      'result-auto-merge-enable',
+      options.repository,
+      `/repos/${options.repository}/pulls/${options.pullRequestNumber}/auto-merge`,
+      { method: 'PUT', token, body: { merge_method: options.mergeMethod } },
+    );
+    if (response.status !== 200) {
+      return yield* failure(
+        'result-auto-merge-enable',
+        options.repository,
+        `auto-merge enablement returned status ${response.status}`,
+      );
+    }
+    const document = yield* decodeDocument(
+      'result-auto-merge-enable',
+      options.repository,
+      GitHubPullRequestSchema,
+      response.body,
+      'pull request',
+    );
+    return pullRequestOf(document);
+  },
+);
+
 const pushTaskBranch = Effect.fn('githubPublication.pushTaskBranch')(function* (
   options: GitHubPushTaskBranchOptions,
 ): Effect.fn.Return<void, GitHubPublicationError> {
@@ -498,6 +553,47 @@ const pushTaskBranch = Effect.fn('githubPublication.pushTaskBranch')(function* (
       'task-branch-push',
       repository,
       `non-force push of "${options.taskBranch}" failed: ${boundCause(pushed.stderr)}`,
+    );
+  }
+});
+
+/**
+ * The only force primitive in the product. `direct-merge` uses it to fast-forward
+ * (or, when authorized by the lease, overwrite) exactly one configured source
+ * branch on the configured publication remote. The lease is pinned to the head
+ * the application just fetched, so a concurrent remote move aborts the push
+ * instead of clobbering it, and no task branch or decision pull request ever
+ * takes this route.
+ */
+const pushSourceBranch = Effect.fn('githubPublication.pushSourceBranch')(function* (
+  options: GitHubPushSourceBranchOptions,
+): Effect.fn.Return<void, GitHubPublicationError> {
+  const repository = options.remote;
+  const pushed = yield* Effect.sync(() =>
+    spawnSync(
+      'git',
+      [
+        'push',
+        '--porcelain',
+        `--force-with-lease=refs/heads/${options.sourceBranch}:${options.expectedRemoteCommit}`,
+        options.remote,
+        `${options.commit}:refs/heads/${options.sourceBranch}`,
+      ],
+      { cwd: options.repositoryPath, encoding: 'utf8' },
+    ),
+  );
+  if (pushed.error !== undefined) {
+    return yield* failure(
+      'source-branch-push',
+      repository,
+      `cannot push the source branch: ${boundCause(pushed.error)}`,
+    );
+  }
+  if (pushed.status !== 0) {
+    return yield* failure(
+      'source-branch-push',
+      repository,
+      `force-with-lease push of "${options.sourceBranch}" failed: ${boundCause(pushed.stderr)}`,
     );
   }
 });
@@ -599,7 +695,9 @@ export const GitHubPublicationLive: Layer.Layer<GitHubPublication> = Layer.succe
     createDraftPullRequest,
     openResultPullRequest,
     refreshOwnedDraftPullRequestBody,
+    enablePullRequestAutoMerge,
     pushTaskBranch,
+    pushSourceBranch,
     listIssueCommentsAfter,
     collaboratorPermission,
   }),

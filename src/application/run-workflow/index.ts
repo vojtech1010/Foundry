@@ -26,11 +26,7 @@ import {
   validateCoderTurnControl,
 } from '../coder-result/index.js';
 import { applyDecision, scanForDecision } from '../decision-commands/index.js';
-import {
-  GitHubPublication,
-  publishDecisionDraftPr,
-  reconcilePublication,
-} from '../decision-publication/index.js';
+import { publishDecisionDraftPr, reconcilePublication } from '../decision-publication/index.js';
 import { bootstrapRoleGuidance } from '../guidance/index.js';
 import { reconcileHandoff } from '../handoff/index.js';
 import {
@@ -98,7 +94,7 @@ export const MAX_RUN_STEPS = 128;
 export class RunWorkflowError extends Schema.TaggedError<RunWorkflowError>()('RunWorkflowError', {
   message: Schema.String,
   runId: Schema.String,
-  kind: Schema.Literals(['blocked', 'failed']),
+  kind: Schema.Literals(['blocked', 'failed', 'publish_failed']),
 }) {}
 
 export interface AdvanceRunOptions {
@@ -824,7 +820,11 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       commit,
       configuration,
     });
-    if (plan.runtimeValidationRequired && report.result === 'passed') {
+    if (
+      plan.runtimeValidationRequired &&
+      report.result === 'passed' &&
+      configuration.runtimeProfile !== null
+    ) {
       const prepared = yield* prepareAndHoldApplicationRuntime({
         runDirectory,
         runId,
@@ -834,6 +834,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
         configuration,
       });
       if (prepared.status === 'prepared') {
+        yield* disposeRuntime();
         yield* Ref.set(runtimeRef, prepared.runtime);
       }
     }
@@ -1008,23 +1009,12 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
 
   /**
    * Executes the publication transaction for a recorded human decision. The
-   * GitHub adapter is optional in the environment so a run without a wired
-   * adapter fails publication durably instead of silently guessing; the
-   * application function owns every checkpoint, push, and PR transition.
+   * composition root always provides the GitHub adapter; `configuration`
+   * `decisionPublication === null` remains the real gate, and the application
+   * function owns every checkpoint, push, and PR transition.
    */
   const runPublishing = Effect.fn('advanceRun.runPublishing')(function* () {
-    const github = yield* Effect.serviceOption(GitHubPublication);
-    if (Option.isNone(github)) {
-      yield* transitionWorkflow({
-        runDirectory,
-        runId,
-        request: { route: 'publication-unresolved', cannotReconcileSafely: true },
-      });
-      return;
-    }
-    yield* publishDecisionDraftPr({ runDirectory, runId, configuration }).pipe(
-      Effect.provideService(GitHubPublication, github.value),
-    );
+    yield* publishDecisionDraftPr({ runDirectory, runId, configuration });
   });
 
   /**
@@ -1035,20 +1025,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
    * gate; `accept` and `abandon` settle the run.
    */
   const runDecisionResume = Effect.fn('advanceRun.runDecisionResume')(function* () {
-    const unavailable = {
-      applied: null,
-      waiting: false,
-      draftPrUrl: null,
-      problem: 'GitHub decision publication is not available for this run.',
-    } satisfies RunWorkflowDecisionReport;
-    const github = yield* Effect.serviceOption(GitHubPublication);
-    if (Option.isNone(github)) {
-      return unavailable;
-    }
-    const scan = yield* scanForDecision({ runDirectory, runId, configuration }).pipe(
-      Effect.provideService(GitHubPublication, github.value),
-      Effect.result,
-    );
+    const scan = yield* scanForDecision({ runDirectory, runId, configuration }).pipe(Effect.result);
     if (Result.isFailure(scan)) {
       return {
         applied: null,
@@ -1382,15 +1359,11 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
         if (!options.allowResume || resumed) {
           return summaryOf(history);
         }
-        const github = yield* Effect.serviceOption(GitHubPublication);
-        if (Option.isNone(github)) {
-          return summaryOf(history);
-        }
         const reconciliation = yield* reconcilePublication({
           runDirectory,
           runId,
           configuration,
-        }).pipe(Effect.provideService(GitHubPublication, github.value), Effect.result);
+        }).pipe(Effect.result);
         if (Result.isSuccess(reconciliation) && reconciliation.success.outcome === 'reconciled') {
           resumed = true;
           continue;
@@ -1409,33 +1382,33 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
          * place by the same idempotent publication, never a second run or a
          * duplicate result pull request. A settled run returns its summary.
          */
+        const resultSettled =
+          (history.derived.resultPrRecorded ?? null) !== null ||
+          (history.derived.resultMergeRecorded ?? null) !== null;
         const unsettled =
           configuration.decisionPublication !== null &&
-          (history.derived.resultPrRecorded ?? null) === null &&
+          !resultSettled &&
           (history.derived.resultPrCheckpoints ?? []).length > 0;
         if (options.allowResume && !resumed && unsettled) {
-          const github = yield* Effect.serviceOption(GitHubPublication);
-          if (Option.isSome(github)) {
-            const reconciled = yield* publishResultPr({
-              runDirectory,
-              runId,
-              configuration,
-            }).pipe(Effect.provideService(GitHubPublication, github.value), Effect.result);
-            const after = yield* readVerifiedRunHistory({
-              runDirectory,
-              runId,
-              createIfMissing: false,
-            });
-            const resultPublication: ResultPublicationReport = Result.isSuccess(reconciled)
-              ? reconciled.success
-              : { outcome: 'uncertain', problem: errorMessage(reconciled.failure) };
-            resumed = true;
-            return { ...summaryOf(after), resultPublication };
-          }
+          const reconciled = yield* publishResultPr({
+            runDirectory,
+            runId,
+            configuration,
+          }).pipe(Effect.result);
+          const after = yield* readVerifiedRunHistory({
+            runDirectory,
+            runId,
+            createIfMissing: false,
+          });
+          const resultPublication: ResultPublicationReport = Result.isSuccess(reconciled)
+            ? reconciled.success
+            : { outcome: 'uncertain', problem: errorMessage(reconciled.failure) };
+          resumed = true;
+          return { ...summaryOf(after), resultPublication };
         }
         return summaryOf(history);
       }
-      if (!isActiveWorkflowState(state)) {
+      if (!isActiveWorkflowState(state) && state !== 'publishing') {
         return summaryOf(history);
       }
       const step = yield* runStage(state, history).pipe(Effect.result);
@@ -1484,8 +1457,8 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
 
   /**
    * Publishes the ordinary result pull request for an approved changed result
-   * once the run has settled. The adapter is optional, and publication is
-   * idempotent, so an unavailable adapter or an uncertain transaction never
+   * once the run has settled. The composition root always provides the GitHub
+   * adapter, and publication is idempotent, so an uncertain transaction never
    * fails an otherwise-complete run: the run reports the outcome and a later
    * `resume` reconciles in place.
    */
@@ -1495,15 +1468,7 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
     if (summary.workflowState !== 'completed') {
       return null;
     }
-    const github = yield* Effect.serviceOption(GitHubPublication);
-    if (Option.isNone(github)) {
-      return {
-        outcome: 'skipped',
-        reason: 'The GitHub publication adapter is not available for this run',
-      } satisfies ResultPublicationReport;
-    }
     const published = yield* publishResultPr({ runDirectory, runId, configuration }).pipe(
-      Effect.provideService(GitHubPublication, github.value),
       Effect.result,
     );
     if (Result.isFailure(published)) {

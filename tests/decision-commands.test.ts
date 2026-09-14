@@ -15,8 +15,6 @@ import { decodeProjectConfiguration } from '../src/application/project-configura
 import { appendRunEvent, readVerifiedRunHistory } from '../src/application/run-history/index.js';
 import { correctionRoundsUsed } from '../src/application/run-workflow/index.js';
 import { buildRunStatus } from '../src/application/status/index.js';
-import { decisionOptionCommand } from '../src/domain/decision-publication.js';
-import { renderDecisionCommand } from '../src/domain/inspection.js';
 import { RunHistoryLive } from '../src/platform/run-history.js';
 import { goldenConfigurationDocument } from './fixtures/checks-runtime-run.js';
 
@@ -421,6 +419,10 @@ function githubStub(options: GitHubStubOptions = {}): GitHubStub {
         calls.push('refreshOwnedDraftPullRequestBody');
         return Effect.die(new Error('decision commands must not refresh a pull request'));
       },
+      enablePullRequestAutoMerge: () =>
+        Effect.die(new Error('decision commands must not enable auto-merge')),
+      pushSourceBranch: () =>
+        Effect.die(new Error('decision commands must not push the source branch')),
       pushTaskBranch: () => {
         calls.push('pushTaskBranch');
         return Effect.die(new Error('decision commands must not push a branch'));
@@ -831,16 +833,6 @@ describe('authenticated decision commands', () => {
       }
     }),
   );
-
-  it('keeps the two decision-command renderers identical', () => {
-    const input = {
-      runId: RUN_ID,
-      decisionId: DECISION_ID,
-      optionId: 'OPT-001',
-      nonce: NONCE,
-    };
-    expect(renderDecisionCommand(input)).toBe(decisionOptionCommand(input));
-  });
 
   it.effect('retains the applied decision in the handoff instead of Reviewer approval', () =>
     Effect.gen(function* () {
