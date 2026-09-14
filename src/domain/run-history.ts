@@ -99,6 +99,7 @@ export const RUN_HISTORY_EVENT_TYPES = [
   'recovery-recorded',
   'result-pr-checkpoint',
   'result-pr-recorded',
+  'abandonment-note',
 ] as const;
 
 export type RunHistoryEventType = (typeof RUN_HISTORY_EVENT_TYPES)[number];
@@ -609,6 +610,18 @@ export const ResultPrRecordedPayloadSchema = Schema.Struct({
 
 export type ResultPrRecordedPayload = (typeof ResultPrRecordedPayloadSchema)['Type'];
 
+/**
+ * Durable operator reason for an explicit abandonment. Abandonment is explicit
+ * operator intent, not recovery, so it is recorded as its own audit note after
+ * the terminal `abandoned` transition; the transition payload itself carries
+ * only the route and states.
+ */
+export const AbandonmentNotePayloadSchema = Schema.Struct({
+  reason: Schema.NonEmptyString,
+});
+
+export type AbandonmentNotePayload = (typeof AbandonmentNotePayloadSchema)['Type'];
+
 const RunEventEnvelopeFields = {
   schemaVersion: Schema.Literal(RUN_HISTORY_SCHEMA_VERSION),
   runId: Identifier,
@@ -835,6 +848,12 @@ export const ResultPrRecordedEventSchema = Schema.Struct({
   payload: ResultPrRecordedPayloadSchema,
 });
 
+export const AbandonmentNoteEventSchema = Schema.Struct({
+  ...RunEventEnvelopeFields,
+  type: Schema.Literal('abandonment-note'),
+  payload: AbandonmentNotePayloadSchema,
+});
+
 export const RunEventSchema = Schema.Union([
   RunCreatedEventSchema,
   SourceFrozenEventSchema,
@@ -872,6 +891,7 @@ export const RunEventSchema = Schema.Union([
   RecoveryRecordedEventSchema,
   ResultPrCheckpointEventSchema,
   ResultPrRecordedEventSchema,
+  AbandonmentNoteEventSchema,
 ]);
 
 export type RunEvent = (typeof RunEventSchema)['Type'];
@@ -954,7 +974,8 @@ export type RunEventDraft =
   | { readonly type: 'evidence-manifest'; readonly payload: EvidenceManifestPayload }
   | { readonly type: 'recovery-recorded'; readonly payload: RecoveryRecordedPayload }
   | { readonly type: 'result-pr-checkpoint'; readonly payload: ResultPrCheckpointPayload }
-  | { readonly type: 'result-pr-recorded'; readonly payload: ResultPrRecordedPayload };
+  | { readonly type: 'result-pr-recorded'; readonly payload: ResultPrRecordedPayload }
+  | { readonly type: 'abandonment-note'; readonly payload: AbandonmentNotePayload };
 
 export type UnsignedRunEvent = RunEventDraft & RunEventEnvelope;
 
@@ -994,6 +1015,7 @@ export interface RunHistoryDerivedState {
   readonly recoveryDispositions: ReadonlyArray<RecoveryRecordedPayload>;
   readonly resultPrCheckpoints?: ReadonlyArray<ResultPrCheckpointPayload>;
   readonly resultPrRecorded?: ResultPrRecordedPayload | null;
+  readonly abandonmentNotes?: ReadonlyArray<AbandonmentNotePayload>;
 }
 
 export type RunHistoryVerification =
@@ -1720,6 +1742,19 @@ function canonicalEventText(event: UnsignedRunEvent): string {
         schemaVersion: event.schemaVersion,
         type: event.type,
       });
+    case 'abandonment-note':
+      return JSON.stringify({
+        eventId: event.eventId,
+        occurredAt: event.occurredAt,
+        payload: {
+          reason: event.payload.reason,
+        },
+        previousEventHash: event.previousEventHash,
+        revision: event.revision,
+        runId: event.runId,
+        schemaVersion: event.schemaVersion,
+        type: event.type,
+      });
   }
 }
 
@@ -1821,6 +1856,8 @@ export function unsignedRunEvent(event: RunEvent): UnsignedRunEvent {
       return { ...envelope, type: 'result-pr-checkpoint', payload: event.payload };
     case 'result-pr-recorded':
       return { ...envelope, type: 'result-pr-recorded', payload: event.payload };
+    case 'abandonment-note':
+      return { ...envelope, type: 'abandonment-note', payload: event.payload };
   }
 }
 
@@ -1939,6 +1976,7 @@ export function verifyRunHistoryEvents(
   const resultPrCheckpointStageIndex = new Map<string, number>();
   let resultPrRecorded: ResultPrRecordedPayload | null = null;
   const recordedResultPrCommits = new Set<string>();
+  const abandonmentNotes: Array<AbandonmentNotePayload> = [];
   let changedResultApproved = false;
   const retiredRevisions = new Set<number>();
   const findings: Array<FindingRecord> = [];
@@ -3209,6 +3247,22 @@ export function verifyRunHistoryEvents(
         resultPrRecorded = event.payload;
         break;
       }
+      case 'abandonment-note': {
+        /*
+         * Unlike `recovery-recorded`, which refuses terminal states, the
+         * abandonment note is recorded after the run is already terminal
+         * `abandoned`; that asymmetry is intended. The note is the durable
+         * operator reason for the explicit abandonment.
+         */
+        if (state !== 'abandoned') {
+          return {
+            ok: false,
+            problem: `${label} records an abandonment reason outside the abandoned state`,
+          };
+        }
+        abandonmentNotes.push(event.payload);
+        break;
+      }
     }
     previousHash = event.eventHash;
   }
@@ -3259,6 +3313,7 @@ export function verifyRunHistoryEvents(
       recoveryDispositions,
       resultPrCheckpoints,
       resultPrRecorded,
+      abandonmentNotes,
     },
   };
 }

@@ -416,6 +416,13 @@ const CleanupRunReportData = CleanupRunReportSchema;
 
 const DiagnosticBundleReportData = DiagnosticBundleReportSchema;
 
+const AbandonReportData = Schema.Struct({
+  runId: Schema.String,
+  workflowState: Schema.Literal('abandoned'),
+  reason: Schema.String,
+  cleanup: Schema.NullOr(StatusCleanupProgressData),
+});
+
 const ReportData = Schema.Union([
   StubReportData,
   DoctorReportData,
@@ -428,6 +435,7 @@ const ReportData = Schema.Union([
   CleanupListReportData,
   CleanupRunReportData,
   DiagnosticBundleReportData,
+  AbandonReportData,
 ]);
 
 const SuccessEnvelope = Schema.Struct({
@@ -964,6 +972,15 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
       for (const resource of data.resources) {
         lines.push(`data.resources: ${resource.kind} ${resource.name} ${resource.disposition}`);
       }
+    } else if ('cleanup' in data) {
+      lines.push(
+        `data.runId: ${data.runId}`,
+        `data.workflowState: ${data.workflowState}`,
+        `data.reason: ${data.reason}`,
+        data.cleanup === null
+          ? 'data.cleanup: none'
+          : `data.cleanup: ${data.cleanup.outcome} ${data.cleanup.detail}`,
+      );
     } else if ('workflowState' in data) {
       lines.push(
         `data.runId: ${data.runId}`,
@@ -1043,6 +1060,7 @@ function failureKindFor(error: PublicCommandError): ReportFailureKind {
     case 'RunHistoryIntegrityError':
     case 'RunHistoryStorageError':
     case 'RunHistoryConflict':
+    case 'IllegalWorkflowTransition':
     case 'DiagnosticBundleRefused':
     case 'RepositoryLeaseOwnershipLost':
     case 'RepositoryLeaseStorageError':
@@ -1312,6 +1330,14 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       resources: report.resources.map((resource) => ({ ...resource })),
       preserved: { ...report.preserved },
       message: report.message,
+    };
+  }
+  if ('cleanup' in report) {
+    return {
+      runId: report.runId,
+      workflowState: 'abandoned',
+      reason: report.reason,
+      cleanup: report.cleanup === null ? null : { ...report.cleanup },
     };
   }
   if ('workflowState' in report) {
