@@ -311,6 +311,102 @@ const createDraftPullRequest = Effect.fn('githubPublication.createDraftPullReque
   return pullRequestOf(document);
 });
 
+/**
+ * Opens the ordinary (non-draft) result pull request for an approved changed
+ * result, or returns the one exact open non-draft pull request that already
+ * exists for the same head branch and base. Matching only non-draft pull
+ * requests keeps a decision draft pull request a different surface, and
+ * returning an existing exact pull request makes a resumed reconciliation
+ * idempotent instead of creating a duplicate.
+ */
+const openResultPullRequest = Effect.fn('githubPublication.openResultPullRequest')(function* (
+  options: GitHubCreatePullRequestOptions,
+): Effect.fn.Return<GitHubPullRequest, GitHubPublicationError> {
+  const token = githubToken();
+  if (token.length === 0) {
+    return yield* failure(
+      'result-pull-request-open',
+      options.repository,
+      'GITHUB_TOKEN is not set for the configured publication remote',
+    );
+  }
+  const owner = options.repository.split('/')[0] ?? '';
+  const query = new URLSearchParams({
+    state: 'open',
+    base: options.baseBranch,
+    head: `${owner}:${options.headBranch}`,
+    per_page: String(GITHUB_PAGE_SIZE),
+  });
+  const existingResponse = yield* requestGitHub(
+    'result-pull-request-open',
+    options.repository,
+    `/repos/${options.repository}/pulls?${query.toString()}`,
+    { method: 'GET', token },
+  );
+  if (existingResponse.status !== 200) {
+    return yield* failure(
+      'result-pull-request-open',
+      options.repository,
+      `result pull request lookup returned status ${existingResponse.status}`,
+    );
+  }
+  const existingDocuments = yield* decodeDocument(
+    'result-pull-request-open',
+    options.repository,
+    GitHubPullRequestListSchema,
+    existingResponse.body,
+    'pull request list',
+  );
+  const matching = existingDocuments.filter(
+    (document) =>
+      document.head.ref === options.headBranch &&
+      document.base.ref === options.baseBranch &&
+      document.draft !== true,
+  );
+  if (matching.length > 1) {
+    return yield* failure(
+      'result-pull-request-open',
+      options.repository,
+      `${matching.length} open non-draft pull requests match the task branch`,
+    );
+  }
+  const only = matching[0];
+  if (only !== undefined) {
+    return pullRequestOf(only);
+  }
+  const response = yield* requestGitHub(
+    'result-pull-request-open',
+    options.repository,
+    `/repos/${options.repository}/pulls`,
+    {
+      method: 'POST',
+      token,
+      body: {
+        title: options.title,
+        body: options.body,
+        head: options.headBranch,
+        base: options.baseBranch,
+        draft: false,
+      },
+    },
+  );
+  if (response.status !== 201) {
+    return yield* failure(
+      'result-pull-request-open',
+      options.repository,
+      `result pull request creation returned status ${response.status}`,
+    );
+  }
+  const document = yield* decodeDocument(
+    'result-pull-request-open',
+    options.repository,
+    GitHubPullRequestSchema,
+    response.body,
+    'pull request',
+  );
+  return pullRequestOf(document);
+});
+
 const refreshOwnedDraftPullRequestBody = Effect.fn(
   'githubPublication.refreshOwnedDraftPullRequestBody',
 )(function* (
@@ -501,6 +597,7 @@ export const GitHubPublicationLive: Layer.Layer<GitHubPublication> = Layer.succe
     lookupRepositoryIdentity,
     lookupExactPullRequest,
     createDraftPullRequest,
+    openResultPullRequest,
     refreshOwnedDraftPullRequestBody,
     pushTaskBranch,
     listIssueCommentsAfter,

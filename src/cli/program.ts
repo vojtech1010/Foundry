@@ -16,6 +16,7 @@ import { RunInspectReportSchema } from '../domain/inspection.js';
 import { CleanupListReportSchema, CleanupRunReportSchema } from '../domain/retention-cleanup.js';
 import { DiagnosticBundleReportSchema } from '../domain/diagnostic-bundle.js';
 import { Identifier } from '../domain/run-identity.js';
+import { RECOVERY_DISPOSITIONS } from '../domain/run-history.js';
 import {
   CLEANUP_OUTCOMES,
   WorkflowAttemptSchema,
@@ -332,6 +333,11 @@ const RunWorkflowDecisionData = Schema.Struct({
   draftPrUrl: Schema.NullOr(Schema.String),
 });
 
+const RunWorkflowRecoveryData = Schema.Struct({
+  disposition: Schema.Literals(RECOVERY_DISPOSITIONS),
+  reason: Schema.String,
+});
+
 const RunWorkflowReportData = Schema.Struct({
   runId: Schema.String,
   taskId: Schema.String,
@@ -343,6 +349,8 @@ const RunWorkflowReportData = Schema.Struct({
   stages: Schema.Array(WorkflowStateSchema),
   testerSkipped: Schema.Boolean,
   decision: Schema.optional(RunWorkflowDecisionData),
+  recovery: Schema.optional(RunWorkflowRecoveryData),
+  resultPullRequest: Schema.optional(Schema.NullOr(Schema.NonEmptyString)),
 });
 
 const StatusMeasureData = Schema.Struct({
@@ -915,12 +923,19 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
           `data.outcome: ${data.outcome}`,
           `data.stages: ${data.stages.join(' ')}`,
           `data.testerSkipped: ${data.testerSkipped}`,
+          `data.resultPullRequest: ${data.resultPullRequest ?? 'none'}`,
         );
         if (data.decision !== undefined) {
           lines.push(
             `data.decision.applied: ${data.decision.applied ?? 'none'}`,
             `data.decision.waiting: ${data.decision.waiting}`,
             `data.decision.draftPrUrl: ${data.decision.draftPrUrl ?? 'none'}`,
+          );
+        }
+        if (data.recovery !== undefined) {
+          lines.push(
+            `data.recovery.disposition: ${data.recovery.disposition}`,
+            `data.recovery.reason: ${data.recovery.reason}`,
           );
         }
       }
@@ -1235,18 +1250,36 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
         outcome: report.outcome,
         stages: [...report.stages],
         testerSkipped: report.testerSkipped,
+        resultPullRequest: report.resultPullRequest ?? null,
       };
-      if (report.decision === undefined) {
+      if (report.decision === undefined && report.recovery === undefined) {
         return workflowReport;
       }
-      return {
-        ...workflowReport,
-        decision: {
-          applied: report.decision.applied,
-          waiting: report.decision.waiting,
-          draftPrUrl: report.decision.draftPrUrl,
-        },
-      };
+      const decisionData =
+        report.decision === undefined
+          ? null
+          : {
+              applied: report.decision.applied,
+              waiting: report.decision.waiting,
+              draftPrUrl: report.decision.draftPrUrl,
+            };
+      const recoveryData =
+        report.recovery === undefined
+          ? null
+          : {
+              disposition: report.recovery.disposition,
+              reason: report.recovery.reason,
+            };
+      if (decisionData !== null && recoveryData !== null) {
+        return { ...workflowReport, decision: decisionData, recovery: recoveryData };
+      }
+      if (decisionData !== null) {
+        return { ...workflowReport, decision: decisionData };
+      }
+      if (recoveryData !== null) {
+        return { ...workflowReport, recovery: recoveryData };
+      }
+      return workflowReport;
     }
     return {
       runId: report.runId,

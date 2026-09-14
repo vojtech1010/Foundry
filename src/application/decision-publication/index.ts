@@ -148,6 +148,9 @@ export class GitHubPublication extends Context.Service<
     readonly createDraftPullRequest: (
       options: GitHubCreatePullRequestOptions,
     ) => Effect.Effect<GitHubPullRequest, GitHubPublicationError>;
+    readonly openResultPullRequest: (
+      options: GitHubCreatePullRequestOptions,
+    ) => Effect.Effect<GitHubPullRequest, GitHubPublicationError>;
     readonly refreshOwnedDraftPullRequestBody: (
       options: GitHubRefreshPullRequestBodyOptions,
     ) => Effect.Effect<GitHubPullRequest, GitHubPublicationError>;

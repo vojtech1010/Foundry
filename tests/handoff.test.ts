@@ -425,6 +425,54 @@ function seedNoChangeToCompletion(fixture: Fixture) {
   }).pipe(Effect.provide(RunHistoryLive));
 }
 
+function seedRecordedResultPullRequest(fixture: Fixture) {
+  const url = 'https://github.com/example/target/pull/9';
+  return Effect.gen(function* () {
+    const stages = [
+      { stage: 'pre-push' as const, detail: 'verified the task branch' },
+      { stage: 'pushed' as const, detail: 'pushed the task branch' },
+      { stage: 'pull-request-created' as const, detail: 'opened the ordinary result PR' },
+    ];
+    for (const stage of stages) {
+      yield* appendRunEvent({
+        runDirectory: fixture.runDirectory,
+        runId: RUN_ID,
+        createIfMissing: false,
+        build: () =>
+          Effect.succeed({
+            type: 'result-pr-checkpoint',
+            payload: { ...stage, url: null, commit: RESULT_COMMIT },
+          } as const),
+      });
+    }
+    yield* appendRunEvent({
+      runDirectory: fixture.runDirectory,
+      runId: RUN_ID,
+      createIfMissing: false,
+      build: () =>
+        Effect.succeed({
+          type: 'result-pr-checkpoint',
+          payload: {
+            stage: 'url-recorded',
+            url,
+            commit: RESULT_COMMIT,
+            detail: `recorded ${url}`,
+          },
+        } as const),
+    });
+    yield* appendRunEvent({
+      runDirectory: fixture.runDirectory,
+      runId: RUN_ID,
+      createIfMissing: false,
+      build: () =>
+        Effect.succeed({
+          type: 'result-pr-recorded',
+          payload: { url, commit: RESULT_COMMIT, taskBranch: TASK_BRANCH },
+        } as const),
+    });
+  }).pipe(Effect.provide(RunHistoryLive));
+}
+
 function reconcile(fixture: Fixture) {
   return reconcileHandoff({ runDirectory: fixture.runDirectory, runId: RUN_ID }).pipe(
     Effect.provide(RunHistoryLive),
@@ -457,6 +505,12 @@ function emptyDerived(): RunHistoryDerivedState {
     testerSkips: [],
     validationLimitations: [],
     runtimeLifecycles: [],
+    evidenceInvalidations: [],
+    evidenceBindings: [],
+    decisionApplieds: [],
+    evidenceManifests: [],
+    resultPrCheckpoints: [],
+    resultPrRecorded: null,
   };
 }
 
@@ -512,6 +566,27 @@ describe('canonical handoff for completed runs', () => {
         expect(document.publication.created).toBe(false);
         expect(document.publication.reason).toContain('no-change');
         expect(document.coverageComplete).toBe(true);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('records the published ordinary result pull request for a change', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* seedChangeToCompletion(fixture);
+        yield* seedRecordedResultPullRequest(fixture);
+        const result = yield* reconcile(fixture);
+        expect(result).not.toBeNull();
+
+        const document = readHandoff(fixture);
+        expect(document.kind).toBe('change');
+        expect(document.publication.created).toBe(true);
+        expect(document.publication.kind).toBe('result');
+        expect(document.publication.url).toBe('https://github.com/example/target/pull/9');
+        expect(document.publication.reason).toContain('result pull request');
       } finally {
         fixture.cleanup();
       }

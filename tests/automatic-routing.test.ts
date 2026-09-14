@@ -5,6 +5,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { GitHubPublication } from '../src/application/decision-publication/index.js';
+import { RunGit } from '../src/application/git-provisioning/index.js';
 import { readVerifiedRunHistory } from '../src/application/run-history/index.js';
 import { ReportEnvelope, runCli } from '../src/cli/program.js';
 import { ProjectCommandProcess } from '../src/application/profile-check/index.js';
@@ -32,6 +34,11 @@ import type { Schema as EffectSchema } from 'effect';
 import type { RoleHostRole } from '../src/domain/role-host.js';
 import type { RunEvent } from '../src/domain/run-history.js';
 import type { VerifiedRunHistory } from '../src/application/run-history/index.js';
+import type {
+  GitHubCreatePullRequestOptions,
+  GitHubPullRequest,
+  GitHubPushTaskBranchOptions,
+} from '../src/application/decision-publication/index.js';
 
 const ReportEnvelopeJson = Schema.fromJsonString(ReportEnvelope);
 
@@ -233,7 +240,6 @@ const capabilityLayers = Layer.mergeAll(
   RunHistoryLive,
   RepositoryLeaseLive,
   RoleTurnResourceObserverLive,
-  RunGitLive,
   GuidanceLive,
   Layer.succeed(
     PublicationProbe,
@@ -253,7 +259,98 @@ const capabilityLayers = Layer.mergeAll(
   ),
 );
 
-function runRouting(fixture: Fixture, runId: string, turns: ScriptedTurns, commitOnCoder: boolean) {
+/**
+ * Reports the configured publication remote as a GitHub repository to the
+ * workflow's Git adapter, so the ordinary result publication can confirm the
+ * repository identity while every other Git operation stays real.
+ */
+function publicationRunGit(): Layer.Layer<RunGit> {
+  return Layer.effect(
+    RunGit,
+    Effect.gen(function* () {
+      const live = yield* RunGit;
+      return RunGit.of({
+        ...live,
+        inspectRepository: (options) =>
+          Effect.succeed({
+            repositoryRoot: options.repositoryRoot,
+            gitDirectory: `${options.repositoryRoot}/.git`,
+            remoteUrl: PUBLICATION_REMOTE_URL,
+          }),
+      });
+    }),
+  ).pipe(Layer.provide(RunGitLive));
+}
+
+interface RoutingOverrides {
+  readonly runGit?: Layer.Layer<RunGit>;
+  readonly github?: Layer.Layer<GitHubPublication>;
+}
+
+interface RoutingGitHubCalls {
+  readonly open: Array<GitHubCreatePullRequestOptions>;
+  readonly push: Array<GitHubPushTaskBranchOptions>;
+}
+
+interface RoutingGitHubHarness {
+  readonly layer: Layer.Layer<GitHubPublication>;
+  readonly calls: RoutingGitHubCalls;
+}
+
+/**
+ * A minimal GitHub publication adapter for the green-path routing walk. It
+ * records the non-force push and returns the one ordinary (non-draft) result
+ * pull request for the task branch, resolving the branch head from the real
+ * repository so the publication can confirm the exact accepted commit.
+ */
+function routingGitHubPublication(fixture: Fixture): RoutingGitHubHarness {
+  const calls: RoutingGitHubCalls = { open: [], push: [] };
+  const pullRequestNumber = 42;
+  const layer = Layer.succeed(
+    GitHubPublication,
+    GitHubPublication.of({
+      lookupRepositoryIdentity: (options) => Effect.succeed({ repository: options.repository }),
+      lookupExactPullRequest: () =>
+        Effect.die(new Error('result publication must not look up a draft PR')),
+      createDraftPullRequest: () =>
+        Effect.die(new Error('result publication must not create a draft PR')),
+      openResultPullRequest: (options) => {
+        calls.open.push(options);
+        return Effect.sync(() => {
+          const headCommit = gitExec(fixture.target, [
+            'rev-parse',
+            `refs/heads/${options.headBranch}`,
+          ]).trim();
+          return {
+            number: pullRequestNumber,
+            url: `${PUBLICATION_REMOTE_URL.replace(/\.git$/u, '')}/pull/${pullRequestNumber}`,
+            draft: false,
+            headBranch: options.headBranch,
+            headCommit,
+            baseBranch: options.baseBranch,
+          } satisfies GitHubPullRequest;
+        });
+      },
+      refreshOwnedDraftPullRequestBody: () =>
+        Effect.die(new Error('result publication must not refresh a draft PR')),
+      pushTaskBranch: (options) => {
+        calls.push.push(options);
+        return Effect.void;
+      },
+      listIssueCommentsAfter: () => Effect.succeed({ comments: [], truncated: false }),
+      collaboratorPermission: () => Effect.succeed({ permission: 'maintain' }),
+    }),
+  );
+  return { layer, calls };
+}
+
+function runRouting(
+  fixture: Fixture,
+  runId: string,
+  turns: ScriptedTurns,
+  commitOnCoder: boolean,
+  overrides: RoutingOverrides = {},
+) {
   return runCli([
     'run',
     '--config',
@@ -267,7 +364,12 @@ function runRouting(fixture: Fixture, runId: string, turns: ScriptedTurns, commi
     '--json',
   ]).pipe(
     Effect.provide(
-      Layer.mergeAll(capabilityLayers, routingRoleHostLauncher(turns, { commitOnCoder })),
+      Layer.mergeAll(
+        capabilityLayers,
+        routingRoleHostLauncher(turns, { commitOnCoder }),
+        overrides.runGit ?? RunGitLive,
+        overrides.github ?? Layer.empty,
+      ),
     ),
   );
 }
@@ -356,9 +458,19 @@ describe('automatic routing after review', () => {
         expect(result.exitCode).toBe(0);
         expect(workflowStateOf(result.stdout)).toBe('completed');
 
+        const envelope = Schema.decodeUnknownSync(ReportEnvelopeJson)(result.stdout);
+        if (!envelope.ok || !('request' in envelope.data) || !('workflowState' in envelope.data)) {
+          throw new Error(`Expected a run workflow envelope: ${result.stdout}`);
+        }
+        // Publication is configured but no GitHub adapter is wired, so the
+        // ordinary result PR is reported as not opened without failing the run.
+        expect(envelope.data.resultPullRequest ?? null).toBeNull();
+
         const history = yield* readHistory(fixture, runId);
         expect(history.derived.state).toBe('completed');
         expect(history.derived.implementation?.commit ?? null).not.toBeNull();
+        expect(history.derived.resultPrRecorded ?? null).toBeNull();
+        expect(history.events.some((event) => event.type === 'result-pr-recorded')).toBe(false);
         expectRoute(history, 'review-approved', 'completed');
         expect(routesOf(history)).toContain('implementation-ready');
 
@@ -369,6 +481,68 @@ describe('automatic routing after review', () => {
           history.derived.roleSessions.every((session) => session.stopDisposition !== null),
         ).toBe(true);
         expect(existsSync(fixture.workspace)).toBe(false);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.live('publishes an approved changed result as an ordinary result PR', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture('result-pr');
+      try {
+        const runId = 'RUN-ROUTE-RESULTPR';
+        const github = routingGitHubPublication(fixture);
+        const result = yield* runRouting(
+          fixture,
+          runId,
+          {
+            architect: ROUTING_ARCHITECT,
+            coder: {
+              narrative: 'Implemented the change.',
+              control: { schemaVersion: 1, outcome: 'implemented' },
+            },
+            reviewer: {
+              narrative: 'The changed commit satisfies the request.',
+              control: { schemaVersion: 1, outcome: 'approved' },
+            },
+          },
+          true,
+          { runGit: publicationRunGit(), github: github.layer },
+        );
+        expect(result.exitCode).toBe(0);
+        expect(workflowStateOf(result.stdout)).toBe('completed');
+
+        const expectedUrl = 'https://github.com/example/target/pull/42';
+        const envelope = Schema.decodeUnknownSync(ReportEnvelopeJson)(result.stdout);
+        if (!envelope.ok || !('request' in envelope.data) || !('workflowState' in envelope.data)) {
+          throw new Error(`Expected a run workflow envelope: ${result.stdout}`);
+        }
+        expect(envelope.data.resultPullRequest).toBe(expectedUrl);
+
+        const history = yield* readHistory(fixture, runId);
+        expect(history.derived.state).toBe('completed');
+        const resultCommit = history.derived.implementation?.commit ?? null;
+        expect(resultCommit).not.toBeNull();
+        expect(history.derived.resultPrRecorded).toEqual({
+          url: expectedUrl,
+          commit: resultCommit,
+          taskBranch: history.derived.worktreeReady?.taskBranch,
+        });
+        expect(history.events.filter((event) => event.type === 'result-pr-recorded')).toHaveLength(
+          1,
+        );
+        expect(github.calls.push).toHaveLength(1);
+        expect(github.calls.push[0]?.commit).toBe(resultCommit);
+        expect(github.calls.open).toHaveLength(1);
+
+        const handoff = Schema.decodeUnknownSync(HandoffDocumentJson)(
+          readFileSync(join(fixture.target, '.agent', 'runs', runId, HANDOFF_FILENAME), 'utf8'),
+        );
+        expect(handoff.kind).toBe('change');
+        expect(handoff.publication.created).toBe(true);
+        expect(handoff.publication.kind).toBe('result');
+        expect(handoff.publication.url).toBe(expectedUrl);
       } finally {
         fixture.cleanup();
       }
@@ -584,6 +758,8 @@ describe('automatic routing after review', () => {
         expect(handoff.kind).toBe('no_change');
         expect(handoff.resultCommit).toBeNull();
         expect(handoff.publication.created).toBe(false);
+        expect(handoff.publication.kind).toBe('none');
+        expect(handoff.publication.url).toBeNull();
         expect(history.derived.cleanupProgress?.outcome).toBe('succeeded');
       } finally {
         fixture.cleanup();

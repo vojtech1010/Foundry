@@ -413,6 +413,10 @@ function githubStub(options: GitHubStubOptions = {}): GitHubStub {
         calls.push('createDraftPullRequest');
         return Effect.die(new Error('decision commands must not create a pull request'));
       },
+      openResultPullRequest: () => {
+        calls.push('openResultPullRequest');
+        return Effect.die(new Error('decision commands must not open a result pull request'));
+      },
       refreshOwnedDraftPullRequestBody: () => {
         calls.push('refreshOwnedDraftPullRequestBody');
         return Effect.die(new Error('decision commands must not refresh a pull request'));

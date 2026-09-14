@@ -29,12 +29,28 @@ Start a new run only when the desired request or source genuinely changed.
 Human recovery is not manual workflow mode. It is an exceptional safety stop
 for situations that automation cannot reconcile honestly.
 
+**Implemented:** A resume of a `blocked` run classifies the recorded checkpoint
+from durable evidence before it advances. A settled attempt or already-durable
+result reconciles as `accept`; an owned submission that is still in progress is
+`continue_waiting`; a stage with no submission side effect is a proven-safe
+`retry`; a missing or drifted prerequisite is `blocked`; and ambiguous identity,
+Git, lock, journal, or submission evidence is a `human_recovery` stop that
+leaves durable state unchanged. Each disposition is recorded as a
+`recovery-recorded` event, and a `human_recovery` stop is reported with the same
+blocked error envelope as a decision-integrity stop.
+
 ## Role recovery
 
 Foundry persists the pre-submit turn baseline and submission state. After
 submission begins, recovery reattaches to the same owned session and requires a
 newer settled observation. It never resubmits the original prompt merely because
 an output file is absent.
+
+**Implemented:** A stage re-entered by a `resume` transition reuses the latest
+recorded role attempt instead of allocating a new one, so `startOrResumeRoleTurn`
+takes its settled-session fast path or observes the owned submission without
+submitting again. Every other re-entry (a control retry, a correction, or a
+retest) still allocates the next attempt.
 
 The `foundry-role-host-v1` sequence is create, persist identity, submit with an
 idempotency key, then observe. Recovery calls only `observe` until the adapter
