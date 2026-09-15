@@ -1,4 +1,4 @@
-# 056 — Run role sessions as Herdr agents
+# 057 — Run role sessions as Herdr agents
 
 ## Requirement
 
@@ -42,7 +42,8 @@ modes, or treating a replacement pane as recovery of an owned session.
 [037](037-cleanup-keeps-the-result.md),
 [040](040-parallel-independent-work.md),
 [053](053-per-role-harness-models.md),
-[054](054-bundled-role-host.md)
+[054](054-bundled-role-host.md),
+[056](056-in-process-role-host-adapter.md)
 
 ## Spec
 

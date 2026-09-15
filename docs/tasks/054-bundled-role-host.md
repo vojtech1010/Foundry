@@ -2,19 +2,17 @@
 
 ## Requirement
 
-Foundry moves the external role-host adapter into the application and ships it
-as a bundled host instead of spawning an externally configured one. The
-`roleHarness` block (`protocol`, `command`, `environmentAllowlist`) leaves the
-configuration document: per-role harness and model selection (see 053) is the
-only harness-related configuration, and launch details stay hardcoded in
-Foundry per harness and platform.
+Foundry ships its role host instead of spawning an externally configured
+one. The `roleHarness` block (`protocol`, `command`,
+`environmentAllowlist`) leaves the configuration document: per-role
+harness and model selection (see 053) is the only harness-related
+configuration, and launch details stay hardcoded in Foundry per harness
+and platform.
 
 ## Observable outcome
 
 - A configuration without `roleHarness` is accepted; one containing it
   is rejected as an unknown field under the closed-document rule.
-- Role-host operations use the bundled implementation and no longer spawn a
-  configured external adapter process.
 - `doctor` verifies the bundled host directly: required harness
   binaries are present, listed models resolve, and every role plus
   capability profile is covered without spawning an external adapter.
