@@ -84,8 +84,9 @@ boundaries exist, and autonomous orchestration is in place.
 | [051](051-head-advance-invalidates-evidence.md) | Any new accepted result commit retires older checks and observations   |
 | [052](052-captures-count-by-content.md)         | Captures count by content, not by filename or caption                  |
 | [053](053-per-role-harness-models.md)           | Configuration names one harness and model per role                     |
-| [054](054-bundled-role-host.md)                 | Foundry ships the role host; no external adapter in config             |
+| [054](054-bundled-role-host.md)                 | Foundry owns the role-host adapter; none is externally configured      |
 | [055](055-hardcoded-artifact-bounds.md)         | Artifact bounds are hardcoded, not configured                          |
+| [056](056-herdr-role-sessions.md)               | Role sessions run as recognized agents in owned Herdr panes            |
 
 ## Walkable sequential workflow
 
