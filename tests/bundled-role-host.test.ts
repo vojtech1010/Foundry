@@ -190,7 +190,9 @@ describe('live bundled binary resolution', () => {
     Effect.gen(function* () {
       const resolver = yield* RoleHostBinaryResolver;
 
-      expect(yield* resolver.resolveModel('opencode', 'opencode-go/glm-5.3-flash')).toBe('opencode-go/glm-5.3-flash');
+      expect(yield* resolver.resolveModel('opencode', 'opencode-go/glm-5.3-flash')).toBe(
+        'opencode-go/glm-5.3-flash',
+      );
     }).pipe(Effect.provide(RoleHostBinaryResolverLive)),
   );
 });
