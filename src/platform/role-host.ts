@@ -122,13 +122,13 @@ export const ROLE_HARNESS_CATALOG: Readonly<Record<RoleHarnessName, RoleHarnessC
   codex: {
     executable: 'codex',
     args: [],
-    models: ['gpt-5-codex'],
+    models: ['gpt-5.6-luna'],
     environmentAllowlist: BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES,
   },
   opencode: {
     executable: 'opencode',
     args: [],
-    models: ['openai/gpt-5'],
+    models: ['opencode-go/glm-5.3-flash'],
     environmentAllowlist: BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES,
   },
 };

@@ -342,7 +342,7 @@ function adapterLayer(
 ): Layer.Layer<RoleHost> {
   return roleHostProcessLayer({
     harness: 'codex',
-    model: 'gpt-5-codex',
+    model: 'gpt-5.6-luna',
     cwd: REPOSITORY_ROOT,
     environmentAllowlist,
     timeoutMs: 10_000,

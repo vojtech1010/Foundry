@@ -52,11 +52,11 @@ function goldenDocument(targetRepository: string) {
     sourceBranch: 'main',
     taskBranchPolicy: 'foundry/<task-id>',
     roles: {
-      architect: { harness: 'codex', model: 'gpt-5-codex' },
-      coder: { harness: 'codex', model: 'gpt-5-codex' },
-      lead_coder: { harness: 'opencode', model: 'openai/gpt-5' },
-      tester: { harness: 'opencode', model: 'openai/gpt-5' },
-      reviewer: { harness: 'codex', model: 'gpt-5-codex' },
+      architect: { harness: 'codex', model: 'gpt-5.6-luna' },
+      coder: { harness: 'codex', model: 'gpt-5.6-luna' },
+      lead_coder: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      tester: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      reviewer: { harness: 'codex', model: 'gpt-5.6-luna' },
     },
     timeouts: {
       roleMs: 1800000,
@@ -127,7 +127,7 @@ function setupLog() {
 function adapterLayer(): Layer.Layer<RoleHost> {
   return roleHostProcessLayer({
     harness: 'codex',
-    model: 'gpt-5-codex',
+    model: 'gpt-5.6-luna',
     cwd: REPOSITORY_ROOT,
     environmentAllowlist: [],
     timeoutMs: 10_000,
@@ -358,7 +358,7 @@ describe('role-host capability preflight', () => {
             launch: () =>
               roleHostProcessLayer({
                 harness: 'codex',
-                model: 'gpt-5-codex',
+                model: 'gpt-5.6-luna',
                 cwd: REPOSITORY_ROOT,
                 environmentAllowlist: [],
                 timeoutMs: 10_000,
@@ -414,8 +414,8 @@ describe('live capability preflight harness coverage', () => {
         Effect.provide(recordingLauncher(recorded)),
       );
       expect(recorded).toEqual([
-        { harness: 'codex', model: 'gpt-5-codex' },
-        { harness: 'opencode', model: 'openai/gpt-5' },
+        { harness: 'codex', model: 'gpt-5.6-luna' },
+        { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
       ]);
     }),
   );
@@ -428,7 +428,7 @@ describe('live capability preflight harness coverage', () => {
           ...document,
           roles: {
             ...document.roles,
-            coder: { harness: 'codex', model: 'gpt-5-codex-alt' },
+            coder: { harness: 'codex', model: 'gpt-5.6-luna-alt' },
           },
         },
         '/work',
@@ -438,9 +438,9 @@ describe('live capability preflight harness coverage', () => {
         Effect.provide(recordingLauncher(recorded)),
       );
       expect(recorded).toEqual([
-        { harness: 'codex', model: 'gpt-5-codex' },
-        { harness: 'codex', model: 'gpt-5-codex-alt' },
-        { harness: 'opencode', model: 'openai/gpt-5' },
+        { harness: 'codex', model: 'gpt-5.6-luna' },
+        { harness: 'codex', model: 'gpt-5.6-luna-alt' },
+        { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
       ]);
     }),
   );

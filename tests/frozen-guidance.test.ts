@@ -107,11 +107,11 @@ function goldenDocument(targetRepository: string, guidancePaths: ReadonlyArray<s
     sourceBranch: 'main',
     taskBranchPolicy: 'foundry/<task-id>',
     roles: {
-      architect: { harness: 'codex', model: 'gpt-5-codex' },
-      coder: { harness: 'codex', model: 'gpt-5-codex' },
-      lead_coder: { harness: 'opencode', model: 'openai/gpt-5' },
-      tester: { harness: 'opencode', model: 'openai/gpt-5' },
-      reviewer: { harness: 'codex', model: 'gpt-5-codex' },
+      architect: { harness: 'codex', model: 'gpt-5.6-luna' },
+      coder: { harness: 'codex', model: 'gpt-5.6-luna' },
+      lead_coder: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      tester: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      reviewer: { harness: 'codex', model: 'gpt-5.6-luna' },
     },
     timeouts: {
       roleMs: 1800000,

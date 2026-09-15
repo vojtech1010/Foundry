@@ -91,11 +91,11 @@ function goldenDocument(targetRepository: string) {
     sourceBranch: 'main',
     taskBranchPolicy: 'foundry/<task-id>',
     roles: {
-      architect: { harness: 'codex', model: 'gpt-5-codex' },
-      coder: { harness: 'codex', model: 'gpt-5-codex' },
-      lead_coder: { harness: 'opencode', model: 'openai/gpt-5' },
-      tester: { harness: 'opencode', model: 'openai/gpt-5' },
-      reviewer: { harness: 'codex', model: 'gpt-5-codex' },
+      architect: { harness: 'codex', model: 'gpt-5.6-luna' },
+      coder: { harness: 'codex', model: 'gpt-5.6-luna' },
+      lead_coder: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      tester: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      reviewer: { harness: 'codex', model: 'gpt-5.6-luna' },
     },
     timeouts: {
       roleMs: 1800000,
@@ -504,11 +504,11 @@ describe('per-role routing resolution', () => {
 
   function expectedRouting() {
     return [
-      { role: 'architect', harness: 'codex', model: 'gpt-5-codex' },
-      { role: 'coder', harness: 'codex', model: 'gpt-5-codex' },
-      { role: 'lead_coder', harness: 'opencode', model: 'openai/gpt-5' },
-      { role: 'tester', harness: 'opencode', model: 'openai/gpt-5' },
-      { role: 'reviewer', harness: 'codex', model: 'gpt-5-codex' },
+      { role: 'architect', harness: 'codex', model: 'gpt-5.6-luna' },
+      { role: 'coder', harness: 'codex', model: 'gpt-5.6-luna' },
+      { role: 'lead_coder', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      { role: 'tester', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      { role: 'reviewer', harness: 'codex', model: 'gpt-5.6-luna' },
     ];
   }
 
@@ -531,12 +531,12 @@ describe('per-role routing resolution', () => {
     expect(byRole.get('architect')).toEqual({
       role: 'architect',
       harness: 'codex',
-      model: 'gpt-5-codex',
+      model: 'gpt-5.6-luna',
     });
     expect(byRole.get('lead_coder')).toEqual({
       role: 'lead_coder',
       harness: 'opencode',
-      model: 'openai/gpt-5',
+      model: 'opencode-go/glm-5.3-flash',
     });
   });
 });
@@ -584,11 +584,11 @@ describe('readiness check with fake services', () => {
         commit: COMMIT,
       });
       expect(report.roleRouting).toEqual([
-        { role: 'architect', harness: 'codex', model: 'gpt-5-codex' },
-        { role: 'coder', harness: 'codex', model: 'gpt-5-codex' },
-        { role: 'lead_coder', harness: 'opencode', model: 'openai/gpt-5' },
-        { role: 'tester', harness: 'opencode', model: 'openai/gpt-5' },
-        { role: 'reviewer', harness: 'codex', model: 'gpt-5-codex' },
+        { role: 'architect', harness: 'codex', model: 'gpt-5.6-luna' },
+        { role: 'coder', harness: 'codex', model: 'gpt-5.6-luna' },
+        { role: 'lead_coder', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        { role: 'tester', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        { role: 'reviewer', harness: 'codex', model: 'gpt-5.6-luna' },
       ]);
       expectNoBranchMutation(built.gitCalls);
     }),
@@ -884,11 +884,11 @@ describe('readiness check with fake services', () => {
       ]);
       expect(data.roleHost.networkProfiles).toEqual(['network_denied', 'runtime_origin_only']);
       expect(data.roleRouting).toEqual([
-        { role: 'architect', harness: 'codex', model: 'gpt-5-codex' },
-        { role: 'coder', harness: 'codex', model: 'gpt-5-codex' },
-        { role: 'lead_coder', harness: 'opencode', model: 'openai/gpt-5' },
-        { role: 'tester', harness: 'opencode', model: 'openai/gpt-5' },
-        { role: 'reviewer', harness: 'codex', model: 'gpt-5-codex' },
+        { role: 'architect', harness: 'codex', model: 'gpt-5.6-luna' },
+        { role: 'coder', harness: 'codex', model: 'gpt-5.6-luna' },
+        { role: 'lead_coder', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        { role: 'tester', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        { role: 'reviewer', harness: 'codex', model: 'gpt-5.6-luna' },
       ]);
       expect(data.publication).toEqual({
         configured: false,
@@ -1029,7 +1029,7 @@ describe('readiness check with fake services', () => {
                 Effect.fail(
                   new RoleHostCapabilityError({
                     message:
-                      'Unknown model "custom-model" for bundled role harness "opencode": supported models are openai/gpt-5.',
+                      'Unknown model "custom-model" for bundled role harness "opencode": supported models are opencode-go/glm-5.3-flash.',
                     reason: 'unavailable',
                   }),
                 ),

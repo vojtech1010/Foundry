@@ -44,11 +44,11 @@ const configDirectory = join(tmpdir(), 'foundry-per-role-harness-tests', '.agent
 
 function validRoles() {
   return {
-    architect: { harness: 'codex', model: 'gpt-5-codex' },
-    coder: { harness: 'codex', model: 'gpt-5-codex' },
-    lead_coder: { harness: 'opencode', model: 'openai/gpt-5' },
-    tester: { harness: 'opencode', model: 'openai/gpt-5' },
-    reviewer: { harness: 'codex', model: 'gpt-5-codex' },
+    architect: { harness: 'codex', model: 'gpt-5.6-luna' },
+    coder: { harness: 'codex', model: 'gpt-5.6-luna' },
+    lead_coder: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+    tester: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+    reviewer: { harness: 'codex', model: 'gpt-5.6-luna' },
   };
 }
 
@@ -62,11 +62,11 @@ function withoutDocumentKey(key: string): Schema.Json {
 
 function expectedSelections(): RoleHarnessSelections {
   return {
-    architect: { harness: 'codex', model: 'gpt-5-codex' },
-    coder: { harness: 'codex', model: 'gpt-5-codex' },
-    lead_coder: { harness: 'opencode', model: 'openai/gpt-5' },
-    tester: { harness: 'opencode', model: 'openai/gpt-5' },
-    reviewer: { harness: 'codex', model: 'gpt-5-codex' },
+    architect: { harness: 'codex', model: 'gpt-5.6-luna' },
+    coder: { harness: 'codex', model: 'gpt-5.6-luna' },
+    lead_coder: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+    tester: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+    reviewer: { harness: 'codex', model: 'gpt-5.6-luna' },
   };
 }
 
@@ -125,12 +125,12 @@ describe('per-role harness and model contract', () => {
           ...validDocument(),
           roles: {
             ...validRoles(),
-            coder: { harness: 'codex', model: '  gpt-5-codex\t\n' },
+            coder: { harness: 'codex', model: '  gpt-5.6-luna\t\n' },
           },
         },
         configDirectory,
       );
-      expect(decoded.roles.coder).toEqual({ harness: 'codex', model: 'gpt-5-codex' });
+      expect(decoded.roles.coder).toEqual({ harness: 'codex', model: 'gpt-5.6-luna' });
     }),
   );
 
@@ -182,7 +182,7 @@ describe('per-role harness and model contract', () => {
           ...document,
           roles: {
             ...validRoles(),
-            planner: { harness: 'codex', model: 'gpt-5-codex' },
+            planner: { harness: 'codex', model: 'gpt-5.6-luna' },
           },
         },
         configDirectory,
@@ -195,7 +195,7 @@ describe('per-role harness and model contract', () => {
           ...document,
           roles: {
             ...validRoles(),
-            coder: { harness: 'codex', model: 'gpt-5-codex', temperature: 0.2 },
+            coder: { harness: 'codex', model: 'gpt-5.6-luna', temperature: 0.2 },
           },
         },
         configDirectory,
@@ -268,12 +268,12 @@ describe('per-role routing', () => {
     expect(resolveRoleHostRoute(selections, 'architect')).toEqual({
       role: 'architect',
       harness: 'codex',
-      model: 'gpt-5-codex',
+      model: 'gpt-5.6-luna',
     });
     expect(resolveRoleHostRoute(selections, 'lead_coder')).toEqual({
       role: 'lead_coder',
       harness: 'opencode',
-      model: 'openai/gpt-5',
+      model: 'opencode-go/glm-5.3-flash',
     });
   });
 
@@ -308,7 +308,7 @@ describe('per-role routing', () => {
         cwd: configuration.targetRepository,
       });
       expect(options.harness).toBe('opencode');
-      expect(options.model).toBe('openai/gpt-5');
+      expect(options.model).toBe('opencode-go/glm-5.3-flash');
       expect(options.cwd).toBe(configuration.targetRepository);
       expect(options.environmentAllowlist).toEqual([...BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES]);
       expect(options.timeoutMs).toBe(configuration.timeouts.commandMs);
@@ -322,7 +322,7 @@ describe('per-role routing', () => {
         maxOutputBytes: 2_000,
       });
       expect(overridden.harness).toBe('codex');
-      expect(overridden.model).toBe('gpt-5-codex');
+      expect(overridden.model).toBe('gpt-5.6-luna');
       expect(overridden.timeoutMs).toBe(1_000);
       expect(overridden.maxOutputBytes).toBe(2_000);
     }),
@@ -338,10 +338,10 @@ describe('role-host adapter catalog', () => {
   });
 
   it('recognizes catalog models and rejects unknown models', () => {
-    expect(isSupportedRoleHostModel('codex', 'gpt-5-codex')).toBe(true);
-    expect(isSupportedRoleHostModel('codex', '  gpt-5-codex  ')).toBe(true);
+    expect(isSupportedRoleHostModel('codex', 'gpt-5.6-luna')).toBe(true);
+    expect(isSupportedRoleHostModel('codex', '  gpt-5.6-luna  ')).toBe(true);
     expect(isSupportedRoleHostModel('codex', 'no-such-model')).toBe(false);
-    expect(isSupportedRoleHostModel('opencode', 'gpt-5-codex')).toBe(false);
+    expect(isSupportedRoleHostModel('opencode', 'gpt-5.6-luna')).toBe(false);
     expect(isSupportedRoleHostModel('opencode', '')).toBe(false);
   });
 
@@ -422,7 +422,7 @@ describe('role-host adapter catalog', () => {
         const launcher = yield* RoleHostLauncher;
         const hostLayer = launcher.launch({
           harness: 'codex',
-          model: 'gpt-5-codex',
+          model: 'gpt-5.6-luna',
           cwd: directory,
           environmentAllowlist: ['PATH', 'FOUNDRY_SHIM_LOG', 'FOUNDRY_FAKE_LOG'],
           timeoutMs: 30_000,

@@ -95,11 +95,11 @@ function goldenDocument(
     sourceBranch: 'main',
     taskBranchPolicy: 'foundry/<task-id>',
     roles: {
-      architect: { harness: 'codex', model: 'gpt-5-codex' },
-      coder: { harness: 'codex', model: 'gpt-5-codex' },
-      lead_coder: { harness: 'opencode', model: 'openai/gpt-5' },
-      tester: { harness: 'opencode', model: 'openai/gpt-5' },
-      reviewer: { harness: 'codex', model: 'gpt-5-codex' },
+      architect: { harness: 'codex', model: 'gpt-5.6-luna' },
+      coder: { harness: 'codex', model: 'gpt-5.6-luna' },
+      lead_coder: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      tester: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      reviewer: { harness: 'codex', model: 'gpt-5.6-luna' },
     },
     timeouts: {
       roleMs: 1800000,
@@ -469,11 +469,11 @@ describe('preview run locations with fake services', () => {
         redactionPatterns: [],
       });
       expect(report.roleRouting).toEqual([
-        { role: 'architect', harness: 'codex', model: 'gpt-5-codex' },
-        { role: 'coder', harness: 'codex', model: 'gpt-5-codex' },
-        { role: 'lead_coder', harness: 'opencode', model: 'openai/gpt-5' },
-        { role: 'tester', harness: 'opencode', model: 'openai/gpt-5' },
-        { role: 'reviewer', harness: 'codex', model: 'gpt-5-codex' },
+        { role: 'architect', harness: 'codex', model: 'gpt-5.6-luna' },
+        { role: 'coder', harness: 'codex', model: 'gpt-5.6-luna' },
+        { role: 'lead_coder', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        { role: 'tester', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        { role: 'reviewer', harness: 'codex', model: 'gpt-5.6-luna' },
       ]);
       expectReadOnlyGitCalls(built.gitCalls);
     }),
@@ -697,11 +697,11 @@ describe('preview run locations with fake services', () => {
         redactionPatterns: [],
       });
       expect(data.roleRouting).toEqual([
-        { role: 'architect', harness: 'codex', model: 'gpt-5-codex' },
-        { role: 'coder', harness: 'codex', model: 'gpt-5-codex' },
-        { role: 'lead_coder', harness: 'opencode', model: 'openai/gpt-5' },
-        { role: 'tester', harness: 'opencode', model: 'openai/gpt-5' },
-        { role: 'reviewer', harness: 'codex', model: 'gpt-5-codex' },
+        { role: 'architect', harness: 'codex', model: 'gpt-5.6-luna' },
+        { role: 'coder', harness: 'codex', model: 'gpt-5.6-luna' },
+        { role: 'lead_coder', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        { role: 'tester', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        { role: 'reviewer', harness: 'codex', model: 'gpt-5.6-luna' },
       ]);
       expect(Object.keys(data).sort()).toEqual(
         ['artifacts', 'branch', 'roleRouting', 'source', 'taskId', 'workspace'].sort(),

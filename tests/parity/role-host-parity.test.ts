@@ -108,7 +108,7 @@ describe('role-host parity', () => {
       Effect.provide(
         roleHostProcessLayer({
           harness: 'codex',
-          model: 'gpt-5-codex',
+          model: 'gpt-5.6-luna',
           cwd: base,
           environmentAllowlist: ['FOUNDRY_FAKE_TOKEN'],
           timeoutMs: 10_000,

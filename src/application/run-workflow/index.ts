@@ -847,13 +847,23 @@ export const advanceRun = Effect.fn('advanceRun')(function* (options: AdvanceRun
       ),
     });
     if (route.route === 'limitation') {
+      /**
+       * The accepted plan requires live validation but no prepared runtime is
+       * durably recorded, while the deterministic checks passed. The
+       * transition table owns this fact: `verifying` goes to `testing` through
+       * "checks-passed-testing" (checks passed, plan requires runtime
+       * validation), and the testing stage then records the retained
+       * limitation and reaches Reviewer through `tester-settled`, which is
+       * only legal from `testing`. Reviewer can then choose only a human
+       * decision or a blocked outcome, never approval without the required
+       * evidence.
+       */
       yield* transitionWorkflow({
         runDirectory,
         runId,
         request: {
-          route: 'tester-settled',
-          observationsSettled: false,
-          runtimeLimitationRetained: true,
+          route: 'checks-passed-testing',
+          checksPassed: report.result === 'passed',
         },
       });
     }

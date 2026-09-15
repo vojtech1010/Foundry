@@ -175,8 +175,8 @@ describe('live bundled binary resolution', () => {
     Effect.gen(function* () {
       const resolver = yield* RoleHostBinaryResolver;
 
-      expect(yield* resolver.resolveModel('codex', 'gpt-5-codex')).toBe('gpt-5-codex');
-      expect(yield* resolver.resolveModel('codex', '  gpt-5-codex  ')).toBe('gpt-5-codex');
+      expect(yield* resolver.resolveModel('codex', 'gpt-5.6-luna')).toBe('gpt-5.6-luna');
+      expect(yield* resolver.resolveModel('codex', '  gpt-5.6-luna  ')).toBe('gpt-5.6-luna');
 
       const error = yield* resolver.resolveModel('opencode', 'no-such-model').pipe(Effect.flip);
       expect(error).toBeInstanceOf(RoleHostCapabilityError);
@@ -190,7 +190,7 @@ describe('live bundled binary resolution', () => {
     Effect.gen(function* () {
       const resolver = yield* RoleHostBinaryResolver;
 
-      expect(yield* resolver.resolveModel('opencode', 'openai/gpt-5')).toBe('openai/gpt-5');
+      expect(yield* resolver.resolveModel('opencode', 'opencode-go/glm-5.3-flash')).toBe('opencode-go/glm-5.3-flash');
     }).pipe(Effect.provide(RoleHostBinaryResolverLive)),
   );
 });
