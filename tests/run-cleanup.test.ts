@@ -35,6 +35,7 @@ import { ReadinessFilesLive, ReadinessGitLive } from '../src/platform/readiness.
 import { RepositoryLeaseLive } from '../src/platform/repository-lease.js';
 import { RoleTurnResourceObserverLive } from '../src/platform/role-permissions.js';
 import { RunIdentityLive } from '../src/platform/run-identity.js';
+import { ROLE_HOST_PROTOCOL_VERSION } from '../src/domain/role-host.js';
 import {
   CAPABLE_ROLE_HOST_CAPABILITIES,
   scriptedRoleHostLauncher,
@@ -140,6 +141,55 @@ function failingStopLauncher(): Layer.Layer<RoleHostLauncher> {
         ),
     }),
   );
+}
+
+function recordingStopLauncher(recorded: Array<string>): Layer.Layer<RoleHostLauncher> {
+  return Layer.succeed(
+    RoleHostLauncher,
+    RoleHostLauncher.of({
+      launch: (options) => {
+        recorded.push(options.harness);
+        return Layer.succeed(
+          RoleHost,
+          RoleHost.of({
+            capabilities: () => Effect.succeed(CAPABLE_ROLE_HOST_CAPABILITIES),
+            create: () => Effect.die(new Error('unused create')),
+            submit: () => Effect.die(new Error('unused submit')),
+            observe: () => Effect.die(new Error('unused observe')),
+            stop: () =>
+              Effect.succeed({
+                schemaVersion: ROLE_HOST_PROTOCOL_VERSION,
+                disposition: 'disposed',
+              }),
+          }),
+        );
+      },
+    }),
+  );
+}
+
+function seedArchitectAndTester(fixture: UnitFixture) {
+  return Effect.gen(function* () {
+    yield* seedHistory(fixture, false);
+    for (const [role, attempt] of [
+      ['architect', 1],
+      ['tester', 1],
+    ] as const) {
+      yield* emit(fixture.runDirectory, false, {
+        type: 'role-session-created',
+        payload: {
+          role,
+          attempt,
+          generation: attempt,
+          sessionId: `session-${role}`,
+          ownershipToken: `owner-${role}`,
+          sequence: 0,
+          runtimeIdentity: RUNTIME_IDENTITY,
+          workingDirectory: WORKSPACE,
+        },
+      });
+    }
+  }).pipe(Effect.provide(RunHistoryLive));
 }
 
 function unusedProcess(): Layer.Layer<
@@ -277,6 +327,31 @@ describe('disposeRunResources', () => {
         expect(report?.outcome).toBe('succeeded');
         expect(resourceOf(report?.resources ?? [], 'runtime')?.disposition).toBe('disposed');
         expect(fixture.removed).toEqual([WORKSPACE]);
+        const stopped = (report?.resources ?? []).filter(
+          (resource) => resource.kind === 'role-session',
+        );
+        expect(stopped).toHaveLength(2);
+        expect(stopped.every((resource) => resource.disposition === 'disposed')).toBe(true);
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.live('routes each recorded session through its own role harness', () =>
+    Effect.gen(function* () {
+      const fixture = setupUnitFixture();
+      try {
+        yield* seedArchitectAndTester(fixture);
+        const recorded: Array<string> = [];
+        const report = yield* disposeRunResources(options(fixture, null)).pipe(
+          Effect.provide(unitLayers(fixture, recordingStopLauncher(recorded))),
+        );
+        expect(report?.outcome).toBe('succeeded');
+        // Golden configuration routes architect to codex and tester to
+        // opencode; the recorded launches must follow the session roles in
+        // history order rather than a global/default host.
+        expect(recorded).toEqual(['codex', 'opencode']);
         const stopped = (report?.resources ?? []).filter(
           (resource) => resource.kind === 'role-session',
         );

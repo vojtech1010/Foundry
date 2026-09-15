@@ -33,6 +33,7 @@ import type {
   PublicationProbeObservation,
   PublicationProbeRequest,
 } from '../src/application/readiness/index.js';
+import { RoleHostBinaryResolver } from '../src/application/role-conversations/index.js';
 import type { RoleHostLauncher } from '../src/application/role-conversations/index.js';
 
 const ReportEnvelopeJson = Schema.fromJsonString(ReportEnvelope);
@@ -93,10 +94,12 @@ function goldenDocument(
     sourceRemote: 'origin',
     sourceBranch: 'main',
     taskBranchPolicy: 'foundry/<task-id>',
-    roleHarness: {
-      protocol: 'foundry-role-host-v1',
-      command: ['foundry-role-host'],
-      environmentAllowlist: ['OPENAI_API_KEY'],
+    roles: {
+      architect: { harness: 'codex', model: 'gpt-5.6-luna' },
+      coder: { harness: 'codex', model: 'gpt-5.6-luna' },
+      lead_coder: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      tester: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      reviewer: { harness: 'codex', model: 'gpt-5.6-luna' },
     },
     timeouts: {
       roleMs: 1800000,
@@ -123,16 +126,6 @@ function goldenDocument(
     },
     runtimeProfile: null,
     decisionPublication: null,
-    artifacts: {
-      retentionDays: 30,
-      maxRequestBytes: 262144,
-      maxGuidanceBytes: 1048576,
-      maxRoleHandoffBytes: 262144,
-      maxEvidenceBytes: 26214400,
-      maxTerminalCaptureBytes: 10485760,
-      maxRunBytes: 104857600,
-      redactionPatterns: [],
-    },
     ...overrides,
   };
 }
@@ -185,6 +178,7 @@ interface BuiltWorld {
     | ReadinessGit
     | ProjectCommandProcess
     | RoleHostLauncher
+    | RoleHostBinaryResolver
     | PublicationProbe
   >;
   readonly gitCalls: Array<{ readonly args: ReadonlyArray<string>; readonly cwd: string }>;
@@ -261,6 +255,14 @@ const UnusedProcess = Layer.succeed(
   ProjectCommandProcess,
   ProjectCommandProcess.of({
     run: () => Effect.die(new Error('init must not run project commands')),
+  }),
+);
+
+const bundledBinariesLayer = Layer.succeed(
+  RoleHostBinaryResolver,
+  RoleHostBinaryResolver.of({
+    resolveExecutable: (harness) => Effect.succeed(`/fake/bin/${harness}`),
+    resolveModel: (_harness, model) => Effect.succeed(model.trim()),
   }),
 );
 
@@ -367,6 +369,7 @@ function buildWorld(
     ),
     UnusedProcess,
     roleHostLayer,
+    bundledBinariesLayer,
     world.publication.provided
       ? Layer.succeed(
           PublicationProbe,
@@ -454,12 +457,41 @@ describe('preview run locations with fake services', () => {
       expect(report.source).toEqual({ remote: 'origin', branch: 'main', commit: COMMIT });
       expect(report.branch).toBe('foundry/example-change');
       expect(report.workspace).toBe('/target/.agent/worktrees/example-change');
-      expect(report.roleHarness).toEqual({
-        protocol: 'foundry-role-host-v1',
-        command: ['foundry-role-host'],
+      expect(report.artifacts).toEqual({
+        root: '/target/.agent/runs',
+        retentionDays: 30,
+        maxRequestBytes: 262144,
+        maxGuidanceBytes: 1048576,
+        maxRoleHandoffBytes: 262144,
+        maxEvidenceBytes: 26214400,
+        maxTerminalCaptureBytes: 10485760,
+        maxRunBytes: 104857600,
+        redactionPatterns: [],
       });
-      expect(report.artifacts).toEqual({ root: '/target/.agent/runs' });
+      expect(report.roleRouting).toEqual([
+        { role: 'architect', harness: 'codex', model: 'gpt-5.6-luna' },
+        { role: 'coder', harness: 'codex', model: 'gpt-5.6-luna' },
+        { role: 'lead_coder', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        { role: 'tester', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        { role: 'reviewer', harness: 'codex', model: 'gpt-5.6-luna' },
+      ]);
       expectReadOnlyGitCalls(built.gitCalls);
+    }),
+  );
+
+  it.effect('reports the hardcoded artifact bounds in the preview', () =>
+    Effect.gen(function* () {
+      const { preview } = previewWith(defaultWorld());
+      const report = yield* preview;
+
+      expect(report.artifacts.retentionDays).toBe(30);
+      expect(report.artifacts.maxRequestBytes).toBe(262144);
+      expect(report.artifacts.maxGuidanceBytes).toBe(1048576);
+      expect(report.artifacts.maxRoleHandoffBytes).toBe(262144);
+      expect(report.artifacts.maxEvidenceBytes).toBe(26214400);
+      expect(report.artifacts.maxTerminalCaptureBytes).toBe(10485760);
+      expect(report.artifacts.maxRunBytes).toBe(104857600);
+      expect(report.artifacts.redactionPatterns).toEqual([]);
     }),
   );
 
@@ -653,9 +685,26 @@ describe('preview run locations with fake services', () => {
       expect(data.taskId).toBe(TASK_ID);
       expect(data.branch).toBe('foundry/example-change');
       expect(data.workspace).toBe('/target/.agent/worktrees/example-change');
-      expect(data.artifacts).toEqual({ root: '/target/.agent/runs' });
+      expect(data.artifacts).toEqual({
+        root: '/target/.agent/runs',
+        retentionDays: 30,
+        maxRequestBytes: 262144,
+        maxGuidanceBytes: 1048576,
+        maxRoleHandoffBytes: 262144,
+        maxEvidenceBytes: 26214400,
+        maxTerminalCaptureBytes: 10485760,
+        maxRunBytes: 104857600,
+        redactionPatterns: [],
+      });
+      expect(data.roleRouting).toEqual([
+        { role: 'architect', harness: 'codex', model: 'gpt-5.6-luna' },
+        { role: 'coder', harness: 'codex', model: 'gpt-5.6-luna' },
+        { role: 'lead_coder', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        { role: 'tester', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        { role: 'reviewer', harness: 'codex', model: 'gpt-5.6-luna' },
+      ]);
       expect(Object.keys(data).sort()).toEqual(
-        ['artifacts', 'branch', 'roleHarness', 'source', 'taskId', 'workspace'].sort(),
+        ['artifacts', 'branch', 'roleRouting', 'source', 'taskId', 'workspace'].sort(),
       );
       expectReadOnlyGitCalls(built.gitCalls);
     }),
@@ -693,15 +742,26 @@ describe('preview run locations with fake services', () => {
       expect(humanResult.stdout).toContain(`data.source.commit: ${data.source.commit}`);
       expect(humanResult.stdout).toContain(`data.branch: ${data.branch}`);
       expect(humanResult.stdout).toContain(`data.workspace: ${data.workspace}`);
-      expect(humanResult.stdout).toContain(
-        `data.roleHarness.protocol: ${data.roleHarness.protocol}`,
-      );
+      for (const route of data.roleRouting) {
+        expect(humanResult.stdout).toContain(
+          `data.roleRouting: ${route.role} harness=${route.harness} model=${route.model}`,
+        );
+      }
       expect(humanResult.stdout).toContain(`data.artifacts.root: ${data.artifacts.root}`);
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.retentionDays: ${data.artifacts.retentionDays}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.maxRequestBytes: ${data.artifacts.maxRequestBytes}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.maxRunBytes: ${data.artifacts.maxRunBytes}`,
+      );
       expect(humanResult.stdout.endsWith('\n')).toBe(true);
     }),
   );
 
-  it.effect('maps preview failures to exit code 2 with an invalid invocation error', () =>
+  it.effect('maps preview failures to a failed report rather than an argument error', () =>
     Effect.gen(function* () {
       const world = defaultWorld();
       const built = buildWorld({
@@ -718,10 +778,10 @@ describe('preview run locations with fake services', () => {
         '--json',
       ]).pipe(Effect.provide(built.layer));
 
-      expect(result.exitCode).toBe(EXIT_CODES.invalidInvocation);
+      expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
       const envelope = expectPreviewFailure(result.stdout);
       expect(envelope.command).toBe('init');
-      expect(envelope.error.kind).toBe('invalid_invocation');
+      expect(envelope.error.kind).toBe('failed');
       expect(envelope.error.retryable).toBe(false);
       expect(envelope.error.message).toContain('is not clean');
     }),
@@ -780,6 +840,7 @@ const integrationLayer = Layer.mergeAll(
   ReadinessFilesLive,
   ReadinessGitLive,
   capableRoleHostLauncher(),
+  bundledBinariesLayer,
 );
 
 describe('preview against real temporary git repositories', () => {
@@ -806,7 +867,6 @@ describe('preview against real temporary git repositories', () => {
           expect(first.source.commit).toBe(beforeHead);
           expect(first.branch).toBe('foundry/example-change');
           expect(first.workspace).toBe(join(dir, '.agent', 'worktrees', TASK_ID));
-          expect(first.roleHarness.protocol).toBe('foundry-role-host-v1');
           expect(first.artifacts.root).toBe(join(dir, '.agent', 'runs'));
 
           const second = yield* previewRunLocations({

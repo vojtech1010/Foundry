@@ -6,6 +6,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { RunGit, RunWorkspaceBlocked } from '../../src/application/git-provisioning/index.js';
+import {
+  isPathInside,
+  isSamePathIdentity,
+  normalizePathIdentity,
+} from '../../src/domain/run-locations.js';
 import { RunGitLive } from '../../src/platform/git-provisioning.js';
 
 const RUN_ID = 'RUN-PARITY';
@@ -14,6 +19,23 @@ const TASK_BRANCH = 'foundry/parity';
 
 function git(cwd: string, args: ReadonlyArray<string>): string {
   return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
+}
+
+/**
+ * Canonicalizes a fixture path the same way the Git adapter does: native
+ * `realpath` first so Windows short (`RUNNER~1`) versus long
+ * (`runneradmin`) temp spellings expand to one spelling, falling back to the
+ * portable `realpath` for parity with production. Identity assertions then
+ * fold the remaining separator, prefix, trailing-slash, and case aliases via
+ * `isSamePathIdentity`, never by loosening containment checks.
+ */
+function canonicalFixturePath(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    // Fall through to the portable realpath below.
+  }
+  return realpathSync(path);
 }
 
 interface RepositoryFixture {
@@ -58,7 +80,9 @@ describe('temporary Git repository parity', () => {
         remote: 'origin',
         runId: RUN_ID,
       });
-      expect(identity.repositoryRoot).toBe(realpathSync(fixture.target));
+      expect(
+        isSamePathIdentity(identity.repositoryRoot, canonicalFixturePath(fixture.target)),
+      ).toBe(true);
       expect(identity.remoteUrl).toBe(fixture.remote);
 
       const missing = yield* runGit.readBranch({
@@ -131,5 +155,29 @@ describe('temporary Git repository parity', () => {
       expect(implementation.clean).toBe(true);
       expect(implementation.baseIsAncestor).toBe(true);
     }).pipe(Effect.provide(RunGitLive), Effect.ensuring(Effect.sync(fixture.cleanup)));
+  });
+});
+
+describe('repository path identity', () => {
+  it('folds Windows separator, prefix, trailing-slash, and case aliases without loosening containment', () => {
+    expect(
+      isSamePathIdentity('C:\\Users\\runneradmin\\repo', 'c:/users/runneradmin/repo', 'win32'),
+    ).toBe(true);
+    expect(
+      isSamePathIdentity(
+        '\\\\?\\C:\\Users\\runneradmin\\repo',
+        'C:\\Users\\runneradmin\\repo\\',
+        'win32',
+      ),
+    ).toBe(true);
+    expect(isSamePathIdentity('/tmp/repo', '/tmp/repo/', 'linux')).toBe(true);
+    expect(isSamePathIdentity('/tmp/Repo', '/tmp/repo', 'linux')).toBe(false);
+    expect(isSamePathIdentity('/tmp/repo', '/tmp/other', 'linux')).toBe(false);
+    expect(normalizePathIdentity('C:\\Foundry\\Root\\', 'win32')).toBe('c:/foundry/root');
+
+    // Identity folding never decides containment: the escape stays outside
+    // even when identity comparison would fold its case.
+    expect(isPathInside('/foundry/root', '/foundry/root/sub')).toBe(true);
+    expect(isPathInside('/foundry/root', '/foundry/root/sub/../../outside')).toBe(false);
   });
 });

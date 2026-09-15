@@ -1,13 +1,11 @@
 import { Effect } from 'effect';
 import { dirname, join, resolve } from 'node:path';
 
-import { NOT_AVAILABLE } from '../domain/public-commands.js';
 import {
   REQUEST_IDENTITY_FILENAME,
   REQUEST_NORMALIZED_FILENAME,
   REQUEST_ORIGINAL_FILENAME,
 } from '../domain/run-identity.js';
-import { PRODUCT_NAME } from '../domain/workflow.js';
 import { abandonRun } from './abandonment/index.js';
 import { checkProjectProfile } from './profile-check/index.js';
 import { checkReadiness } from './readiness/index.js';
@@ -56,6 +54,7 @@ import type {
   PreviewLocationsReport,
 } from './preview-run-locations/index.js';
 import type { CleanupListReport, CleanupRunReport } from '../domain/retention-cleanup.js';
+import type { InvalidProjectConfiguration } from './project-configuration.js';
 import type {
   ProfileCheckError,
   ProfileCheckReport,
@@ -64,7 +63,6 @@ import type {
 import type { OwnedProjectProcess, ProjectEvidenceStore } from './project-commands/index.js';
 import type {
   RecordedRequestFiles,
-  RecordedRunIdentityReport,
   RunIdentityError,
   RunIdentityStore as RunIdentityStoreService,
   RunProvenance,
@@ -76,15 +74,13 @@ import type {
   DiagnosticBundleReport,
 } from './diagnostic-bundle/index.js';
 import type { RepositoryHostIdentity, RepositoryLeaseStore } from './repository-lease/index.js';
-import type { RoleHostCapabilityError, RoleHostLauncher } from './role-conversations/index.js';
+import type { GitHubPublication } from './decision-publication/index.js';
+import type {
+  RoleHostBinaryResolver,
+  RoleHostCapabilityError,
+  RoleHostLauncher,
+} from './role-conversations/index.js';
 import type { RoleTurnResourceObserver } from './role-permissions/index.js';
-
-export interface StubCommandReport {
-  readonly availability: typeof NOT_AVAILABLE;
-  readonly message: string;
-  readonly runId?: string | undefined;
-  readonly taskId?: string | undefined;
-}
 
 /**
  * The authenticated human-decision outcome of a resume, included in the
@@ -105,6 +101,18 @@ export interface RunWorkflowRecovery {
   readonly reason: string;
 }
 
+/**
+ * The settled direct-merge fact of an approved changed result. It is present
+ * only in `direct-merge` mode, where the accepted commit was taken forward by
+ * updating the configured source branch instead of opening a result pull
+ * request, so `resultPullRequest` stays null.
+ */
+export interface RunWorkflowResultMerge {
+  readonly commit: string;
+  readonly sourceBranch: string;
+  readonly fastForward: boolean;
+}
+
 export interface RunWorkflowReport {
   readonly runId: string;
   readonly taskId: string;
@@ -118,14 +126,13 @@ export interface RunWorkflowReport {
   readonly decision?: RunWorkflowDecision;
   readonly recovery?: RunWorkflowRecovery;
   readonly resultPullRequest?: string | null;
+  readonly resultMerged?: RunWorkflowResultMerge;
 }
 
 export type PublicCommandReport =
-  | StubCommandReport
   | DoctorReport
   | PreviewLocationsReport
   | ProfileCheckReport
-  | RecordedRunIdentityReport
   | RunStatusReport
   | RunInspectReport
   | RunWorkflowReport
@@ -138,6 +145,7 @@ export type PublicCommandError =
   | ReadinessError
   | PreviewLocationsError
   | ProfileCheckError
+  | InvalidProjectConfiguration
   | RunIdentityError
   | RunStateUnavailable
   | RunWorkspaceBlocked
@@ -150,19 +158,6 @@ export type PublicCommandError =
   | RunHistoryStorageError
   | RunHistoryConflict
   | RetentionCleanupError;
-
-function stubReport(invocation: PublicCommandInvocation): StubCommandReport {
-  const report: StubCommandReport = {
-    availability: NOT_AVAILABLE,
-    message: `${PRODUCT_NAME} ${invocation.command} is not available yet.`,
-  };
-  const withRunId =
-    invocation.runId === undefined ? report : { ...report, runId: invocation.runId };
-  if (invocation.taskId === undefined) {
-    return withRunId;
-  }
-  return { ...withRunId, taskId: invocation.taskId };
-}
 
 function requestFilesOf(
   runDirectory: string,
@@ -185,6 +180,17 @@ function resultPullRequestOf(outcome: RunWorkflowOutcome): string | null {
   return publication !== null && publication.outcome === 'published' ? publication.url : null;
 }
 
+function resultMergedOf(outcome: RunWorkflowOutcome): RunWorkflowResultMerge | null {
+  const publication = outcome.resultPublication;
+  return publication !== null && publication.outcome === 'merged'
+    ? {
+        commit: publication.commit,
+        sourceBranch: publication.sourceBranch,
+        fastForward: publication.fastForward,
+      }
+    : null;
+}
+
 function terminalFailureFor(outcome: RunWorkflowOutcome, runId: string): RunWorkflowError | null {
   if (outcome.workflowState === 'blocked') {
     return new RunWorkflowError({
@@ -198,6 +204,13 @@ function terminalFailureFor(outcome: RunWorkflowOutcome, runId: string): RunWork
       message: `Run "${runId}" ended failed after a non-recoverable condition.`,
       runId,
       kind: 'failed',
+    });
+  }
+  if (outcome.workflowState === 'publish_failed') {
+    return new RunWorkflowError({
+      message: `Run "${runId}" ended with an unresolved decision publication; the same run must be resumed.`,
+      runId,
+      kind: 'publish_failed',
     });
   }
   return null;
@@ -217,14 +230,17 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
   | OwnedProjectProcess
   | RunIdentityStoreService
   | RunHistoryStorage
+  | GitHubPublication
   | RepositoryLeaseStore
   | RepositoryHostIdentity
   | RoleHostLauncher
+  | RoleHostBinaryResolver
   | RoleTurnResourceObserver
   | RunGit
   | GuidanceGit
   | GuidanceSnapshotStore
 > {
+  const command = invocation.command;
   if (invocation.command === 'run') {
     const configArg = invocation.config;
     const cwd = invocation.cwd;
@@ -266,7 +282,8 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       return yield* terminalFailure;
     }
     const progress = yield* reconcileRunReports({ runDirectory: recorded.runDirectory, runId });
-    const report: RunWorkflowReport = {
+    const merged = resultMergedOf(outcome);
+    const baseReport: RunWorkflowReport = {
       runId,
       taskId,
       runDirectory: recorded.runDirectory,
@@ -278,6 +295,8 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       testerSkipped: outcome.testerSkipped,
       resultPullRequest: resultPullRequestOf(outcome),
     };
+    const report: RunWorkflowReport =
+      merged === null ? baseReport : { ...baseReport, resultMerged: merged };
     if (recovery === null) {
       return report;
     }
@@ -291,12 +310,18 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
     const cwd = invocation.cwd;
     const runId = invocation.runId;
     if (configArg === undefined || cwd === undefined || runId === undefined) {
-      return stubReport(invocation);
+      return yield* new InvalidRunRequest({
+        message: 'The resume command requires --config and --run-id.',
+        runId,
+      });
     }
     if (invocation.abandon === true) {
       const reason = invocation.reason;
       if (reason === undefined) {
-        return stubReport(invocation);
+        return yield* new InvalidRunRequest({
+          message: 'resume --abandon requires --reason.',
+          runId,
+        });
       }
       const context = yield* resolveRunContext({ configArg, cwd, runId });
       return yield* abandonRun({
@@ -354,7 +379,8 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
         runId,
       });
     }
-    const report: RunWorkflowReport = {
+    const merged = resultMergedOf(outcome);
+    const baseReport: RunWorkflowReport = {
       runId,
       taskId: identity.taskId,
       runDirectory: context.runDirectory,
@@ -366,6 +392,8 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       testerSkipped: outcome.testerSkipped,
       resultPullRequest: resultPullRequestOf(outcome),
     };
+    const report: RunWorkflowReport =
+      merged === null ? baseReport : { ...baseReport, resultMerged: merged };
     const withRecovery: RunWorkflowReport =
       recovery === null
         ? report
@@ -390,7 +418,10 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
     const cwd = invocation.cwd;
     const runId = invocation.runId;
     if (configArg === undefined || cwd === undefined || runId === undefined) {
-      return stubReport(invocation);
+      return yield* new InvalidRunRequest({
+        message: 'The status command requires --config and --run-id.',
+        runId,
+      });
     }
     return yield* readRunStatus({ configArg, cwd, runId });
   }
@@ -399,7 +430,10 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
     const cwd = invocation.cwd;
     const runId = invocation.runId;
     if (configArg === undefined || cwd === undefined || runId === undefined) {
-      return stubReport(invocation);
+      return yield* new InvalidRunRequest({
+        message: 'The inspect command requires --config and --run-id.',
+        runId,
+      });
     }
     return yield* readRunInspect({ configArg, cwd, runId });
   }
@@ -414,7 +448,10 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
       runId === undefined ||
       output === undefined
     ) {
-      return stubReport(invocation);
+      return yield* new InvalidRunRequest({
+        message: 'The diagnostic-bundle command requires --config, --run-id, and --output.',
+        runId,
+      });
     }
     return yield* createDiagnosticBundle({ configArg, cwd, runId, output });
   }
@@ -422,7 +459,9 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
     const configArg = invocation.config;
     const cwd = invocation.cwd;
     if (configArg === undefined || cwd === undefined) {
-      return stubReport(invocation);
+      return yield* new InvalidRunRequest({
+        message: 'The doctor command requires --config.',
+      });
     }
     return yield* checkReadiness({ configArg, cwd });
   }
@@ -431,7 +470,9 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
     const cwd = invocation.cwd;
     const taskId = invocation.taskId;
     if (configArg === undefined || cwd === undefined || taskId === undefined) {
-      return stubReport(invocation);
+      return yield* new InvalidRunRequest({
+        message: 'The init command requires --config and --task-id.',
+      });
     }
     return yield* previewRunLocations({ configArg, cwd, taskId });
   }
@@ -439,7 +480,9 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
     const configArg = invocation.config;
     const cwd = invocation.cwd;
     if (configArg === undefined || cwd === undefined) {
-      return stubReport(invocation);
+      return yield* new InvalidRunRequest({
+        message: 'The profile-check command requires --config.',
+      });
     }
     return yield* checkProjectProfile({ configArg, cwd });
   }
@@ -447,7 +490,9 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
     const configArg = invocation.config;
     const cwd = invocation.cwd;
     if (configArg === undefined || cwd === undefined) {
-      return stubReport(invocation);
+      return yield* new InvalidRunRequest({
+        message: 'The cleanup command requires --config.',
+      });
     }
     const runId = invocation.runId;
     if (runId === undefined) {
@@ -455,9 +500,14 @@ export const executePublicCommand = Effect.fn('executePublicCommand')(function* 
     }
     const confirm = invocation.confirm;
     if (confirm === undefined) {
-      return stubReport(invocation);
+      return yield* new InvalidRunRequest({
+        message: 'cleanup --run-id requires --confirm.',
+        runId,
+      });
     }
     return yield* runRetentionCleanup({ configArg, cwd, runId, confirm });
   }
-  return stubReport(invocation);
+  return yield* new InvalidRunRequest({
+    message: `Unsupported command: ${command}.`,
+  });
 });

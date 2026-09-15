@@ -22,16 +22,26 @@ import { BRANCH_PROTECTION_NOT_CONFIGURED } from '../../domain/run-locations.js'
 
 import { invalidRedactionPatterns } from '../evidence-limits/index.js';
 import { decodeProjectConfiguration } from '../project-configuration.js';
-import { preflightRoleHostCapabilities } from '../role-conversations/index.js';
+import { verifyBundledRoleHostCapabilities } from '../role-conversations/index.js';
 
+import { ROLE_HOST_ROLES, resolveAllRoleHostRoutes } from '../../domain/role-host.js';
+import type {
+  DecisionPublicationConfiguration,
+  ProjectConfiguration,
+  ResultPublicationMergeMethod,
+  ResultPublicationMode,
+} from '../../domain/project-configuration.js';
 import type {
   PublicationCapability,
   PublicationCapabilityState,
   PublicationRepositoryScope,
 } from '../../domain/readiness.js';
-import type { DecisionPublicationConfiguration } from '../../domain/project-configuration.js';
 import type { BranchProtectionEvidence } from '../../domain/run-locations.js';
-import type { RoleHostCapabilityError, RoleHostLauncher } from '../role-conversations/index.js';
+import type { RoleHostRole } from '../../domain/role-host.js';
+import type {
+  RoleHostBinaryResolver,
+  RoleHostCapabilityError,
+} from '../role-conversations/index.js';
 
 export class ReadinessError extends Schema.TaggedError<ReadinessError>()('ReadinessError', {
   message: Schema.String,
@@ -86,6 +96,12 @@ export type PublicationCollaboratorPermission =
 
 export interface PublicationProbeRequest {
   readonly repository: string;
+  /**
+   * The source branch whose protection state matters, or `null` when the probe
+   * needs only repository-wide facts. The probe reads branch protection only for
+   * a non-null branch, so a mode that does not depend on it costs no extra call.
+   */
+  readonly branch: string | null;
 }
 
 /**
@@ -101,6 +117,8 @@ export interface PublicationProbeObservation {
   readonly issueCommentReadable: boolean | null;
   readonly tokenScopes: ReadonlyArray<string> | null;
   readonly protectedBranches: ReadonlyArray<string> | null;
+  readonly autoMergeAllowed: boolean | null;
+  readonly branchProtected: boolean | null;
   readonly limitations: ReadonlyArray<string>;
 }
 
@@ -153,9 +171,57 @@ export interface DoctorRoleHostReport {
   readonly networkProfiles: ReadonlyArray<string>;
 }
 
+export interface DoctorArtifactsReport {
+  readonly retentionDays: number;
+  readonly maxRequestBytes: number;
+  readonly maxGuidanceBytes: number;
+  readonly maxRoleHandoffBytes: number;
+  readonly maxEvidenceBytes: number;
+  readonly maxTerminalCaptureBytes: number;
+  readonly maxRunBytes: number;
+  readonly redactionPatterns: ReadonlyArray<string>;
+}
+
+export interface RoleRoutingReport {
+  readonly role: RoleHostRole;
+  readonly harness: string;
+  readonly model: string;
+}
+
+/**
+ * Resolved per-role harness/model routing for read-only reports (`doctor`,
+ * `init --dry-run`). Resolution is pure and launches nothing: it projects the
+ * typed per-role `roles` selections from the decoded project configuration
+ * (docs/tasks/053-per-role-harness-models.md) in `ROLE_HOST_ROLES` order, so
+ * the same document resolves the same routing on Linux and Windows. Each
+ * entry carries the exact configured harness and model; Foundry never
+ * invents a substitute model.
+ */
+export function resolveRoleRouting(
+  configuration: ProjectConfiguration,
+): ReadonlyArray<RoleRoutingReport> {
+  const routes = resolveAllRoleHostRoutes(configuration.roles);
+  return ROLE_HOST_ROLES.map((role) => ({ ...routes[role] }));
+}
+
 export interface DoctorPublicationCapabilityReport {
   readonly capability: PublicationCapability;
   readonly state: PublicationCapabilityState;
+}
+
+/**
+ * Additive readiness sub-report for the configured result-publication mode.
+ * `mergeMethod` is populated only for `non-draft-pr-auto-merge`; the two
+ * capability fields are `null` when the probe could not establish them, and an
+ * unconfirmed capability is ineligible rather than assumed.
+ */
+export interface DoctorResultPublicationReport {
+  readonly mode: ResultPublicationMode;
+  readonly mergeMethod: ResultPublicationMergeMethod | null;
+  readonly eligible: boolean;
+  readonly reason: string | null;
+  readonly autoMergeAllowed: boolean | null;
+  readonly sourceBranchProtected: boolean | null;
 }
 
 export interface DoctorPublicationReport {
@@ -166,6 +232,7 @@ export interface DoctorPublicationReport {
   readonly repositoryScope: PublicationRepositoryScope;
   readonly reason: string | null;
   readonly capabilities: ReadonlyArray<DoctorPublicationCapabilityReport>;
+  readonly resultPublication: DoctorResultPublicationReport | null;
 }
 
 export interface DoctorReport {
@@ -174,7 +241,9 @@ export interface DoctorReport {
   readonly storage: DoctorStorageReport;
   readonly repository: DoctorRepositoryReport;
   readonly roleHost: DoctorRoleHostReport;
+  readonly roleRouting: ReadonlyArray<RoleRoutingReport>;
   readonly publication: DoctorPublicationReport;
+  readonly artifacts: DoctorArtifactsReport;
 }
 
 export interface CheckReadinessOptions {
@@ -207,6 +276,7 @@ const NOT_CONFIGURED_PUBLICATION: DoctorPublicationReport = {
   repositoryScope: 'unknown',
   reason: null,
   capabilities: [],
+  resultPublication: null,
 };
 
 function unknownPublicationCapabilities(): ReadonlyArray<DoctorPublicationCapabilityReport> {
@@ -226,6 +296,7 @@ function unavailablePublicationReport(
     repositoryScope: 'unknown',
     reason,
     capabilities: unknownPublicationCapabilities(),
+    resultPublication: null,
   };
 }
 
@@ -280,6 +351,7 @@ function summarizePublicationObservation(
     repositoryScope,
     reason,
     capabilities,
+    resultPublication: null,
   };
 }
 
@@ -346,7 +418,7 @@ export const resolveBranchProtectionEvidence = Effect.fn('resolveBranchProtectio
         probeUnavailableReason: `GitHub publication probe is unavailable for remote "${publication.remote}".`,
       });
     }
-    const observed = yield* probe.value.observe({ repository }).pipe(Effect.result);
+    const observed = yield* probe.value.observe({ repository, branch: null }).pipe(Effect.result);
     if (Result.isFailure(observed)) {
       return branchProtectionEvidenceFromProbeResult({
         publicationConfigured: true,
@@ -395,19 +467,165 @@ export const describePublicationReadiness = Effect.fn('describePublicationReadin
       repository,
     );
   }
-  const observed = yield* probe.value.observe({ repository }).pipe(Effect.result);
+  const observed = yield* probe.value.observe({ repository, branch: null }).pipe(Effect.result);
   if (Result.isFailure(observed)) {
     return unavailablePublicationReport(observed.failure.message, publication.remote, repository);
   }
   return summarizePublicationObservation(publication.remote, repository, observed.success);
 });
 
+function resultPublicationReport(input: {
+  readonly mode: ResultPublicationMode;
+  readonly mergeMethod: ResultPublicationMergeMethod;
+  readonly eligible: boolean;
+  readonly reason: string | null;
+  readonly autoMergeAllowed: boolean | null;
+  readonly sourceBranchProtected: boolean | null;
+}): DoctorResultPublicationReport {
+  return {
+    mode: input.mode,
+    mergeMethod: input.mode === 'non-draft-pr-auto-merge' ? input.mergeMethod : null,
+    eligible: input.eligible,
+    reason: input.reason,
+    autoMergeAllowed: input.autoMergeAllowed,
+    sourceBranchProtected: input.sourceBranchProtected,
+  };
+}
+
+/**
+ * Resolves the mode-specific result-publication readiness without changing the
+ * decision-channel report. `non-draft-pr-auto-merge` additionally requires
+ * repository auto-merge and a protected source branch; `direct-merge` requires
+ * push authority over an unprotected source branch. Any unconfirmed fact makes
+ * the mode ineligible with a specific reason.
+ */
+export const describeResultPublicationReadiness = Effect.fn('describeResultPublicationReadiness')(
+  function* (
+    mode: ResultPublicationMode,
+    mergeMethod: ResultPublicationMergeMethod,
+    publication: DecisionPublicationConfiguration | null,
+    repositoryPath: string,
+    sourceBranch: string,
+  ): Effect.fn.Return<DoctorResultPublicationReport, ReadinessError, ReadinessGit> {
+    const ineligible = (
+      reason: string,
+      autoMergeAllowed: boolean | null,
+      sourceBranchProtected: boolean | null,
+    ): DoctorResultPublicationReport =>
+      resultPublicationReport({
+        mode,
+        mergeMethod,
+        eligible: false,
+        reason,
+        autoMergeAllowed,
+        sourceBranchProtected,
+      });
+
+    if (publication === null) {
+      return ineligible(
+        'Result publication requires GitHub publication to be configured.',
+        null,
+        null,
+      );
+    }
+    const git = yield* ReadinessGit;
+    const remoteUrlResult = yield* git.run(
+      ['remote', 'get-url', publication.remote],
+      repositoryPath,
+    );
+    if (remoteUrlResult.exitCode !== 0 || remoteUrlResult.stdout.trim().length === 0) {
+      return ineligible(
+        `Cannot resolve publication remote "${publication.remote}" in target repository at ${repositoryPath}.`,
+        null,
+        null,
+      );
+    }
+    const reference = parseGitHubRepositoryRemote(remoteUrlResult.stdout);
+    if (reference === undefined) {
+      return ineligible(
+        `Publication remote "${publication.remote}" is not a GitHub repository.`,
+        null,
+        null,
+      );
+    }
+    const repository = renderGitHubRepository(reference);
+    const probe = yield* Effect.serviceOption(PublicationProbe);
+    if (Option.isNone(probe)) {
+      return ineligible(
+        `GitHub publication probe is unavailable for remote "${publication.remote}".`,
+        null,
+        null,
+      );
+    }
+    const needsBranchProtection = mode === 'non-draft-pr-auto-merge' || mode === 'direct-merge';
+    const branch = needsBranchProtection ? sourceBranch : null;
+    const observed = yield* probe.value.observe({ repository, branch }).pipe(Effect.result);
+    if (Result.isFailure(observed)) {
+      return ineligible(observed.failure.message, null, null);
+    }
+    const observation = observed.success;
+    const autoMergeAllowed = observation.autoMergeAllowed;
+    const sourceBranchProtected = observation.branchProtected;
+
+    if (mode === 'direct-merge') {
+      let reason: string | null = null;
+      if (!observation.tokenPresent) {
+        reason = 'GITHUB_TOKEN is not set for the configured publication remote.';
+      } else if (!githubRepositoriesMatch(observation.repository, repository)) {
+        reason = `Credential identifies GitHub repository "${observation.repository}" instead of the configured publication repository "${repository}".`;
+      } else if (publicationRepositoryScope(observation.tokenScopes) === 'broad') {
+        reason = 'Credential is not limited to the configured publication repository.';
+      } else if (!observation.push) {
+        reason = 'Credential cannot confirm push capability for "direct-merge".';
+      } else if (sourceBranchProtected !== false) {
+        reason = `Source branch "${sourceBranch}" is protected or its protection could not be established; "direct-merge" cannot push to a protected branch and Foundry never bypasses branch protection.`;
+      }
+      return resultPublicationReport({
+        mode,
+        mergeMethod,
+        eligible: reason === null,
+        reason,
+        autoMergeAllowed,
+        sourceBranchProtected,
+      });
+    }
+
+    const base = summarizePublicationObservation(publication.remote, repository, observation);
+    if (mode === 'non-draft-pr-auto-merge') {
+      let reason = base.reason;
+      if (reason === null && autoMergeAllowed !== true) {
+        reason =
+          'GitHub auto-merge is not enabled for the configured repository; "non-draft-pr-auto-merge" requires it.';
+      }
+      if (reason === null && sourceBranchProtected !== true) {
+        reason = `Source branch "${sourceBranch}" is not protected or its protection could not be established; GitHub auto-merge would silently no-op, so "non-draft-pr-auto-merge" is ineligible.`;
+      }
+      return resultPublicationReport({
+        mode,
+        mergeMethod,
+        eligible: reason === null,
+        reason,
+        autoMergeAllowed,
+        sourceBranchProtected,
+      });
+    }
+    return resultPublicationReport({
+      mode,
+      mergeMethod,
+      eligible: base.eligible,
+      reason: base.reason,
+      autoMergeAllowed,
+      sourceBranchProtected,
+    });
+  },
+);
+
 export const checkReadiness = Effect.fn('checkReadiness')(function* (
   options: CheckReadinessOptions,
 ): Effect.fn.Return<
   DoctorReport,
   ReadinessError | RoleHostCapabilityError,
-  ReadinessHost | ReadinessFiles | ReadinessGit | RoleHostLauncher
+  ReadinessHost | ReadinessFiles | ReadinessGit | RoleHostBinaryResolver
 > {
   const host = yield* ReadinessHost;
   const files = yield* ReadinessFiles;
@@ -579,12 +797,22 @@ export const checkReadiness = Effect.fn('checkReadiness')(function* (
     }
   }
 
-  const capabilities = yield* preflightRoleHostCapabilities({ configuration });
+  const capabilities = yield* verifyBundledRoleHostCapabilities({ configuration });
 
   const publication = yield* describePublicationReadiness(
     configuration.decisionPublication,
     repositoryPath,
   );
+  const resultPublication =
+    configuration.decisionPublication === null
+      ? null
+      : yield* describeResultPublicationReadiness(
+          configuration.resultPublication.mode,
+          configuration.resultPublication.mergeMethod,
+          configuration.decisionPublication,
+          repositoryPath,
+          configuration.sourceBranch,
+        );
 
   return {
     host: {
@@ -615,6 +843,17 @@ export const checkReadiness = Effect.fn('checkReadiness')(function* (
       filesystemProfiles: [...capabilities.capabilityProfiles.filesystem],
       networkProfiles: [...capabilities.capabilityProfiles.network],
     },
-    publication,
+    roleRouting: resolveRoleRouting(configuration),
+    publication: { ...publication, resultPublication },
+    artifacts: {
+      retentionDays: configuration.artifacts.retentionDays,
+      maxRequestBytes: configuration.artifacts.maxRequestBytes,
+      maxGuidanceBytes: configuration.artifacts.maxGuidanceBytes,
+      maxRoleHandoffBytes: configuration.artifacts.maxRoleHandoffBytes,
+      maxEvidenceBytes: configuration.artifacts.maxEvidenceBytes,
+      maxTerminalCaptureBytes: configuration.artifacts.maxTerminalCaptureBytes,
+      maxRunBytes: configuration.artifacts.maxRunBytes,
+      redactionPatterns: [...configuration.artifacts.redactionPatterns],
+    },
   };
 });

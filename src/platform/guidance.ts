@@ -8,6 +8,7 @@ import {
   GuidanceSnapshotStore,
   GuidanceStorageError,
 } from '../application/guidance/index.js';
+import { HARDCODED_ARTIFACT_BOUNDS } from '../domain/project-configuration.js';
 import { writeFileAtomically } from './atomic-file.js';
 
 import type {
@@ -32,8 +33,13 @@ function boundCause(cause: unknown): string {
   return String(cause).replaceAll(/\s+/gu, ' ').trim().slice(0, 500);
 }
 
+// 055: the read cap must exceed the per-file guidance enforcement ceiling so
+// that over-limit files stay readable (and rejectable as too-large). Blobs
+// past this cap still fail closed at the read instead of hanging memory.
+const GIT_BLOB_READ_CAP_BYTES = HARDCODED_ARTIFACT_BOUNDS.maxGuidanceBytes * 2;
+
 function runGit(args: ReadonlyArray<string>, cwd: string): GitBufferOutcome {
-  const result = spawnSync('git', [...args], { cwd });
+  const result = spawnSync('git', [...args], { cwd, maxBuffer: GIT_BLOB_READ_CAP_BYTES });
   return {
     stdout: result.stdout ?? Buffer.alloc(0),
     stderr: result.stderr?.toString('utf8') ?? '',

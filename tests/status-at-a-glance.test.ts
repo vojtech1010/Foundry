@@ -402,10 +402,12 @@ function goldenConfiguration(targetRepository: string) {
     sourceRemote: 'origin',
     sourceBranch: 'main',
     taskBranchPolicy: 'foundry/<task-id>',
-    roleHarness: {
-      protocol: 'foundry-role-host-v1',
-      command: ['foundry-role-host'],
-      environmentAllowlist: [],
+    roles: {
+      architect: { harness: 'codex', model: 'gpt-5.6-luna' },
+      coder: { harness: 'codex', model: 'gpt-5.6-luna' },
+      lead_coder: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      tester: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      reviewer: { harness: 'codex', model: 'gpt-5.6-luna' },
     },
     timeouts: {
       roleMs: 1800000,
@@ -432,16 +434,6 @@ function goldenConfiguration(targetRepository: string) {
     },
     runtimeProfile: null,
     decisionPublication: null,
-    artifacts: {
-      retentionDays: 30,
-      maxRequestBytes: 262144,
-      maxGuidanceBytes: 1048576,
-      maxRoleHandoffBytes: 262144,
-      maxEvidenceBytes: 26214400,
-      maxTerminalCaptureBytes: 10485760,
-      maxRunBytes: 104857600,
-      redactionPatterns: [],
-    },
   };
 }
 

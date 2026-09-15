@@ -473,6 +473,43 @@ function seedRecordedResultPullRequest(fixture: Fixture) {
   }).pipe(Effect.provide(RunHistoryLive));
 }
 
+function seedRecordedResultMerge(fixture: Fixture) {
+  return Effect.gen(function* () {
+    const stages = [
+      { stage: 'pre-push' as const, detail: 'verified the task branch' },
+      { stage: 'source-branch-updated' as const, detail: 'updated the source branch' },
+    ];
+    for (const stage of stages) {
+      yield* appendRunEvent({
+        runDirectory: fixture.runDirectory,
+        runId: RUN_ID,
+        createIfMissing: false,
+        build: () =>
+          Effect.succeed({
+            type: 'result-pr-checkpoint',
+            payload: { ...stage, url: null, commit: RESULT_COMMIT },
+          } as const),
+      });
+    }
+    yield* appendRunEvent({
+      runDirectory: fixture.runDirectory,
+      runId: RUN_ID,
+      createIfMissing: false,
+      build: () =>
+        Effect.succeed({
+          type: 'result-merge-recorded',
+          payload: {
+            commit: RESULT_COMMIT,
+            taskBranch: TASK_BRANCH,
+            remote: 'origin',
+            sourceBranch: 'main',
+            fastForward: true,
+          },
+        } as const),
+    });
+  }).pipe(Effect.provide(RunHistoryLive));
+}
+
 function reconcile(fixture: Fixture) {
   return reconcileHandoff({ runDirectory: fixture.runDirectory, runId: RUN_ID }).pipe(
     Effect.provide(RunHistoryLive),
@@ -511,6 +548,7 @@ function emptyDerived(): RunHistoryDerivedState {
     evidenceManifests: [],
     resultPrCheckpoints: [],
     resultPrRecorded: null,
+    resultMergeRecorded: null,
   };
 }
 
@@ -586,7 +624,34 @@ describe('canonical handoff for completed runs', () => {
         expect(document.publication.created).toBe(true);
         expect(document.publication.kind).toBe('result');
         expect(document.publication.url).toBe('https://github.com/example/target/pull/9');
+        expect(document.publication.merged).toBeNull();
         expect(document.publication.reason).toContain('result pull request');
+      } finally {
+        fixture.cleanup();
+      }
+    }),
+  );
+
+  it.effect('records the direct-merge fact for a change taken forward without a PR', () =>
+    Effect.gen(function* () {
+      const fixture = setupFixture();
+      try {
+        yield* seedChangeToCompletion(fixture);
+        yield* seedRecordedResultMerge(fixture);
+        const result = yield* reconcile(fixture);
+        expect(result).not.toBeNull();
+
+        const document = readHandoff(fixture);
+        expect(document.kind).toBe('change');
+        expect(document.publication.created).toBe(false);
+        expect(document.publication.kind).toBe('result');
+        expect(document.publication.url).toBeNull();
+        expect(document.publication.merged).toEqual({
+          commit: RESULT_COMMIT,
+          sourceBranch: 'main',
+          fastForward: true,
+        });
+        expect(document.publication.reason).toContain('direct merge');
       } finally {
         fixture.cleanup();
       }

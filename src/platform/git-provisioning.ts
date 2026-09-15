@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { Effect, Layer, Schema } from 'effect';
 
 import { RunGit, RunWorkspaceBlocked } from '../application/git-provisioning/index.js';
-import { GitCommitId } from '../domain/run-locations.js';
+import { GitCommitId, isSamePathIdentity } from '../domain/run-locations.js';
 
 import type {
   BranchObservation,
@@ -78,11 +78,38 @@ function successfulGitOutput(
   return Effect.succeed(outcome.stdout);
 }
 
+function stripExtendedPathPrefix(path: string): string {
+  if (path.startsWith('\\\\?\\')) {
+    const without = path.slice('\\\\?\\'.length);
+    if (without.startsWith('UNC\\')) {
+      return `\\${without.slice('UNC\\'.length)}`;
+    }
+    return without;
+  }
+  return path;
+}
+
+/**
+ * Canonicalizes a repository path for identity outputs and comparisons.
+ * Uses the native `realpath` first so Windows short (`RUNNER~1`) versus
+ * long (`runneradmin`) spellings of the same temp directory expand to one
+ * spelling before identity comparison folds the remaining separator, prefix,
+ * trailing-slash, and case aliases via `isSamePathIdentity`. Falls back to
+ * `resolve` for paths that do not exist yet (for example a worktree wanted
+ * path before creation). Never use the folded comparison for containment:
+ * path-escape checks stay on strict canonical paths.
+ */
 function canonicalPath(path: string): string {
+  const trimmed = path.trim();
   try {
-    return realpathSync(path);
+    return stripExtendedPathPrefix(realpathSync.native(trimmed));
   } catch {
-    return resolve(path);
+    // Fall through to the portable realpath below.
+  }
+  try {
+    return stripExtendedPathPrefix(realpathSync(trimmed));
+  } catch {
+    return resolve(trimmed);
   }
 }
 
@@ -277,7 +304,7 @@ const readWorktree = Effect.fn('runGit.readWorktree')(function* (
   );
   const wanted = canonicalPath(options.workspace);
   for (const entry of parseWorktreeList(output)) {
-    if (canonicalPath(entry.path) === wanted) {
+    if (isSamePathIdentity(canonicalPath(entry.path), wanted)) {
       return {
         registered: true,
         checkedOutBranch: entry.checkedOutBranch,

@@ -3,6 +3,7 @@ import { Effect, Layer, Schema } from 'effect';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -12,7 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { RunGit, RunWorkspaceBlocked } from '../src/application/git-provisioning/index.js';
@@ -82,20 +83,19 @@ interface RepositoryFixture {
   readonly cleanup: () => void;
 }
 
-function goldenDocument(
-  targetRepository: string,
-  roleHarnessCommand: ReadonlyArray<string> = ['foundry-role-host'],
-) {
+function goldenDocument(targetRepository: string) {
   return {
     schemaVersion: 1,
     targetRepository,
     sourceRemote: 'origin',
     sourceBranch: 'main',
     taskBranchPolicy: 'foundry/<task-id>',
-    roleHarness: {
-      protocol: 'foundry-role-host-v1',
-      command: roleHarnessCommand,
-      environmentAllowlist: [],
+    roles: {
+      architect: { harness: 'codex', model: 'gpt-5.6-luna' },
+      coder: { harness: 'codex', model: 'gpt-5.6-luna' },
+      lead_coder: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      tester: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      reviewer: { harness: 'codex', model: 'gpt-5.6-luna' },
     },
     timeouts: {
       roleMs: 1800000,
@@ -122,23 +122,10 @@ function goldenDocument(
     },
     runtimeProfile: null,
     decisionPublication: null,
-    artifacts: {
-      retentionDays: 30,
-      maxRequestBytes: 262144,
-      maxGuidanceBytes: 1048576,
-      maxRoleHandoffBytes: 262144,
-      maxEvidenceBytes: 26214400,
-      maxTerminalCaptureBytes: 10485760,
-      maxRunBytes: 104857600,
-      redactionPatterns: [],
-    },
   };
 }
 
-function setupRepositoryFixture(
-  label: string,
-  roleHarnessCommand: ReadonlyArray<string> = ['foundry-role-host'],
-): RepositoryFixture {
+function setupRepositoryFixture(label: string): RepositoryFixture {
   const base = mkdtempSync(join(tmpdir(), `foundry-workspace-${label}-`));
   const target = join(base, 'target');
   const remote = join(base, 'remote.git');
@@ -155,7 +142,7 @@ function setupRepositoryFixture(
   git(target, ['remote', 'add', 'origin', remote]);
   git(target, ['push', '-u', 'origin', 'main']);
   const configPath = join(home, 'foundry.config.json');
-  writeFileSync(configPath, JSON.stringify(goldenDocument(target, roleHarnessCommand)));
+  writeFileSync(configPath, JSON.stringify(goldenDocument(target)));
   const requestPath = join(home, 'request.md');
   writeFileSync(requestPath, `# Outcome\n\n${label}\n`);
   return {
@@ -559,12 +546,21 @@ describe('run-owned workspace provisioning', () => {
 
   it.effect('rejects an incapable role host before provisioning any run-owned resource', () =>
     Effect.gen(function* () {
-      const fixture = setupRepositoryFixture('incapable', [
-        process.execPath,
-        FIXTURE_PATH,
-        'not-resumable',
-        join(tmpdir(), 'foundry-role-host-incapable.log'),
-      ]);
+      if (process.platform === 'win32') {
+        // The PATH shim below relies on POSIX executable resolution; Windows
+        // executable resolution (PATHEXT) is covered by the parity suites.
+        return;
+      }
+      const fixture = setupRepositoryFixture('incapable');
+      const shimDirectory = mkdtempSync(join(tmpdir(), 'foundry-workspace-shim-'));
+      const shimLog = join(tmpdir(), 'foundry-role-host-incapable.log');
+      writeFileSync(
+        join(shimDirectory, 'codex'),
+        `#!/bin/sh\nexec "${process.execPath}" "${FIXTURE_PATH}" not-resumable "${shimLog}" "$1"\n`,
+      );
+      chmodSync(join(shimDirectory, 'codex'), 0o755);
+      const previousPath = process.env.PATH;
+      process.env.PATH = `${shimDirectory}${delimiter}${previousPath ?? ''}`;
       try {
         const error = yield* record(
           fixture,
@@ -584,6 +580,12 @@ describe('run-owned workspace provisioning', () => {
         expect(existsSync(join(fixture.target, '.agent', 'worktrees', TASK_ID))).toBe(false);
         expect(gitIn(fixture.target, ['branch', '--list', `foundry/${TASK_ID}`]).trim()).toBe('');
       } finally {
+        if (previousPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = previousPath;
+        }
+        rmSync(shimDirectory, { recursive: true, force: true });
         fixture.cleanup();
       }
     }),

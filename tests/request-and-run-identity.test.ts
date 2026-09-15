@@ -50,6 +50,7 @@ import {
   normalizeRequestPromptText,
 } from '../src/domain/run-identity.js';
 import { EXIT_CODES } from '../src/domain/public-commands.js';
+import { HARDCODED_ARTIFACT_BOUNDS } from '../src/domain/project-configuration.js';
 import { REPOSITORY_LEASE_FILENAME } from '../src/domain/repository-lease.js';
 import {
   ACTIVE_WORKFLOW_STATES,
@@ -114,17 +115,21 @@ function sha256Hex(bytes: Uint8Array): string {
   return createHash('sha256').update(Buffer.from(bytes)).digest('hex');
 }
 
-function goldenDocument(targetRepository: string, maxRequestBytes = 262144) {
+function goldenDocument(targetRepository: string) {
+  // 055: artifact bounds are hardcoded; the document carries no `artifacts`
+  // block and the oversized-request test generates content past the fixed bound.
   return {
     schemaVersion: 1,
     targetRepository,
     sourceRemote: 'origin',
     sourceBranch: 'main',
     taskBranchPolicy: 'foundry/<task-id>',
-    roleHarness: {
-      protocol: 'foundry-role-host-v1',
-      command: ['foundry-role-host'],
-      environmentAllowlist: ['OPENAI_API_KEY'],
+    roles: {
+      architect: { harness: 'codex', model: 'gpt-5.6-luna' },
+      coder: { harness: 'codex', model: 'gpt-5.6-luna' },
+      lead_coder: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      tester: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      reviewer: { harness: 'codex', model: 'gpt-5.6-luna' },
     },
     timeouts: {
       roleMs: 1800000,
@@ -151,16 +156,6 @@ function goldenDocument(targetRepository: string, maxRequestBytes = 262144) {
     },
     runtimeProfile: null,
     decisionPublication: null,
-    artifacts: {
-      retentionDays: 30,
-      maxRequestBytes,
-      maxGuidanceBytes: 1048576,
-      maxRoleHandoffBytes: 262144,
-      maxEvidenceBytes: 26214400,
-      maxTerminalCaptureBytes: 10485760,
-      maxRunBytes: 104857600,
-      redactionPatterns: [],
-    },
   };
 }
 
@@ -178,7 +173,7 @@ function gitExec(cwd: string, args: ReadonlyArray<string>): string {
   return execFileSync('git', [...args], { cwd, encoding: 'utf8' });
 }
 
-function setupFixture(options?: { readonly maxRequestBytes?: number }): Fixture {
+function setupFixture(): Fixture {
   const base = mkdtempSync(join(tmpdir(), 'foundry-run-identity-'));
   const target = join(base, 'target');
   const remote = join(base, 'remote.git');
@@ -195,10 +190,7 @@ function setupFixture(options?: { readonly maxRequestBytes?: number }): Fixture 
   gitExec(target, ['remote', 'add', 'origin', remote]);
   gitExec(target, ['push', '-u', 'origin', 'main']);
   const configPath = join(home, 'foundry.config.json');
-  writeFileSync(
-    configPath,
-    JSON.stringify(goldenDocument(target, options?.maxRequestBytes ?? 262144)),
-  );
+  writeFileSync(configPath, JSON.stringify(goldenDocument(target)));
   const requestPath = join(home, 'request.md');
   return {
     base,
@@ -592,9 +584,13 @@ describe('recordRunIdentity with live storage', () => {
 
   it.effect('refuses an oversized request without creating a run directory', () =>
     Effect.gen(function* () {
-      const fixture = setupFixture({ maxRequestBytes: 16 });
+      const fixture = setupFixture();
       try {
-        writeFileSync(fixture.requestPath, 'x'.repeat(17));
+        // 055: exceed the fixed maxRequestBytes by an exact bounded amount.
+        writeFileSync(
+          fixture.requestPath,
+          'x'.repeat(HARDCODED_ARTIFACT_BOUNDS.maxRequestBytes + 17),
+        );
         const error = yield* recordWithLive({
           configPath: fixture.configPath,
           requestPath: fixture.requestPath,
@@ -1335,7 +1331,7 @@ describe('run command through the cli envelope', () => {
     }),
   );
 
-  it.effect('refuses a duplicate run ID with exit code 2 and keeps the first run intact', () =>
+  it.effect('refuses a duplicate run ID with exit code 1 and keeps the first run intact', () =>
     Effect.gen(function* () {
       const fixture = setupFixture();
       try {
@@ -1370,10 +1366,10 @@ describe('run command through the cli envelope', () => {
           'RUN-CLI-DUP',
           '--json',
         ]);
-        expect(second.exitCode).toBe(EXIT_CODES.invalidInvocation);
+        expect(second.exitCode).toBe(EXIT_CODES.operationFailed);
         const failure = expectRecordedFailure(second.stdout);
         expect(failure.command).toBe('run');
-        expect(failure.error.kind).toBe('invalid_invocation');
+        expect(failure.error.kind).toBe('failed');
         expect(failure.error.retryable).toBe(false);
         expect(failure.error.runId).toBe('RUN-CLI-DUP');
         expect(readFileSync(data.request.originalPath, 'utf8')).toBe(before);
@@ -1383,7 +1379,7 @@ describe('run command through the cli envelope', () => {
     }),
   );
 
-  it.effect('maps request validation failures to exit code 2 with the run ID', () =>
+  it.effect('maps request validation failures to a failed report with the run ID', () =>
     Effect.gen(function* () {
       const fixture = setupFixture();
       try {
@@ -1401,9 +1397,9 @@ describe('run command through the cli envelope', () => {
           '--json',
         ]).pipe(Effect.provide(CliLayer));
 
-        expect(result.exitCode).toBe(EXIT_CODES.invalidInvocation);
+        expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
         const failure = expectRecordedFailure(result.stdout);
-        expect(failure.error.kind).toBe('invalid_invocation');
+        expect(failure.error.kind).toBe('failed');
         expect(failure.error.retryable).toBe(false);
         expect(failure.error.runId).toBe('RUN-CLI-EMPTY');
         expect(existsSync(fixture.runDirectory('RUN-CLI-EMPTY'))).toBe(false);
@@ -1814,9 +1810,9 @@ describe('repository lease through the run command', () => {
           Effect.provide(CliLayer),
         );
 
-        expect(result.exitCode).toBe(EXIT_CODES.invalidInvocation);
+        expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
         const failure = expectRecordedFailure(result.stdout);
-        expect(failure.error.kind).toBe('invalid_invocation');
+        expect(failure.error.kind).toBe('failed');
         expect(existsSync(leasePathOf(fixture))).toBe(false);
         expect(existsSync(join(fixture.target, '.agent', 'runs'))).toBe(false);
       } finally {

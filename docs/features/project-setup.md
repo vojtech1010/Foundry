@@ -10,7 +10,8 @@ branches, execution worktrees, and ignored `.agent` run data.
 - a clean target Git repository;
 - a reachable authoritative source remote and branch;
 - project-owned deterministic verification commands;
-- one configured live role harness for real runs; and
+- one harness and model per role for real runs, served by the bundled role
+  host (required harness binaries installed: `codex`, `opencode`); and
 - a `GITHUB_TOKEN` environment credential only if Reviewer decision escalation
   may publish a draft PR.
 
@@ -35,10 +36,12 @@ command always drives the autonomous workflow.
   "sourceRemote": "origin",
   "sourceBranch": "main",
   "taskBranchPolicy": "foundry/<task-id>",
-  "roleHarness": {
-    "protocol": "foundry-role-host-v1",
-    "command": ["foundry-role-host"],
-    "environmentAllowlist": ["OPENAI_API_KEY"]
+  "roles": {
+    "architect": { "harness": "codex", "model": "gpt-5.6-luna" },
+    "coder": { "harness": "codex", "model": "gpt-5.6-luna" },
+    "lead_coder": { "harness": "opencode", "model": "opencode-go/glm-5.3-flash" },
+    "tester": { "harness": "opencode", "model": "opencode-go/glm-5.3-flash" },
+    "reviewer": { "harness": "codex", "model": "gpt-5.6-luna" }
   },
   "timeouts": {
     "roleMs": 1800000,
@@ -93,15 +96,8 @@ command always drives the autonomous workflow.
     "draft": true,
     "maintainersCanModify": false
   },
-  "artifacts": {
-    "retentionDays": 30,
-    "maxRequestBytes": 262144,
-    "maxGuidanceBytes": 1048576,
-    "maxRoleHandoffBytes": 262144,
-    "maxEvidenceBytes": 26214400,
-    "maxTerminalCaptureBytes": 10485760,
-    "maxRunBytes": 104857600,
-    "redactionPatterns": []
+  "resultPublication": {
+    "mode": "non-draft-pr"
   }
 }
 ```
@@ -113,6 +109,39 @@ must be rejected. Projects without a safely prepared application runtime set
 `decisionPublication` to `null`. Both keys are always present; JSON `null` is
 the omission form.
 
+`roles` names one harness and model per role (`architect`, `coder`,
+`lead_coder`, `tester`, `reviewer`). Each harness is a supported harness name
+(`codex`, `opencode`) and each model is a non-empty model string resolved
+against that harness's own catalog. A valid document is accepted only when
+every role names a supported harness and model; unknown harnesses, missing
+roles, or extra fields fail before work starts. Per-role selection is the
+only harness-related configuration: a document containing the removed
+`roleHarness` block (`protocol`, `command`, `environmentAllowlist`) is
+rejected as an unknown field under the closed-document rule. Foundry ships
+its role host instead of spawning an externally configured one: the exact
+command line used to launch each harness is hardcoded in Foundry per harness
+and platform (only executable resolution varies between Linux and Windows),
+never carried in configuration. There is still one operating model and one
+role-host protocol.
+
+Provider credentials are read by the Foundry process itself from its own
+environment and forwarded to launched harnesses. Exactly one credential name
+is read: `OPENAI_API_KEY`. Credential values never reach configuration,
+prompts, or logs; only the hardcoded name list plus `PATH` (forwarded so
+launched CLIs resolve their own runtime) reach a harness process. The
+accepted costs are explicit: Foundry releases now track vendor CLI changes,
+and the credential and workflow trust domains share one process.
+
+Artifact bounds are hardcoded, not configured. A document containing an
+`artifacts` block is rejected as an unknown field under the closed-document
+rule. One hardcoded set applies to every run on every project: `retentionDays`
+30, `maxRequestBytes` 262144, `maxGuidanceBytes` 1048576, `maxRoleHandoffBytes`
+262144, `maxEvidenceBytes` 26214400, `maxTerminalCaptureBytes` 10485760, and
+`maxRunBytes` 104857600, plus the hardcoded `redactionPatterns`. The accepted
+cost is explicit: projects can no longer extend `redactionPatterns` with their
+own secret shapes; the hardcoded set plus never persisting credentials is the
+whole accidental-disclosure defense.
+
 `decisionPublication.draft` is always `true` and `maintainersCanModify` is
 always `false`; non-draft or mutable-head automated publication is unsupported.
 The publication remote must equal `sourceRemote`.
@@ -122,6 +151,18 @@ timeout meanings are defined in [protocol contracts](protocol-contracts.md).
 Every command is a non-empty argument vector of non-empty strings. The five
 verification commands are required; `bootstrap` may be `null`. A non-null
 `runtimeProfile` contains every displayed field.
+
+`resultPublication` is an optional additive key. Omitting it preserves the
+legacy behavior with effective mode `non-draft-pr`, so existing version-1
+documents decode unchanged. When the object is present, `mode` is required and
+must be one of `draft-pr`, `non-draft-pr`, `non-draft-pr-auto-merge`, or
+`direct-merge`. `mergeMethod` (`merge`, `squash`, or `rebase`, default `merge`)
+is only legal with `non-draft-pr-auto-merge`; supplying it with any other mode is
+rejected. Because every mode reuses `decisionPublication.remote` for repository
+identity and credentials, `resultPublication` requires `decisionPublication` to
+be configured; declaring the mode while decision publication is `null` is
+rejected. The resolved `resultPublication` is always present for consumers, with
+mode `non-draft-pr` and merge method `merge` when the key is absent.
 
 ## Validate before work
 
@@ -133,8 +174,8 @@ node dist/cli/index.js profile-check --config .\target\.agent\foundry.config.jso
 
 - `doctor` validates tooling, configuration, storage, target identity, runtime,
   and optional GitHub decision-publication readiness.
-- `init --dry-run` displays resolved source, branch, worktree, harness, and
-  artifact paths without mutation. It first reuses the `doctor` readiness check,
+- `init --dry-run` displays resolved source, branch, worktree, per-role routing,
+  and artifact paths without mutation. It first reuses the `doctor` readiness check,
   so every configuration and identity problem `doctor` would catch also fails
   the preview. It then reports:
   - `source`: the configured `sourceRemote` and `sourceBranch` plus the reachable
@@ -143,16 +184,22 @@ node dist/cli/index.js profile-check --config .\target\.agent\foundry.config.jso
     by the invocation task ID, which must be a legal Git branch ref and must not
     equal the source branch;
   - `workspace`: `<target>/.agent/worktrees/<task-id>`;
-  - `roleHarness`: the configured `protocol` and resolved `command` vector; and
+  - `roleRouting`: the resolved per-role routing (harness and model) from the
+    bundled host without launching anything; and
   - `artifacts.root`: `<target>/.agent/runs`, under which later run directories
-    appear. The preview creates nothing and leaves Git status, HEAD, and the
-    current branch unchanged.
+    appear, plus the effective hardcoded artifact bounds. The preview creates
+    nothing and leaves Git status, HEAD, and the current branch unchanged.
 - `profile-check` runs configured project commands in order and fails if they
   mutate tracked Git state.
 
-`doctor` also calls the role host's `capabilities` operation. A live run is
-rejected before source provisioning when the adapter cannot resume sessions or
-enforce the role capability profiles.
+`doctor` verifies the bundled role host directly, without spawning anything:
+required harness binaries are present on the process `PATH`, every listed
+model resolves against its harness catalog, and every role plus the required
+capability profiles are covered. A live run is additionally gated before
+source provisioning on the bundled host attesting resumable sessions and the
+role capability profiles. Both `doctor` and `init --dry-run` report
+the resolved per-role routing (harness and model) and the effective hardcoded
+artifact bounds without launching anything.
 
 ## Provisioning identity
 
@@ -227,8 +274,8 @@ source commit, excluding `.git` and `.agent`, plus the tracked files explicitly
 listed in `projectProfile.guidancePaths`. A missing, untracked, escaping, or
 oversized configured path fails preflight. Committed bytes are authoritative:
 a live file that differs, or an untracked live file at a listed path, never
-changes the snapshot. Each file and the aggregate are bounded by
-`artifacts.maxGuidanceBytes`, and invalid UTF-8 text is rejected. Saved guidance
+changes the snapshot. Each file and the aggregate are bounded by the hardcoded
+`maxGuidanceBytes`, and invalid UTF-8 text is rejected. Saved guidance
 is immutable for the run, hashed, size-bounded, and injected through the prompt
 contract. More deeply nested `AGENTS.md` files apply to their subtree using the
 same precedence as normal repository instructions.
@@ -274,6 +321,29 @@ When `decisionPublication` is configured, `doctor` reports a closed
   `unknown`; and
 - `reason` is a specific, bounded explanation whenever publication is not
   eligible, or `null` when it is eligible.
+
+When a result-publication mode is configured (or defaulted), `doctor` also
+reports `publication.resultPublication` with the effective `mode`, its
+`mergeMethod` (`null` unless the mode is `non-draft-pr-auto-merge`), `eligible`,
+a specific `reason` whenever it is ineligible, and the probed
+`autoMergeAllowed` and `sourceBranchProtected` facts (`null` when the probe
+could not establish them). The modes gate as follows:
+
+- `draft-pr` and `non-draft-pr` are eligible exactly when the decision-channel
+  `publication` report is eligible;
+- `non-draft-pr-auto-merge` additionally requires repository auto-merge
+  (`autoMergeAllowed === true`) and a protected source branch
+  (`sourceBranchProtected === true`); GitHub silently ignores auto-merge without
+  branch protection, so an unconfirmed protection fact is ineligible;
+- `direct-merge` requires push authority and an unprotected source branch
+  (`sourceBranchProtected === false`); a protected or unconfirmed branch is
+  ineligible because branch protection rejects direct pushes and Foundry never
+  bypasses it.
+
+An unknown capability is ineligible rather than assumed, matching the decision
+channel. Branch protection is probed with an additional read-only `GET` only for
+the `non-draft-pr-auto-merge` and `direct-merge` modes, so the other modes make
+no extra call.
 
 The readiness probe is read-only: it looks up repository identity, the
 authenticated viewer's repository permission and advertised token scopes, and

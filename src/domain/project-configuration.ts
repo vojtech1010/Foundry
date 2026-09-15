@@ -1,6 +1,17 @@
-export const PROJECT_CONFIGURATION_SCHEMA_VERSION = 1 as const;
+import type { RoleHarnessSelections } from './role-harness.js';
 
-export const ROLE_HARNESS_PROTOCOL = 'foundry-role-host-v1' as const;
+export {
+  BUNDLED_CREDENTIAL_ENVIRONMENT_NAMES,
+  ROLE_HARNESS_NAMES,
+  ROLE_HARNESS_PROTOCOL,
+} from './role-harness.js';
+export type {
+  RoleHarnessName,
+  RoleHarnessSelection,
+  RoleHarnessSelections,
+} from './role-harness.js';
+
+export const PROJECT_CONFIGURATION_SCHEMA_VERSION = 1 as const;
 
 export const PUBLICATION_DRAFT = true as const;
 
@@ -17,12 +28,6 @@ export const VERIFICATION_COMMANDS = ['formatCheck', 'lint', 'typecheck', 'test'
 export type VerificationCommand = (typeof VERIFICATION_COMMANDS)[number];
 
 export type CommandVector = readonly [string, ...Array<string>];
-
-export interface RoleHarnessConfiguration {
-  readonly protocol: typeof ROLE_HARNESS_PROTOCOL;
-  readonly command: CommandVector;
-  readonly environmentAllowlist: ReadonlyArray<string>;
-}
 
 export interface TimeoutConfiguration {
   readonly roleMs: number;
@@ -86,6 +91,34 @@ export interface DecisionPublicationConfiguration {
   readonly maintainersCanModify: typeof PUBLICATION_MAINTAINERS_CAN_MODIFY;
 }
 
+export const RESULT_PUBLICATION_MODES = [
+  'draft-pr',
+  'non-draft-pr',
+  'non-draft-pr-auto-merge',
+  'direct-merge',
+] as const;
+
+export type ResultPublicationMode = (typeof RESULT_PUBLICATION_MODES)[number];
+
+export const RESULT_PUBLICATION_DEFAULT_MODE: ResultPublicationMode = 'non-draft-pr';
+
+export const RESULT_PUBLICATION_MERGE_METHODS = ['merge', 'squash', 'rebase'] as const;
+
+export type ResultPublicationMergeMethod = (typeof RESULT_PUBLICATION_MERGE_METHODS)[number];
+
+export const RESULT_PUBLICATION_DEFAULT_MERGE_METHOD: ResultPublicationMergeMethod = 'merge';
+
+/**
+ * The resolved result-publication mode. `mode` always carries an effective
+ * value; the merge method is meaningful only for `non-draft-pr-auto-merge`.
+ * Every mode reuses `decisionPublication.remote` for remote identity and
+ * credentials, so this configuration never carries a remote of its own.
+ */
+export interface ResultPublicationConfiguration {
+  readonly mode: ResultPublicationMode;
+  readonly mergeMethod: ResultPublicationMergeMethod;
+}
+
 export interface ArtifactConfiguration {
   readonly retentionDays: number;
   readonly maxRequestBytes: number;
@@ -97,13 +130,24 @@ export interface ArtifactConfiguration {
   readonly redactionPatterns: ReadonlyArray<string>;
 }
 
+export const HARDCODED_ARTIFACT_BOUNDS: ArtifactConfiguration = {
+  retentionDays: 30,
+  maxRequestBytes: 262144,
+  maxGuidanceBytes: 1048576,
+  maxRoleHandoffBytes: 262144,
+  maxEvidenceBytes: 26214400,
+  maxTerminalCaptureBytes: 10485760,
+  maxRunBytes: 104857600,
+  redactionPatterns: [],
+};
+
 export interface ProjectConfiguration {
   readonly schemaVersion: typeof PROJECT_CONFIGURATION_SCHEMA_VERSION;
   readonly targetRepository: string;
   readonly sourceRemote: string;
   readonly sourceBranch: string;
   readonly taskBranchPolicy: string;
-  readonly roleHarness: RoleHarnessConfiguration;
+  readonly roles: RoleHarnessSelections;
   readonly timeouts: TimeoutConfiguration;
   readonly retryBudgets: RetryBudgetConfiguration;
   readonly operationalRetryBudgets: OperationalRetryBudgetConfiguration;
@@ -111,6 +155,7 @@ export interface ProjectConfiguration {
   readonly projectProfile: ProjectProfileConfiguration;
   readonly runtimeProfile: RuntimeProfileConfiguration | null;
   readonly decisionPublication: DecisionPublicationConfiguration | null;
+  readonly resultPublication: ResultPublicationConfiguration;
   readonly artifacts: ArtifactConfiguration;
 }
 

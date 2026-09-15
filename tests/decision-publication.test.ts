@@ -346,10 +346,14 @@ function githubHarness(lookup: GitHubPullRequestLookup = { kind: 'absent' }): Gi
           baseBranch: 'main',
         });
       },
+      enablePullRequestAutoMerge: () =>
+        Effect.die(new Error('decision publication tests must not enable auto-merge')),
       pushTaskBranch: (options) => {
         calls.push.push(options);
         return Effect.void;
       },
+      pushSourceBranch: () =>
+        Effect.die(new Error('decision publication tests must not push the source branch')),
       listIssueCommentsAfter: () => Effect.succeed({ comments: [], truncated: false }),
       collaboratorPermission: () => Effect.succeed({ permission: 'maintain' }),
     }),

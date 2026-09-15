@@ -19,6 +19,7 @@ import {
   checkReadiness,
   describePublicationReadiness,
   resolveBranchProtectionEvidence,
+  resolveRoleRouting,
 } from '../src/application/readiness/index.js';
 import {
   GIT_OPERATION_MARKERS,
@@ -34,16 +35,15 @@ import {
 import { BRANCH_PROTECTION_NOT_CONFIGURED } from '../src/domain/run-locations.js';
 import { EXIT_CODES } from '../src/domain/public-commands.js';
 import { ReadinessFilesLive, ReadinessGitLive } from '../src/platform/readiness.js';
-import {
-  capableRoleHostLauncher,
-  incapableRoleHostLauncher,
-} from './fixtures/role-host/role-host-launcher.js';
+import { capableRoleHostLauncher } from './fixtures/role-host/role-host-launcher.js';
 
 import type {
   PublicationProbeObservation,
   PublicationProbeRequest,
 } from '../src/application/readiness/index.js';
-import type { RoleHostLauncher } from '../src/application/role-conversations/index.js';
+import type { ProjectConfiguration } from '../src/domain/project-configuration.js';
+import { RoleHostBinaryResolver } from '../src/application/role-conversations/index.js';
+import { RoleHostLauncher } from '../src/application/role-conversations/index.js';
 
 const ReportEnvelopeJson = Schema.fromJsonString(ReportEnvelope);
 
@@ -90,10 +90,12 @@ function goldenDocument(targetRepository: string) {
     sourceRemote: 'origin',
     sourceBranch: 'main',
     taskBranchPolicy: 'foundry/<task-id>',
-    roleHarness: {
-      protocol: 'foundry-role-host-v1',
-      command: ['foundry-role-host'],
-      environmentAllowlist: ['OPENAI_API_KEY'],
+    roles: {
+      architect: { harness: 'codex', model: 'gpt-5.6-luna' },
+      coder: { harness: 'codex', model: 'gpt-5.6-luna' },
+      lead_coder: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      tester: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      reviewer: { harness: 'codex', model: 'gpt-5.6-luna' },
     },
     timeouts: {
       roleMs: 1800000,
@@ -120,16 +122,6 @@ function goldenDocument(targetRepository: string) {
     },
     runtimeProfile: null,
     decisionPublication: null,
-    artifacts: {
-      retentionDays: 30,
-      maxRequestBytes: 262144,
-      maxGuidanceBytes: 1048576,
-      maxRoleHandoffBytes: 262144,
-      maxEvidenceBytes: 26214400,
-      maxTerminalCaptureBytes: 10485760,
-      maxRunBytes: 104857600,
-      redactionPatterns: [],
-    },
   };
 }
 
@@ -151,6 +143,8 @@ function eligibleObservation(
     issueCommentReadable: true,
     tokenScopes: null,
     protectedBranches: [],
+    autoMergeAllowed: true,
+    branchProtected: true,
     limitations: [],
     ...overrides,
   };
@@ -204,6 +198,7 @@ interface BuiltWorld {
     | ReadinessGit
     | ProjectCommandProcess
     | RoleHostLauncher
+    | RoleHostBinaryResolver
     | PublicationProbe
   >;
   readonly gitCalls: Array<{ readonly args: ReadonlyArray<string>; readonly cwd: string }>;
@@ -260,6 +255,30 @@ function publicationWorld(
   };
 }
 
+function resultPublicationWorld(
+  mode: string,
+  options: {
+    readonly mergeMethod?: string;
+    readonly publication?: Partial<PublicationScript>;
+    readonly git?: Partial<GitScript>;
+  } = {},
+): FakeWorld {
+  const world = defaultWorld();
+  const resultPublication =
+    options.mergeMethod === undefined ? { mode } : { mode, mergeMethod: options.mergeMethod };
+  return {
+    ...world,
+    files: {
+      ...world.files,
+      texts: new Map([
+        [CONFIG_PATH, JSON.stringify({ ...publicationDocument(TARGET), resultPublication })],
+      ]),
+    },
+    git: { ...world.git, ...options.git },
+    publication: { ...world.publication, ...options.publication },
+  };
+}
+
 function withTexts(world: FakeWorld, texts: ReadonlyMap<string, string>): FakeWorld {
   return { ...world, files: { ...world.files, texts } };
 }
@@ -275,9 +294,18 @@ const UnusedProcess = Layer.succeed(
   }),
 );
 
+const bundledBinariesLayer = Layer.succeed(
+  RoleHostBinaryResolver,
+  RoleHostBinaryResolver.of({
+    resolveExecutable: (harness) => Effect.succeed(`/fake/bin/${harness}`),
+    resolveModel: (_harness, model) => Effect.succeed(model.trim()),
+  }),
+);
+
 function buildWorld(
   world: FakeWorld,
   roleHostLayer: Layer.Layer<RoleHostLauncher> = capableRoleHostLauncher(),
+  binariesLayer: Layer.Layer<RoleHostBinaryResolver> = bundledBinariesLayer,
 ): BuiltWorld {
   const gitCalls: BuiltWorld['gitCalls'] = [];
   const layer = Layer.mergeAll(
@@ -381,6 +409,7 @@ function buildWorld(
     ),
     UnusedProcess,
     roleHostLayer,
+    binariesLayer,
     world.publication.provided
       ? Layer.succeed(
           PublicationProbe,
@@ -465,7 +494,76 @@ describe('readiness domain vocabulary', () => {
   });
 });
 
+describe('per-role routing resolution', () => {
+  function asConfiguration(document: Schema.Json): ProjectConfiguration {
+    // SAFETY: the resolver projects the typed `roles` selections, so a
+    // JSON-shaped test double carrying the documented `roles` section
+    // exercises the same code path as decoded input.
+    return document as ProjectConfiguration;
+  }
+
+  function expectedRouting() {
+    return [
+      { role: 'architect', harness: 'codex', model: 'gpt-5.6-luna' },
+      { role: 'coder', harness: 'codex', model: 'gpt-5.6-luna' },
+      { role: 'lead_coder', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      { role: 'tester', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      { role: 'reviewer', harness: 'codex', model: 'gpt-5.6-luna' },
+    ];
+  }
+
+  it('projects the exact configured harness and model per role', () => {
+    const routing = resolveRoleRouting(asConfiguration(goldenDocument(TARGET)));
+
+    expect(routing).toEqual(expectedRouting());
+  });
+
+  it('resolves the same routing twice for the same document', () => {
+    const document = asConfiguration(goldenDocument(TARGET));
+
+    expect(resolveRoleRouting(document)).toEqual(resolveRoleRouting(document));
+  });
+
+  it("uses each role's own selection instead of sharing one harness", () => {
+    const routing = resolveRoleRouting(asConfiguration(goldenDocument(TARGET)));
+    const byRole = new Map(routing.map((route) => [route.role, route] as const));
+
+    expect(byRole.get('architect')).toEqual({
+      role: 'architect',
+      harness: 'codex',
+      model: 'gpt-5.6-luna',
+    });
+    expect(byRole.get('lead_coder')).toEqual({
+      role: 'lead_coder',
+      harness: 'opencode',
+      model: 'opencode-go/glm-5.3-flash',
+    });
+  });
+});
+
 describe('readiness check with fake services', () => {
+  it.effect('verifies the bundled host without launching any role host process', () =>
+    Effect.gen(function* () {
+      const hostileLauncher = Layer.succeed(
+        RoleHostLauncher,
+        RoleHostLauncher.of({
+          launch: () => {
+            throw new Error('doctor must not launch a role host process');
+          },
+        }),
+      );
+      const built = buildWorld(defaultWorld(), hostileLauncher);
+      const report = yield* checkReadiness({ configArg: CONFIG_ARG, cwd: CONFIG_DIR }).pipe(
+        Effect.provide(built.layer),
+      );
+
+      expect(report.roleHost.protocol).toBe('foundry-role-host-v1');
+      expect(report.roleHost.resumable).toBe(true);
+      expect(report.roleRouting).toHaveLength(5);
+      expectNoBranchMutation(built.gitCalls);
+    }),
+  );
+
   it.effect('reports host, configuration, storage, and repository identity when ready', () =>
     Effect.gen(function* () {
       const { built, check } = checkWith(defaultWorld());
@@ -485,6 +583,13 @@ describe('readiness check with fake services', () => {
         branch: 'main',
         commit: COMMIT,
       });
+      expect(report.roleRouting).toEqual([
+        { role: 'architect', harness: 'codex', model: 'gpt-5.6-luna' },
+        { role: 'coder', harness: 'codex', model: 'gpt-5.6-luna' },
+        { role: 'lead_coder', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        { role: 'tester', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        { role: 'reviewer', harness: 'codex', model: 'gpt-5.6-luna' },
+      ]);
       expectNoBranchMutation(built.gitCalls);
     }),
   );
@@ -599,7 +704,25 @@ describe('readiness check with fake services', () => {
     }),
   );
 
-  it.effect('fails when a redaction pattern is not a valid ECMAScript regular expression', () =>
+  it.effect('reports the hardcoded artifact bounds as effective doctor facts', () =>
+    Effect.gen(function* () {
+      const { check } = checkWith(defaultWorld());
+      const report = yield* check;
+
+      expect(report.artifacts).toEqual({
+        retentionDays: 30,
+        maxRequestBytes: 262144,
+        maxGuidanceBytes: 1048576,
+        maxRoleHandoffBytes: 262144,
+        maxEvidenceBytes: 26214400,
+        maxTerminalCaptureBytes: 10485760,
+        maxRunBytes: 104857600,
+        redactionPatterns: [],
+      });
+    }),
+  );
+
+  it.effect('rejects a configuration document carrying the removed artifacts block', () =>
     Effect.gen(function* () {
       const golden = goldenDocument(TARGET);
       const { check } = checkWith(
@@ -610,7 +733,16 @@ describe('readiness check with fake services', () => {
               CONFIG_PATH,
               JSON.stringify({
                 ...golden,
-                artifacts: { ...golden.artifacts, redactionPatterns: ['(unclosed'] },
+                artifacts: {
+                  retentionDays: 30,
+                  maxRequestBytes: 262144,
+                  maxGuidanceBytes: 1048576,
+                  maxRoleHandoffBytes: 262144,
+                  maxEvidenceBytes: 26214400,
+                  maxTerminalCaptureBytes: 10485760,
+                  maxRunBytes: 104857600,
+                  redactionPatterns: [],
+                },
               }),
             ],
           ]),
@@ -618,8 +750,7 @@ describe('readiness check with fake services', () => {
       );
       const error = yield* check.pipe(Effect.flip);
       expect(error).toBeInstanceOf(ReadinessError);
-      expect(error.message).toContain('Redaction pattern "(unclosed"');
-      expect(error.message).toContain('not a valid ECMAScript regular expression');
+      expect(error.message).toContain('Expected schemaVersion 1');
     }),
   );
 
@@ -752,13 +883,31 @@ describe('readiness check with fake services', () => {
         'reviewer',
       ]);
       expect(data.roleHost.networkProfiles).toEqual(['network_denied', 'runtime_origin_only']);
+      expect(data.roleRouting).toEqual([
+        { role: 'architect', harness: 'codex', model: 'gpt-5.6-luna' },
+        { role: 'coder', harness: 'codex', model: 'gpt-5.6-luna' },
+        { role: 'lead_coder', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        { role: 'tester', harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        { role: 'reviewer', harness: 'codex', model: 'gpt-5.6-luna' },
+      ]);
       expect(data.publication).toEqual({
         configured: false,
         eligible: false,
+        remote: null,
         repository: null,
         repositoryScope: 'unknown',
         reason: null,
         capabilities: [],
+      });
+      expect(data.artifacts).toEqual({
+        retentionDays: 30,
+        maxRequestBytes: 262144,
+        maxGuidanceBytes: 1048576,
+        maxRoleHandoffBytes: 262144,
+        maxEvidenceBytes: 26214400,
+        maxTerminalCaptureBytes: 10485760,
+        maxRunBytes: 104857600,
+        redactionPatterns: [],
       });
       expect(Object.keys(data)).toEqual([
         'readiness',
@@ -767,7 +916,9 @@ describe('readiness check with fake services', () => {
         'storage',
         'repository',
         'roleHost',
+        'roleRouting',
         'publication',
+        'artifacts',
       ]);
       expectNoBranchMutation(built.gitCalls);
     }),
@@ -797,11 +948,37 @@ describe('readiness check with fake services', () => {
       expect(humanResult.stdout).toContain(
         `data.roleHost.availableRoles: ${data.roleHost.availableRoles.join(' ')}`,
       );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.retentionDays: ${data.artifacts.retentionDays}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.maxRequestBytes: ${data.artifacts.maxRequestBytes}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.maxGuidanceBytes: ${data.artifacts.maxGuidanceBytes}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.maxRoleHandoffBytes: ${data.artifacts.maxRoleHandoffBytes}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.maxEvidenceBytes: ${data.artifacts.maxEvidenceBytes}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.maxTerminalCaptureBytes: ${data.artifacts.maxTerminalCaptureBytes}`,
+      );
+      expect(humanResult.stdout).toContain(
+        `data.artifacts.maxRunBytes: ${data.artifacts.maxRunBytes}`,
+      );
+      for (const route of data.roleRouting) {
+        expect(humanResult.stdout).toContain(
+          `data.roleRouting: ${route.role} harness=${route.harness} model=${route.model}`,
+        );
+      }
       expect(humanResult.stdout.endsWith('\n')).toBe(true);
     }),
   );
 
-  it.effect('maps doctor failures to exit code 2 with an invalid invocation error', () =>
+  it.effect('maps doctor failures to a failed report rather than an argument error', () =>
     Effect.gen(function* () {
       const world = defaultWorld();
       const built = buildWorld({
@@ -812,58 +989,58 @@ describe('readiness check with fake services', () => {
         Effect.provide(built.layer),
       );
 
-      expect(result.exitCode).toBe(EXIT_CODES.invalidInvocation);
+      expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
       const envelope = expectDoctorFailure(result.stdout);
       expect(envelope.command).toBe('doctor');
-      expect(envelope.error.kind).toBe('invalid_invocation');
+      expect(envelope.error.kind).toBe('failed');
       expect(envelope.error.retryable).toBe(false);
       expect(envelope.error.message).toContain('is not clean');
     }),
   );
 
-  it.effect('fails clearly when the role host cannot attest sessions or required profiles', () =>
+  it.effect('fails clearly when a bundled binary or model does not resolve', () =>
     Effect.gen(function* () {
-      const incapableCases = [
+      const failingCases = [
         {
-          label: 'non-resumable',
-          launcher: incapableRoleHostLauncher({ resumable: false }),
-          reason: 'not-resumable',
-          fragment: 'resumable',
+          label: 'missing binary',
+          binaries: Layer.succeed(
+            RoleHostBinaryResolver,
+            RoleHostBinaryResolver.of({
+              resolveExecutable: () =>
+                Effect.fail(
+                  new RoleHostCapabilityError({
+                    message:
+                      'Bundled role harness "codex" executable (codex) was not found on the process PATH.',
+                    reason: 'unavailable',
+                  }),
+                ),
+              resolveModel: (_harness, model) => Effect.succeed(model.trim()),
+            }),
+          ),
+          fragment: '"codex"',
         },
         {
-          label: 'unsupported protocol',
-          launcher: incapableRoleHostLauncher({ protocol: 'foundry-role-host-v0' }),
-          reason: 'unsupported-protocol',
-          fragment: 'foundry-role-host-v0',
-        },
-        {
-          label: 'missing role',
-          launcher: incapableRoleHostLauncher({
-            availableRoles: ['architect', 'coder', 'lead_coder', 'reviewer'],
-          }),
-          reason: 'missing-role',
-          fragment: '"tester"',
-        },
-        {
-          label: 'missing network profile',
-          launcher: incapableRoleHostLauncher({
-            capabilityProfiles: {
-              filesystem: [
-                'read_only_snapshot',
-                'run_owned_worktree',
-                'owned_scratch',
-                'owned_capture_scratch',
-              ],
-              network: ['network_denied'],
-            },
-          }),
-          reason: 'missing-profile',
-          fragment: 'runtime_origin_only',
+          label: 'unknown model',
+          binaries: Layer.succeed(
+            RoleHostBinaryResolver,
+            RoleHostBinaryResolver.of({
+              resolveExecutable: (harness) => Effect.succeed(`/fake/bin/${harness}`),
+              resolveModel: () =>
+                Effect.fail(
+                  new RoleHostCapabilityError({
+                    message:
+                      'Unknown model "custom-model" for bundled role harness "opencode": supported models are opencode-go/glm-5.3-flash.',
+                    reason: 'unavailable',
+                  }),
+                ),
+            }),
+          ),
+          fragment: 'custom-model',
         },
       ];
 
-      for (const testCase of incapableCases) {
-        const built = buildWorld(defaultWorld(), testCase.launcher);
+      for (const testCase of failingCases) {
+        const built = buildWorld(defaultWorld(), capableRoleHostLauncher(), testCase.binaries);
         const error = yield* checkReadiness({ configArg: CONFIG_ARG, cwd: CONFIG_DIR }).pipe(
           Effect.provide(built.layer),
           Effect.flip,
@@ -872,26 +1049,41 @@ describe('readiness check with fake services', () => {
         if (!(error instanceof RoleHostCapabilityError)) {
           throw new Error(`Expected a RoleHostCapabilityError for ${testCase.label}.`);
         }
-        expect(error.reason, testCase.label).toBe(testCase.reason);
+        expect(error.reason, testCase.label).toBe('unavailable');
         expect(error.message, testCase.label).toContain(testCase.fragment);
       }
     }),
   );
 
-  it.effect('maps an incapable role host to a failed report rather than an argument error', () =>
-    Effect.gen(function* () {
-      const built = buildWorld(defaultWorld(), incapableRoleHostLauncher({ resumable: false }));
-      const result = yield* runCli(['doctor', '--config', CONFIG_PATH, '--json']).pipe(
-        Effect.provide(built.layer),
-      );
+  it.effect(
+    'maps an unresolvable bundled host to a failed report rather than an argument error',
+    () =>
+      Effect.gen(function* () {
+        const binaries = Layer.succeed(
+          RoleHostBinaryResolver,
+          RoleHostBinaryResolver.of({
+            resolveExecutable: () =>
+              Effect.fail(
+                new RoleHostCapabilityError({
+                  message: 'Bundled role harness "codex" executable (codex) was not found.',
+                  reason: 'unavailable',
+                }),
+              ),
+            resolveModel: (_harness, model) => Effect.succeed(model.trim()),
+          }),
+        );
+        const built = buildWorld(defaultWorld(), capableRoleHostLauncher(), binaries);
+        const result = yield* runCli(['doctor', '--config', CONFIG_PATH, '--json']).pipe(
+          Effect.provide(built.layer),
+        );
 
-      expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
-      const envelope = expectDoctorFailure(result.stdout);
-      expect(envelope.command).toBe('doctor');
-      expect(envelope.error.kind).toBe('failed');
-      expect(envelope.error.retryable).toBe(false);
-      expect(envelope.error.message).toContain('resumable');
-    }),
+        expect(result.exitCode).toBe(EXIT_CODES.operationFailed);
+        const envelope = expectDoctorFailure(result.stdout);
+        expect(envelope.command).toBe('doctor');
+        expect(envelope.error.kind).toBe('failed');
+        expect(envelope.error.retryable).toBe(false);
+        expect(envelope.error.message).toContain('codex');
+      }),
   );
 });
 
@@ -909,6 +1101,7 @@ describe('publication readiness with fake services', () => {
         repositoryScope: 'unknown',
         reason: null,
         capabilities: [],
+        resultPublication: null,
       });
       expect(built.gitCalls.some((call) => call.args[1] === 'get-url')).toBe(false);
     }),
@@ -932,6 +1125,14 @@ describe('publication readiness with fake services', () => {
           { capability: 'issue_comment_read', state: 'granted' },
           { capability: 'collaborator_permission', state: 'granted' },
         ],
+        resultPublication: {
+          mode: 'non-draft-pr',
+          mergeMethod: null,
+          eligible: true,
+          reason: null,
+          autoMergeAllowed: true,
+          sourceBranchProtected: true,
+        },
       });
     }),
   );
@@ -952,6 +1153,7 @@ describe('publication readiness with fake services', () => {
       expect(data.publication).toEqual({
         configured: true,
         eligible: true,
+        remote: 'origin',
         repository: 'foundry/target',
         repositoryScope: 'repository',
         reason: null,
@@ -961,9 +1163,18 @@ describe('publication readiness with fake services', () => {
           { capability: 'issue_comment_read', state: 'granted' },
           { capability: 'collaborator_permission', state: 'granted' },
         ],
+        resultPublication: {
+          mode: 'non-draft-pr',
+          mergeMethod: null,
+          eligible: true,
+          reason: null,
+          autoMergeAllowed: true,
+          sourceBranchProtected: true,
+        },
       });
       expect(humanResult.stdout).toContain('data.publication.configured: true');
       expect(humanResult.stdout).toContain('data.publication.eligible: true');
+      expect(humanResult.stdout).toContain('data.publication.remote: origin');
       expect(humanResult.stdout).toContain('data.publication.repository: foundry/target');
       expect(humanResult.stdout).toContain('data.publication.repositoryScope: repository');
       expect(humanResult.stdout).toContain('data.publication.reason: none');
@@ -1096,6 +1307,172 @@ describe('publication readiness with fake services', () => {
       expect(report.publication.eligible).toBe(false);
       expect(report.publication.repository).toBe('foundry/target');
       expect(report.publication.reason).toContain('probe is unavailable');
+    }),
+  );
+});
+
+describe('result publication readiness modes', () => {
+  it.effect('defaults the absent key to non-draft-pr with the decision-channel eligibility', () =>
+    Effect.gen(function* () {
+      const { check } = checkWith(publicationWorld());
+      const report = yield* check;
+      expect(report.publication.resultPublication).toEqual({
+        mode: 'non-draft-pr',
+        mergeMethod: null,
+        eligible: true,
+        reason: null,
+        autoMergeAllowed: true,
+        sourceBranchProtected: true,
+      });
+
+      const draft = yield* checkWith(resultPublicationWorld('draft-pr')).check;
+      expect(draft.publication.resultPublication).toEqual({
+        mode: 'draft-pr',
+        mergeMethod: null,
+        eligible: true,
+        reason: null,
+        autoMergeAllowed: true,
+        sourceBranchProtected: true,
+      });
+    }),
+  );
+
+  it.effect('gates non-draft-pr-auto-merge on repository auto-merge and branch protection', () =>
+    Effect.gen(function* () {
+      const eligible = yield* checkWith(
+        resultPublicationWorld('non-draft-pr-auto-merge', {
+          mergeMethod: 'squash',
+          publication: {
+            observation: eligibleObservation({ autoMergeAllowed: true, branchProtected: true }),
+          },
+        }),
+      ).check;
+      expect(eligible.publication.resultPublication).toEqual({
+        mode: 'non-draft-pr-auto-merge',
+        mergeMethod: 'squash',
+        eligible: true,
+        reason: null,
+        autoMergeAllowed: true,
+        sourceBranchProtected: true,
+      });
+
+      const autoMergeDisabled = yield* checkWith(
+        resultPublicationWorld('non-draft-pr-auto-merge', {
+          publication: { observation: eligibleObservation({ autoMergeAllowed: false }) },
+        }),
+      ).check;
+      expect(autoMergeDisabled.publication.resultPublication?.eligible).toBe(false);
+      expect(autoMergeDisabled.publication.resultPublication?.reason).toContain('auto-merge');
+
+      const protectionUnknown = yield* checkWith(
+        resultPublicationWorld('non-draft-pr-auto-merge', {
+          publication: { observation: eligibleObservation({ branchProtected: null }) },
+        }),
+      ).check;
+      expect(protectionUnknown.publication.resultPublication?.eligible).toBe(false);
+      expect(protectionUnknown.publication.resultPublication?.reason).toContain('protected');
+    }),
+  );
+
+  it.effect('gates direct-merge on push authority and an unprotected source branch', () =>
+    Effect.gen(function* () {
+      const eligible = yield* checkWith(
+        resultPublicationWorld('direct-merge', {
+          publication: { observation: eligibleObservation({ branchProtected: false }) },
+        }),
+      ).check;
+      expect(eligible.publication.resultPublication).toEqual({
+        mode: 'direct-merge',
+        mergeMethod: null,
+        eligible: true,
+        reason: null,
+        autoMergeAllowed: true,
+        sourceBranchProtected: false,
+      });
+
+      const protectedBranch = yield* checkWith(
+        resultPublicationWorld('direct-merge', {
+          publication: { observation: eligibleObservation({ branchProtected: true }) },
+        }),
+      ).check;
+      expect(protectedBranch.publication.resultPublication?.eligible).toBe(false);
+      expect(protectedBranch.publication.resultPublication?.reason).toContain('protected');
+
+      const unknownProtection = yield* checkWith(
+        resultPublicationWorld('direct-merge', {
+          publication: { observation: eligibleObservation({ branchProtected: null }) },
+        }),
+      ).check;
+      expect(unknownProtection.publication.resultPublication?.eligible).toBe(false);
+      expect(unknownProtection.publication.resultPublication?.reason).toContain(
+        'protection could not be established',
+      );
+
+      const noPush = yield* checkWith(
+        resultPublicationWorld('direct-merge', {
+          publication: {
+            observation: eligibleObservation({ push: false, branchProtected: false }),
+          },
+        }),
+      ).check;
+      expect(noPush.publication.resultPublication?.eligible).toBe(false);
+      expect(noPush.publication.resultPublication?.reason).toContain('push');
+    }),
+  );
+
+  it.effect('treats unknown result facts as ineligible for every mode', () =>
+    Effect.gen(function* () {
+      for (const mode of ['non-draft-pr', 'non-draft-pr-auto-merge', 'direct-merge']) {
+        const { check } = checkWith(
+          resultPublicationWorld(mode, {
+            publication: { observation: eligibleObservation({ tokenPresent: false }) },
+          }),
+        );
+        const report = yield* check;
+        expect(report.publication.resultPublication?.eligible, mode).toBe(false);
+        expect(report.publication.resultPublication?.reason, mode).toContain('GITHUB_TOKEN');
+      }
+    }),
+  );
+
+  it.effect('renders the sub-report in doctor json and human output', () =>
+    Effect.gen(function* () {
+      const { built } = checkWith(
+        resultPublicationWorld('non-draft-pr-auto-merge', {
+          mergeMethod: 'squash',
+          publication: {
+            observation: eligibleObservation({ autoMergeAllowed: true, branchProtected: true }),
+          },
+        }),
+      );
+      const jsonResult = yield* runCli(['doctor', '--config', CONFIG_PATH, '--json']).pipe(
+        Effect.provide(built.layer),
+      );
+      const humanResult = yield* runCli(['doctor', '--config', CONFIG_PATH]).pipe(
+        Effect.provide(built.layer),
+      );
+
+      const { data } = expectDoctorEnvelope(jsonResult.stdout);
+      expect(data.publication?.resultPublication).toEqual({
+        mode: 'non-draft-pr-auto-merge',
+        mergeMethod: 'squash',
+        eligible: true,
+        reason: null,
+        autoMergeAllowed: true,
+        sourceBranchProtected: true,
+      });
+      expect(humanResult.stdout).toContain(
+        'data.publication.resultPublication.mode: non-draft-pr-auto-merge',
+      );
+      expect(humanResult.stdout).toContain(
+        'data.publication.resultPublication.mergeMethod: squash',
+      );
+      expect(humanResult.stdout).toContain(
+        'data.publication.resultPublication.autoMergeAllowed: true',
+      );
+      expect(humanResult.stdout).toContain(
+        'data.publication.resultPublication.sourceBranchProtected: true',
+      );
     }),
   );
 });
@@ -1242,6 +1619,7 @@ const integrationLayer = Layer.mergeAll(
   ReadinessFilesLive,
   ReadinessGitLive,
   capableRoleHostLauncher(),
+  bundledBinariesLayer,
 );
 
 describe('doctor against real temporary git repositories', () => {

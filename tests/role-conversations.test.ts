@@ -26,6 +26,7 @@ import { appendRunEvent, readVerifiedRunHistory } from '../src/application/run-h
 import { roleHostProcessLayer } from '../src/platform/role-host.js';
 import { RunHistoryLive } from '../src/platform/run-history.js';
 import { CAPABLE_ROLE_HOST_CAPABILITIES } from './fixtures/role-host/role-host-launcher.js';
+import { installBundledHarnessShim } from './fixtures/role-host/bundled-harness-shim.js';
 
 import type {
   RoleHostCreateRequest,
@@ -101,6 +102,7 @@ const RecordedInvocationSchema = Schema.Struct({
   env: Schema.Struct({
     FOUNDRY_FAKE_TOKEN: Schema.NullOr(Schema.String),
     FOUNDRY_FAKE_UNLISTED: Schema.NullOr(Schema.String),
+    PATH: Schema.optional(Schema.String),
   }),
   request: Schema.NullOr(Schema.Json),
 });
@@ -335,13 +337,12 @@ const STOP_REQUEST: RoleHostStopRequest = {
 };
 
 function adapterLayer(
-  scenario: string,
-  logPath: string,
   maxOutputBytes = 65_536,
   environmentAllowlist: ReadonlyArray<string> = [],
 ): Layer.Layer<RoleHost> {
   return roleHostProcessLayer({
-    command: [process.execPath, FIXTURE_PATH, scenario, logPath],
+    harness: 'codex',
+    model: 'gpt-5.6-luna',
     cwd: REPOSITORY_ROOT,
     environmentAllowlist,
     timeoutMs: 10_000,
@@ -620,6 +621,7 @@ describe('role-host process adapter', () => {
   it.effect('launches the host directly for every closed operation', () =>
     Effect.gen(function* () {
       const log = setupLog();
+      const shim = installBundledHarnessShim(FIXTURE_PATH, 'settled', log.logPath);
       try {
         const outcome = yield* Effect.gen(function* () {
           const host = yield* RoleHost;
@@ -628,7 +630,7 @@ describe('role-host process adapter', () => {
           const observed = yield* host.observe(OBSERVE_REQUEST);
           const stopped = yield* host.stop(STOP_REQUEST);
           return { created, submitted, observed, stopped };
-        }).pipe(Effect.provide(adapterLayer('settled', log.logPath)));
+        }).pipe(Effect.provide(adapterLayer()));
 
         expect(outcome.created.sessionId).toBe('session-1');
         expect(outcome.created.runtimeIdentity).toEqual(FIXTURE_IDENTITY);
@@ -649,6 +651,7 @@ describe('role-host process adapter', () => {
           expect(invocation.argv.at(1)).toBe(FIXTURE_PATH);
         }
       } finally {
+        shim.restore();
         log.cleanup();
       }
     }),
@@ -657,42 +660,45 @@ describe('role-host process adapter', () => {
   it.effect('is idempotent for the same session, generation, and idempotency key', () =>
     Effect.gen(function* () {
       const log = setupLog();
+      const shim = installBundledHarnessShim(FIXTURE_PATH, 'idempotent-submit', log.logPath);
       try {
         const submissions = yield* Effect.gen(function* () {
           const host = yield* RoleHost;
           const first = yield* host.submit(SUBMIT_REQUEST);
           const second = yield* host.submit(SUBMIT_REQUEST);
           return { first, second };
-        }).pipe(Effect.provide(adapterLayer('idempotent-submit', log.logPath)));
+        }).pipe(Effect.provide(adapterLayer()));
 
         expect(submissions.first.submission).toBe('accepted');
         expect(submissions.second.submission).toBe('already_accepted');
         expect(readInvocations(log.logPath)).toHaveLength(2);
       } finally {
+        shim.restore();
         log.cleanup();
       }
     }),
   );
 
-  it.effect('forwards only configured environment names', () =>
+  it.effect('forwards configured names plus PATH for executable resolution', () =>
     Effect.gen(function* () {
       const log = setupLog();
       process.env.FOUNDRY_FAKE_TOKEN = 'forwarded-secret';
       process.env.FOUNDRY_FAKE_UNLISTED = 'must-not-leak';
+      const shim = installBundledHarnessShim(FIXTURE_PATH, 'settled', log.logPath);
       try {
         yield* Effect.gen(function* () {
           const host = yield* RoleHost;
           yield* host.create(CREATE_REQUEST);
-        }).pipe(
-          Effect.provide(adapterLayer('settled', log.logPath, 65_536, ['FOUNDRY_FAKE_TOKEN'])),
-        );
+        }).pipe(Effect.provide(adapterLayer(65_536, ['FOUNDRY_FAKE_TOKEN'])));
 
         const invocation = readInvocations(log.logPath).at(0);
         expect(invocation?.env.FOUNDRY_FAKE_TOKEN).toBe('forwarded-secret');
         expect(invocation?.env.FOUNDRY_FAKE_UNLISTED).toBeNull();
+        expect(invocation?.env.PATH).toBe(process.env.PATH);
       } finally {
         delete process.env.FOUNDRY_FAKE_TOKEN;
         delete process.env.FOUNDRY_FAKE_UNLISTED;
+        shim.restore();
         log.cleanup();
       }
     }),
@@ -702,25 +708,33 @@ describe('role-host process adapter', () => {
     Effect.gen(function* () {
       for (const scenario of ['nonzero', 'malformed', 'extra']) {
         const log = setupLog();
+        const shim = installBundledHarnessShim(FIXTURE_PATH, scenario, log.logPath);
         try {
           const error = yield* Effect.gen(function* () {
             const host = yield* RoleHost;
             yield* host.observe(OBSERVE_REQUEST);
-          }).pipe(Effect.provide(adapterLayer(scenario, log.logPath)), Effect.flip);
+          }).pipe(Effect.provide(adapterLayer()), Effect.flip);
           expect(error).toBeInstanceOf(RoleHostOperationalError);
         } finally {
+          shim.restore();
           log.cleanup();
         }
       }
 
       const oversizeLog = setupLog();
+      const oversizeShim = installBundledHarnessShim(
+        FIXTURE_PATH,
+        'oversized',
+        oversizeLog.logPath,
+      );
       try {
         const error = yield* Effect.gen(function* () {
           const host = yield* RoleHost;
           yield* host.observe(OBSERVE_REQUEST);
-        }).pipe(Effect.provide(adapterLayer('oversized', oversizeLog.logPath, 512)), Effect.flip);
+        }).pipe(Effect.provide(adapterLayer(512)), Effect.flip);
         expect(error).toBeInstanceOf(RoleHostOperationalError);
       } finally {
+        oversizeShim.restore();
         oversizeLog.cleanup();
       }
     }),
@@ -729,13 +743,15 @@ describe('role-host process adapter', () => {
   it.effect('rejects a settled response with malformed control', () =>
     Effect.gen(function* () {
       const log = setupLog();
+      const shim = installBundledHarnessShim(FIXTURE_PATH, 'bad-control', log.logPath);
       try {
         const error = yield* Effect.gen(function* () {
           const host = yield* RoleHost;
           yield* host.observe(OBSERVE_REQUEST);
-        }).pipe(Effect.provide(adapterLayer('bad-control', log.logPath)), Effect.flip);
+        }).pipe(Effect.provide(adapterLayer()), Effect.flip);
         expect(error).toBeInstanceOf(RoleHostOperationalError);
       } finally {
+        shim.restore();
         log.cleanup();
       }
     }),
@@ -1310,14 +1326,13 @@ describe('same-session control repair', () => {
     Effect.gen(function* () {
       const run = setupRun();
       const log = setupLog();
+      const shim = installBundledHarnessShim(FIXTURE_PATH, 'repair', log.logPath);
       try {
         yield* seedRunCreated(run.runDirectory);
         const result = yield* startOrResumeRoleTurn({
           ...baseTurnOptions(run.runDirectory),
           controlRepair: repairPolicy(1),
-        }).pipe(
-          Effect.provide(Layer.mergeAll(RunHistoryLive, adapterLayer('repair', log.logPath))),
-        );
+        }).pipe(Effect.provide(Layer.mergeAll(RunHistoryLive, adapterLayer())));
 
         expect(result.controlValid).toBe(true);
         expect(result.repairsPerformed).toBe(1);
@@ -1331,6 +1346,7 @@ describe('same-session control repair', () => {
         ]);
         expect(yield* readControlRepairs(run.runDirectory)).toHaveLength(1);
       } finally {
+        shim.restore();
         log.cleanup();
         run.cleanup();
       }

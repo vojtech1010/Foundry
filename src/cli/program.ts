@@ -3,7 +3,6 @@ import { Effect, Result, Schema } from 'effect';
 import { executePublicCommand } from '../application/public-commands.js';
 import {
   INVALID_INVOCATION_KIND,
-  NOT_AVAILABLE,
   PUBLIC_COMMANDS,
   REPORT_FAILURE_KINDS,
   REPORT_SCHEMA_VERSION,
@@ -12,6 +11,11 @@ import {
   isPublicCommand,
 } from '../domain/public-commands.js';
 import { PUBLICATION_CAPABILITIES } from '../domain/readiness.js';
+import { ROLE_HOST_ROLES } from '../domain/role-host.js';
+import {
+  RESULT_PUBLICATION_MERGE_METHODS,
+  RESULT_PUBLICATION_MODES,
+} from '../domain/project-configuration.js';
 import { RunInspectReportSchema } from '../domain/inspection.js';
 import { CleanupListReportSchema, CleanupRunReportSchema } from '../domain/retention-cleanup.js';
 import { DiagnosticBundleReportSchema } from '../domain/diagnostic-bundle.js';
@@ -28,6 +32,7 @@ import type { ReportFailureKind } from '../domain/public-commands.js';
 import type { DiagnosticBundleReport } from '../domain/diagnostic-bundle.js';
 import type { PublicCommandError, PublicCommandReport } from '../application/public-commands.js';
 import type { RunInspectReport } from '../application/inspect/index.js';
+import type { GitHubPublication } from '../application/decision-publication/index.js';
 import type { RunGit } from '../application/git-provisioning/index.js';
 import type { GuidanceGit, GuidanceSnapshotStore } from '../application/guidance/index.js';
 import type { ProjectCommandProcess } from '../application/profile-check/index.js';
@@ -47,7 +52,10 @@ import type {
   ReadinessHost,
 } from '../application/readiness/index.js';
 import type { RunIdentityStore } from '../application/run-identity/index.js';
-import type { RoleHostLauncher } from '../application/role-conversations/index.js';
+import type {
+  RoleHostBinaryResolver,
+  RoleHostLauncher,
+} from '../application/role-conversations/index.js';
 import type { RoleTurnResourceObserver } from '../application/role-permissions/index.js';
 
 const UNKNOWN_COMMAND_LABEL = 'foundry';
@@ -210,25 +218,46 @@ const ReportError = Schema.Struct({
   runId: Schema.optional(Schema.String),
 });
 
-const StubReportData = Schema.Struct({
-  availability: Schema.Literal(NOT_AVAILABLE),
-  message: Schema.String,
-  runId: Schema.optional(Schema.String),
-  taskId: Schema.optional(Schema.String),
-});
-
 const PublicationCapabilityReadinessData = Schema.Struct({
   capability: Schema.Literals(PUBLICATION_CAPABILITIES),
   state: Schema.Literals(['granted', 'denied', 'unknown']),
 });
 
+const DoctorResultPublicationData = Schema.Struct({
+  mode: Schema.Literals(RESULT_PUBLICATION_MODES),
+  mergeMethod: Schema.NullOr(Schema.Literals(RESULT_PUBLICATION_MERGE_METHODS)),
+  eligible: Schema.Boolean,
+  reason: Schema.NullOr(Schema.String),
+  autoMergeAllowed: Schema.NullOr(Schema.Boolean),
+  sourceBranchProtected: Schema.NullOr(Schema.Boolean),
+});
+
 const PublicationReadinessData = Schema.Struct({
   configured: Schema.Boolean,
   eligible: Schema.Boolean,
+  remote: Schema.NullOr(Schema.String),
   repository: Schema.NullOr(Schema.String),
   repositoryScope: Schema.Literals(['repository', 'broad', 'unknown']),
   reason: Schema.NullOr(Schema.String),
   capabilities: Schema.Array(PublicationCapabilityReadinessData),
+  resultPublication: Schema.optional(DoctorResultPublicationData),
+});
+
+const ArtifactBoundsData = Schema.Struct({
+  retentionDays: Schema.Number,
+  maxRequestBytes: Schema.Number,
+  maxGuidanceBytes: Schema.Number,
+  maxRoleHandoffBytes: Schema.Number,
+  maxEvidenceBytes: Schema.Number,
+  maxTerminalCaptureBytes: Schema.Number,
+  maxRunBytes: Schema.Number,
+  redactionPatterns: Schema.Array(Schema.String),
+});
+
+const RoleRoutingReportData = Schema.Struct({
+  role: Schema.Literals(ROLE_HOST_ROLES),
+  harness: Schema.NonEmptyString,
+  model: Schema.NonEmptyString,
 });
 
 const DoctorReportData = Schema.Struct({
@@ -261,7 +290,9 @@ const DoctorReportData = Schema.Struct({
     filesystemProfiles: Schema.Array(Schema.String),
     networkProfiles: Schema.Array(Schema.String),
   }),
+  roleRouting: Schema.Array(RoleRoutingReportData),
   publication: Schema.optional(PublicationReadinessData),
+  artifacts: ArtifactBoundsData,
 });
 
 const InitPreviewReportData = Schema.Struct({
@@ -273,12 +304,17 @@ const InitPreviewReportData = Schema.Struct({
   }),
   branch: Schema.String,
   workspace: Schema.String,
-  roleHarness: Schema.Struct({
-    protocol: Schema.String,
-    command: Schema.NonEmptyArray(Schema.String),
-  }),
+  roleRouting: Schema.Array(RoleRoutingReportData),
   artifacts: Schema.Struct({
     root: Schema.String,
+    retentionDays: Schema.Number,
+    maxRequestBytes: Schema.Number,
+    maxGuidanceBytes: Schema.Number,
+    maxRoleHandoffBytes: Schema.Number,
+    maxEvidenceBytes: Schema.Number,
+    maxTerminalCaptureBytes: Schema.Number,
+    maxRunBytes: Schema.Number,
+    redactionPatterns: Schema.Array(Schema.String),
   }),
 });
 
@@ -319,14 +355,6 @@ const RecordedRequestData = Schema.Struct({
   normalizedPromptHash: Schema.String,
 });
 
-const RecordedRunReportData = Schema.Struct({
-  runId: Schema.String,
-  taskId: Schema.String,
-  runDirectory: Schema.String,
-  provenance: RunProvenanceData,
-  request: RecordedRequestData,
-});
-
 const RunWorkflowDecisionData = Schema.Struct({
   applied: Schema.NullOr(Schema.Literals(['accept', 'correct', 'abandon'])),
   waiting: Schema.Boolean,
@@ -336,6 +364,12 @@ const RunWorkflowDecisionData = Schema.Struct({
 const RunWorkflowRecoveryData = Schema.Struct({
   disposition: Schema.Literals(RECOVERY_DISPOSITIONS),
   reason: Schema.String,
+});
+
+const RunWorkflowResultMergeData = Schema.Struct({
+  commit: Schema.NonEmptyString,
+  sourceBranch: Schema.NonEmptyString,
+  fastForward: Schema.Boolean,
 });
 
 const RunWorkflowReportData = Schema.Struct({
@@ -351,6 +385,7 @@ const RunWorkflowReportData = Schema.Struct({
   decision: Schema.optional(RunWorkflowDecisionData),
   recovery: Schema.optional(RunWorkflowRecoveryData),
   resultPullRequest: Schema.optional(Schema.NullOr(Schema.NonEmptyString)),
+  resultMerged: Schema.optional(RunWorkflowResultMergeData),
 });
 
 const StatusMeasureData = Schema.Struct({
@@ -424,12 +459,10 @@ const AbandonReportData = Schema.Struct({
 });
 
 const ReportData = Schema.Union([
-  StubReportData,
   DoctorReportData,
   InitPreviewReportData,
   ProfileCheckReportData,
   RunWorkflowReportData,
-  RecordedRunReportData,
   RunStatusReportData,
   InspectReportData,
   CleanupListReportData,
@@ -858,15 +891,7 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
   ];
   if (envelope.ok) {
     const data = envelope.data;
-    if ('availability' in data) {
-      lines.push(`data.availability: ${data.availability}`, `data.message: ${data.message}`);
-      if (data.runId !== undefined) {
-        lines.push(`data.runId: ${data.runId}`);
-      }
-      if (data.taskId !== undefined) {
-        lines.push(`data.taskId: ${data.taskId}`);
-      }
-    } else if ('readiness' in data) {
+    if ('readiness' in data) {
       lines.push(
         `data.readiness: ${data.readiness}`,
         `data.host.platform: ${data.host.platform}`,
@@ -888,10 +913,14 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         `data.roleHost.filesystemProfiles: ${data.roleHost.filesystemProfiles.join(' ')}`,
         `data.roleHost.networkProfiles: ${data.roleHost.networkProfiles.join(' ')}`,
       );
+      for (const route of data.roleRouting) {
+        lines.push(`data.roleRouting: ${route.role} harness=${route.harness} model=${route.model}`);
+      }
       if (data.publication !== undefined) {
         lines.push(
           `data.publication.configured: ${data.publication.configured}`,
           `data.publication.eligible: ${data.publication.eligible}`,
+          `data.publication.remote: ${data.publication.remote ?? 'none'}`,
           `data.publication.repository: ${data.publication.repository ?? 'none'}`,
           `data.publication.repositoryScope: ${data.publication.repositoryScope}`,
           `data.publication.reason: ${data.publication.reason ?? 'none'}`,
@@ -899,7 +928,28 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
             .map((capability) => `${capability.capability}=${capability.state}`)
             .join(' ')}`,
         );
+        if (data.publication.resultPublication !== undefined) {
+          const resultPublication = data.publication.resultPublication;
+          lines.push(
+            `data.publication.resultPublication.mode: ${resultPublication.mode}`,
+            `data.publication.resultPublication.mergeMethod: ${resultPublication.mergeMethod ?? 'none'}`,
+            `data.publication.resultPublication.eligible: ${resultPublication.eligible}`,
+            `data.publication.resultPublication.reason: ${resultPublication.reason ?? 'none'}`,
+            `data.publication.resultPublication.autoMergeAllowed: ${resultPublication.autoMergeAllowed ?? 'unknown'}`,
+            `data.publication.resultPublication.sourceBranchProtected: ${resultPublication.sourceBranchProtected ?? 'unknown'}`,
+          );
+        }
       }
+      lines.push(
+        `data.artifacts.retentionDays: ${data.artifacts.retentionDays}`,
+        `data.artifacts.maxRequestBytes: ${data.artifacts.maxRequestBytes}`,
+        `data.artifacts.maxGuidanceBytes: ${data.artifacts.maxGuidanceBytes}`,
+        `data.artifacts.maxRoleHandoffBytes: ${data.artifacts.maxRoleHandoffBytes}`,
+        `data.artifacts.maxEvidenceBytes: ${data.artifacts.maxEvidenceBytes}`,
+        `data.artifacts.maxTerminalCaptureBytes: ${data.artifacts.maxTerminalCaptureBytes}`,
+        `data.artifacts.maxRunBytes: ${data.artifacts.maxRunBytes}`,
+        `data.artifacts.redactionPatterns: ${data.artifacts.redactionPatterns.join(' ')}`,
+      );
     } else if ('profileCheck' in data) {
       lines.push(
         `data.profileCheck: ${data.profileCheck}`,
@@ -933,6 +983,13 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
           `data.testerSkipped: ${data.testerSkipped}`,
           `data.resultPullRequest: ${data.resultPullRequest ?? 'none'}`,
         );
+        if (data.resultMerged !== undefined) {
+          lines.push(
+            `data.resultMerged.commit: ${data.resultMerged.commit}`,
+            `data.resultMerged.sourceBranch: ${data.resultMerged.sourceBranch}`,
+            `data.resultMerged.fastForward: ${data.resultMerged.fastForward}`,
+          );
+        }
         if (data.decision !== undefined) {
           lines.push(
             `data.decision.applied: ${data.decision.applied ?? 'none'}`,
@@ -1034,10 +1091,19 @@ function renderHuman(envelope: ReportEnvelopeValue): string {
         `data.source.commit: ${data.source.commit}`,
         `data.branch: ${data.branch}`,
         `data.workspace: ${data.workspace}`,
-        `data.roleHarness.protocol: ${data.roleHarness.protocol}`,
-        `data.roleHarness.command: ${data.roleHarness.command.join(' ')}`,
         `data.artifacts.root: ${data.artifacts.root}`,
+        `data.artifacts.retentionDays: ${data.artifacts.retentionDays}`,
+        `data.artifacts.maxRequestBytes: ${data.artifacts.maxRequestBytes}`,
+        `data.artifacts.maxGuidanceBytes: ${data.artifacts.maxGuidanceBytes}`,
+        `data.artifacts.maxRoleHandoffBytes: ${data.artifacts.maxRoleHandoffBytes}`,
+        `data.artifacts.maxEvidenceBytes: ${data.artifacts.maxEvidenceBytes}`,
+        `data.artifacts.maxTerminalCaptureBytes: ${data.artifacts.maxTerminalCaptureBytes}`,
+        `data.artifacts.maxRunBytes: ${data.artifacts.maxRunBytes}`,
+        `data.artifacts.redactionPatterns: ${data.artifacts.redactionPatterns.join(' ')}`,
       );
+      for (const route of data.roleRouting) {
+        lines.push(`data.roleRouting: ${route.role} harness=${route.harness} model=${route.model}`);
+      }
     }
   } else {
     lines.push(
@@ -1056,6 +1122,13 @@ function failureKindFor(error: PublicCommandError): ReportFailureKind {
   switch (error._tag) {
     case 'RunWorkflowError':
       return error.kind;
+    case 'ReadinessError':
+    case 'PreviewLocationsError':
+    case 'ProfileCheckError':
+    case 'InvalidRunRequest':
+    case 'DuplicateRunId':
+    case 'RunIdentityStorageError':
+    case 'InvalidProjectConfiguration':
     case 'RunStateUnavailable':
     case 'RunHistoryIntegrityError':
     case 'RunHistoryStorageError':
@@ -1165,34 +1238,6 @@ function toDomainInvocation(
 }
 
 function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'] {
-  if ('availability' in report) {
-    if (report.runId !== undefined && report.taskId !== undefined) {
-      return {
-        availability: report.availability,
-        message: report.message,
-        runId: report.runId,
-        taskId: report.taskId,
-      };
-    }
-    if (report.runId !== undefined) {
-      return {
-        availability: report.availability,
-        message: report.message,
-        runId: report.runId,
-      };
-    }
-    if (report.taskId !== undefined) {
-      return {
-        availability: report.availability,
-        message: report.message,
-        taskId: report.taskId,
-      };
-    }
-    return {
-      availability: report.availability,
-      message: report.message,
-    };
-  }
   if ('host' in report) {
     const base: (typeof DoctorReportData)['Type'] = {
       readiness: 'ready',
@@ -1224,13 +1269,31 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
         filesystemProfiles: [...report.roleHost.filesystemProfiles],
         networkProfiles: [...report.roleHost.networkProfiles],
       },
+      roleRouting: report.roleRouting.map((route) => ({ ...route })),
+      artifacts: {
+        retentionDays: report.artifacts.retentionDays,
+        maxRequestBytes: report.artifacts.maxRequestBytes,
+        maxGuidanceBytes: report.artifacts.maxGuidanceBytes,
+        maxRoleHandoffBytes: report.artifacts.maxRoleHandoffBytes,
+        maxEvidenceBytes: report.artifacts.maxEvidenceBytes,
+        maxTerminalCaptureBytes: report.artifacts.maxTerminalCaptureBytes,
+        maxRunBytes: report.artifacts.maxRunBytes,
+        redactionPatterns: [...report.artifacts.redactionPatterns],
+      },
     };
     if (!('publication' in report)) {
       return base;
     }
+    const { resultPublication, ...decisionPublication } = report.publication;
     return {
       ...base,
-      publication: Schema.decodeUnknownSync(PublicationReadinessData)(report.publication),
+      publication:
+        resultPublication === null
+          ? Schema.decodeUnknownSync(PublicationReadinessData)(decisionPublication)
+          : Schema.decodeUnknownSync(PublicationReadinessData)({
+              ...decisionPublication,
+              resultPublication: { ...resultPublication },
+            }),
     };
   }
   if ('profileCheck' in report) {
@@ -1257,55 +1320,57 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
       normalizedByteLength: report.request.normalizedByteLength,
       normalizedPromptHash: report.request.normalizedPromptHash,
     };
-    if ('workflowState' in report) {
-      const workflowReport = {
-        runId: report.runId,
-        taskId: report.taskId,
-        runDirectory: report.runDirectory,
-        request,
-        provenance: { ...report.provenance },
-        workflowState: report.workflowState,
-        outcome: report.outcome,
-        stages: [...report.stages],
-        testerSkipped: report.testerSkipped,
-        resultPullRequest: report.resultPullRequest ?? null,
-      };
-      if (report.decision === undefined && report.recovery === undefined) {
-        return workflowReport;
-      }
-      const decisionData =
-        report.decision === undefined
-          ? null
-          : {
-              applied: report.decision.applied,
-              waiting: report.decision.waiting,
-              draftPrUrl: report.decision.draftPrUrl,
-            };
-      const recoveryData =
-        report.recovery === undefined
-          ? null
-          : {
-              disposition: report.recovery.disposition,
-              reason: report.recovery.reason,
-            };
-      if (decisionData !== null && recoveryData !== null) {
-        return { ...workflowReport, decision: decisionData, recovery: recoveryData };
-      }
-      if (decisionData !== null) {
-        return { ...workflowReport, decision: decisionData };
-      }
-      if (recoveryData !== null) {
-        return { ...workflowReport, recovery: recoveryData };
-      }
-      return workflowReport;
-    }
-    return {
+    const baseWorkflowReport = {
       runId: report.runId,
       taskId: report.taskId,
       runDirectory: report.runDirectory,
-      provenance: { ...report.provenance },
       request,
+      provenance: { ...report.provenance },
+      workflowState: report.workflowState,
+      outcome: report.outcome,
+      stages: [...report.stages],
+      testerSkipped: report.testerSkipped,
+      resultPullRequest: report.resultPullRequest ?? null,
     };
+    const workflowReport =
+      report.resultMerged === undefined
+        ? baseWorkflowReport
+        : {
+            ...baseWorkflowReport,
+            resultMerged: {
+              commit: report.resultMerged.commit,
+              sourceBranch: report.resultMerged.sourceBranch,
+              fastForward: report.resultMerged.fastForward,
+            },
+          };
+    if (report.decision === undefined && report.recovery === undefined) {
+      return workflowReport;
+    }
+    const decisionData =
+      report.decision === undefined
+        ? null
+        : {
+            applied: report.decision.applied,
+            waiting: report.decision.waiting,
+            draftPrUrl: report.decision.draftPrUrl,
+          };
+    const recoveryData =
+      report.recovery === undefined
+        ? null
+        : {
+            disposition: report.recovery.disposition,
+            reason: report.recovery.reason,
+          };
+    if (decisionData !== null && recoveryData !== null) {
+      return { ...workflowReport, decision: decisionData, recovery: recoveryData };
+    }
+    if (decisionData !== null) {
+      return { ...workflowReport, decision: decisionData };
+    }
+    if (recoveryData !== null) {
+      return { ...workflowReport, recovery: recoveryData };
+    }
+    return workflowReport;
   }
   if ('manifest' in report) {
     return Schema.decodeUnknownSync(DiagnosticBundleReportData)(report);
@@ -1384,12 +1449,17 @@ function toEnvelopeData(report: PublicCommandReport): (typeof ReportData)['Type'
     },
     branch: report.branch,
     workspace: report.workspace,
-    roleHarness: {
-      protocol: report.roleHarness.protocol,
-      command: [...report.roleHarness.command],
-    },
+    roleRouting: report.roleRouting.map((route) => ({ ...route })),
     artifacts: {
       root: report.artifacts.root,
+      retentionDays: report.artifacts.retentionDays,
+      maxRequestBytes: report.artifacts.maxRequestBytes,
+      maxGuidanceBytes: report.artifacts.maxGuidanceBytes,
+      maxRoleHandoffBytes: report.artifacts.maxRoleHandoffBytes,
+      maxEvidenceBytes: report.artifacts.maxEvidenceBytes,
+      maxTerminalCaptureBytes: report.artifacts.maxTerminalCaptureBytes,
+      maxRunBytes: report.artifacts.maxRunBytes,
+      redactionPatterns: [...report.artifacts.redactionPatterns],
     },
   };
 }
@@ -1408,9 +1478,11 @@ export const runCli = Effect.fn('runCli')(function* (
   | OwnedProjectProcess
   | RunIdentityStore
   | RunHistoryStorage
+  | GitHubPublication
   | RepositoryLeaseStore
   | RepositoryHostIdentity
   | RoleHostLauncher
+  | RoleHostBinaryResolver
   | RoleTurnResourceObserver
   | RunGit
   | GuidanceGit

@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { installBundledHarnessShim } from './fixtures/role-host/bundled-harness-shim.js';
 
 import {
   RoleHost,
@@ -50,10 +51,12 @@ function goldenDocument(targetRepository: string) {
     sourceRemote: 'origin',
     sourceBranch: 'main',
     taskBranchPolicy: 'foundry/<task-id>',
-    roleHarness: {
-      protocol: 'foundry-role-host-v1',
-      command: ['foundry-role-host'],
-      environmentAllowlist: [],
+    roles: {
+      architect: { harness: 'codex', model: 'gpt-5.6-luna' },
+      coder: { harness: 'codex', model: 'gpt-5.6-luna' },
+      lead_coder: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      tester: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      reviewer: { harness: 'codex', model: 'gpt-5.6-luna' },
     },
     timeouts: {
       roleMs: 1800000,
@@ -80,16 +83,6 @@ function goldenDocument(targetRepository: string) {
     },
     runtimeProfile: null,
     decisionPublication: null,
-    artifacts: {
-      retentionDays: 30,
-      maxRequestBytes: 262144,
-      maxGuidanceBytes: 1048576,
-      maxRoleHandoffBytes: 262144,
-      maxEvidenceBytes: 26214400,
-      maxTerminalCaptureBytes: 10485760,
-      maxRunBytes: 104857600,
-      redactionPatterns: [],
-    },
   };
 }
 
@@ -131,9 +124,10 @@ function setupLog() {
   };
 }
 
-function adapterLayer(scenario: string, logPath: string): Layer.Layer<RoleHost> {
+function adapterLayer(): Layer.Layer<RoleHost> {
   return roleHostProcessLayer({
-    command: [process.execPath, FIXTURE_PATH, scenario, logPath],
+    harness: 'codex',
+    model: 'gpt-5.6-luna',
     cwd: REPOSITORY_ROOT,
     environmentAllowlist: [],
     timeoutMs: 10_000,
@@ -244,11 +238,12 @@ describe('role-host capabilities adapter', () => {
   it.effect('executes the capabilities operation and strictly decodes the report', () =>
     Effect.gen(function* () {
       const log = setupLog();
+      const shim = installBundledHarnessShim(FIXTURE_PATH, 'settled', log.logPath);
       try {
         const report = yield* Effect.gen(function* () {
           const host = yield* RoleHost;
           return yield* host.capabilities({ schemaVersion: ROLE_HOST_PROTOCOL_VERSION });
-        }).pipe(Effect.provide(adapterLayer('settled', log.logPath)));
+        }).pipe(Effect.provide(adapterLayer()));
 
         expect(report.protocol).toBe(ROLE_HOST_PROTOCOL_NAME);
         expect(report.resumable).toBe(true);
@@ -264,6 +259,7 @@ describe('role-host capabilities adapter', () => {
         expect(invocations.map((invocation) => invocation.operation)).toEqual(['capabilities']);
         expect(invocations.at(0)?.argv.at(-1)).toBe('capabilities');
       } finally {
+        shim.restore();
         log.cleanup();
       }
     }),
@@ -273,13 +269,15 @@ describe('role-host capabilities adapter', () => {
     Effect.gen(function* () {
       for (const scenario of ['nonzero', 'malformed', 'extra-capabilities', 'unknown-role']) {
         const log = setupLog();
+        const shim = installBundledHarnessShim(FIXTURE_PATH, scenario, log.logPath);
         try {
           const error = yield* Effect.gen(function* () {
             const host = yield* RoleHost;
             yield* host.capabilities({ schemaVersion: ROLE_HOST_PROTOCOL_VERSION });
-          }).pipe(Effect.provide(adapterLayer(scenario, log.logPath)), Effect.flip);
+          }).pipe(Effect.provide(adapterLayer()), Effect.flip);
           expect(error, scenario).toBeInstanceOf(RoleHostOperationalError);
         } finally {
+          shim.restore();
           log.cleanup();
         }
       }
@@ -352,13 +350,15 @@ describe('role-host capability preflight', () => {
     Effect.gen(function* () {
       const configuration = yield* decodeProjectConfiguration(goldenDocument('/target'), '/work');
       const log = setupLog();
+      const shim = installBundledHarnessShim(FIXTURE_PATH, 'nonzero', log.logPath);
       try {
         const failingLauncher = Layer.succeed(
           RoleHostLauncher,
           RoleHostLauncher.of({
             launch: () =>
               roleHostProcessLayer({
-                command: [process.execPath, FIXTURE_PATH, 'nonzero', log.logPath],
+                harness: 'codex',
+                model: 'gpt-5.6-luna',
                 cwd: REPOSITORY_ROOT,
                 environmentAllowlist: [],
                 timeoutMs: 10_000,
@@ -375,8 +375,73 @@ describe('role-host capability preflight', () => {
           expect(error.reason).toBe('unavailable');
         }
       } finally {
+        shim.restore();
         log.cleanup();
       }
+    }),
+  );
+});
+
+describe('live capability preflight harness coverage', () => {
+  function recordingLauncher(
+    recorded: Array<{ readonly harness: string; readonly model: string }>,
+  ) {
+    return Layer.succeed(
+      RoleHostLauncher,
+      RoleHostLauncher.of({
+        launch: (options) => {
+          recorded.push({ harness: options.harness, model: options.model });
+          return Layer.succeed(
+            RoleHost,
+            RoleHost.of({
+              capabilities: () => Effect.succeed(CAPABLE_ROLE_HOST_CAPABILITIES),
+              create: () => Effect.die(new Error('preflight never creates sessions')),
+              submit: () => Effect.die(new Error('preflight never submits turns')),
+              observe: () => Effect.die(new Error('preflight never observes turns')),
+              stop: () => Effect.die(new Error('preflight never stops sessions')),
+            }),
+          );
+        },
+      }),
+    );
+  }
+
+  it.effect('probes every distinct configured harness before provisioning', () =>
+    Effect.gen(function* () {
+      const configuration = yield* decodeProjectConfiguration(goldenDocument('/target'), '/work');
+      const recorded: Array<{ readonly harness: string; readonly model: string }> = [];
+      yield* preflightRoleHostCapabilities({ configuration }).pipe(
+        Effect.provide(recordingLauncher(recorded)),
+      );
+      expect(recorded).toEqual([
+        { harness: 'codex', model: 'gpt-5.6-luna' },
+        { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      ]);
+    }),
+  );
+
+  it.effect('probes each distinct harness-plus-model pair', () =>
+    Effect.gen(function* () {
+      const document = goldenDocument('/target');
+      const configuration = yield* decodeProjectConfiguration(
+        {
+          ...document,
+          roles: {
+            ...document.roles,
+            coder: { harness: 'codex', model: 'gpt-5.6-luna-alt' },
+          },
+        },
+        '/work',
+      );
+      const recorded: Array<{ readonly harness: string; readonly model: string }> = [];
+      yield* preflightRoleHostCapabilities({ configuration }).pipe(
+        Effect.provide(recordingLauncher(recorded)),
+      );
+      expect(recorded).toEqual([
+        { harness: 'codex', model: 'gpt-5.6-luna' },
+        { harness: 'codex', model: 'gpt-5.6-luna-alt' },
+        { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      ]);
     }),
   );
 });

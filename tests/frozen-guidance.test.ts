@@ -36,6 +36,7 @@ import {
   computeGuidanceAggregateHash,
   computeGuidanceContentHash,
 } from '../src/domain/guidance.js';
+import { HARDCODED_ARTIFACT_BOUNDS } from '../src/domain/project-configuration.js';
 import { ReadinessFilesLive } from '../src/platform/readiness.js';
 import { RepositoryLeaseLive } from '../src/platform/repository-lease.js';
 import { RunGitLive } from '../src/platform/git-provisioning.js';
@@ -96,21 +97,21 @@ function gitBytes(dir: string, args: ReadonlyArray<string>): Buffer {
   return execFileSync('git', [...args], { cwd: dir });
 }
 
-function goldenDocument(
-  targetRepository: string,
-  guidancePaths: ReadonlyArray<string>,
-  maxGuidanceBytes: number,
-) {
+function goldenDocument(targetRepository: string, guidancePaths: ReadonlyArray<string>) {
+  // 055: artifact bounds are hardcoded; the document carries no `artifacts`
+  // block and oversized-guidance tests generate content past the fixed bound.
   return {
     schemaVersion: 1,
     targetRepository,
     sourceRemote: 'origin',
     sourceBranch: 'main',
     taskBranchPolicy: 'foundry/<task-id>',
-    roleHarness: {
-      protocol: 'foundry-role-host-v1',
-      command: ['foundry-role-host'],
-      environmentAllowlist: [],
+    roles: {
+      architect: { harness: 'codex', model: 'gpt-5.6-luna' },
+      coder: { harness: 'codex', model: 'gpt-5.6-luna' },
+      lead_coder: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      tester: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+      reviewer: { harness: 'codex', model: 'gpt-5.6-luna' },
     },
     timeouts: {
       roleMs: 1800000,
@@ -137,16 +138,6 @@ function goldenDocument(
     },
     runtimeProfile: null,
     decisionPublication: null,
-    artifacts: {
-      retentionDays: 30,
-      maxRequestBytes: 262144,
-      maxGuidanceBytes,
-      maxRoleHandoffBytes: 262144,
-      maxEvidenceBytes: 26214400,
-      maxTerminalCaptureBytes: 10485760,
-      maxRunBytes: 104857600,
-      redactionPatterns: [],
-    },
   };
 }
 
@@ -167,7 +158,6 @@ interface GuidanceFixtureOptions {
     readonly target: string;
     readonly home: string;
   }) => ReadonlyArray<string>;
-  readonly maxGuidanceBytes?: number;
   readonly beforeCommit?: (target: string) => void;
   readonly afterCommit?: (target: string) => void;
 }
@@ -205,10 +195,7 @@ function setupGuidanceFixture(options: GuidanceFixtureOptions): GuidanceFixture 
   const guidancePaths =
     options.guidancePaths === undefined ? [] : options.guidancePaths({ target, home });
   const configPath = join(home, 'foundry.config.json');
-  writeFileSync(
-    configPath,
-    JSON.stringify(goldenDocument(target, guidancePaths, options.maxGuidanceBytes ?? 1048576)),
-  );
+  writeFileSync(configPath, JSON.stringify(goldenDocument(target, guidancePaths)));
   const requestPath = join(home, 'request.md');
   writeFileSync(requestPath, `# Outcome\n\n${options.label}\n`);
   return {
@@ -551,7 +538,6 @@ describe('frozen guidance snapshot', () => {
             readonly target: string;
             readonly home: string;
           }) => ReadonlyArray<string>;
-          readonly maxGuidanceBytes?: number;
           readonly beforeCommit?: (target: string) => void;
           readonly afterCommit?: (target: string) => void;
         }
@@ -589,13 +575,27 @@ describe('frozen guidance snapshot', () => {
             label: 'per-file-limit',
             problem: 'guidance-file-too-large',
             guidancePaths: ({ target }) => [join(target, 'docs', 'guide.md')],
-            maxGuidanceBytes: 8,
+            // 055: exceed the fixed maxGuidanceBytes by an exact bounded amount.
+            beforeCommit: (target) => {
+              writeFileSync(
+                join(target, 'docs', 'guide.md'),
+                'g'.repeat(HARDCODED_ARTIFACT_BOUNDS.maxGuidanceBytes + 17),
+              );
+            },
           },
           {
             label: 'aggregate-limit',
             problem: 'guidance-aggregate-too-large',
-            guidancePaths: ({ target }) => [join(target, 'docs', 'guide.md')],
-            maxGuidanceBytes: EXTRA_GUIDANCE.length + 2,
+            guidancePaths: ({ target }) => [
+              join(target, 'docs', 'guide.md'),
+              join(target, 'docs', 'extra.md'),
+            ],
+            // 055: each file stays under the fixed maxGuidanceBytes while the
+            // aggregate honestly exceeds it.
+            beforeCommit: (target) => {
+              writeFileSync(join(target, 'docs', 'guide.md'), 'g'.repeat(600_000));
+              writeFileSync(join(target, 'docs', 'extra.md'), 'e'.repeat(500_000));
+            },
           },
           {
             label: 'invalid-text',
@@ -611,7 +611,6 @@ describe('frozen guidance snapshot', () => {
           const fixture = setupGuidanceFixture({
             label: `reject-${testCase.label}`,
             guidancePaths: testCase.guidancePaths,
-            maxGuidanceBytes: testCase.maxGuidanceBytes,
             beforeCommit: testCase.beforeCommit,
             afterCommit: testCase.afterCommit,
           });

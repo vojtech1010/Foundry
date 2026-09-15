@@ -9,7 +9,7 @@ import { GuidanceLive } from '../platform/guidance.js';
 import { ProjectCommandsPlatformLive } from '../platform/project-commands.js';
 import { ReadinessLive } from '../platform/readiness.js';
 import { RepositoryLeaseLive } from '../platform/repository-lease.js';
-import { RoleHostLauncherLive } from '../platform/role-host.js';
+import { RoleHostBinaryResolverLive, RoleHostLauncherLive } from '../platform/role-host.js';
 import { RoleTurnResourceObserverLive } from '../platform/role-permissions.js';
 import { RunHistoryLive } from '../platform/run-history.js';
 import { RunIdentityLive } from '../platform/run-identity.js';
@@ -30,6 +30,7 @@ const program = runCli(process.argv.slice(2)).pipe(
       RunHistoryLive,
       RepositoryLeaseLive,
       RoleHostLauncherLive,
+      RoleHostBinaryResolverLive,
       RoleTurnResourceObserverLive,
       RunGitLive,
       GitHubPublicationLive,

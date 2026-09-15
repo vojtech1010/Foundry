@@ -43,13 +43,14 @@ interface Fixture {
   readonly cleanup: () => void;
 }
 
-function configurationOf(fixture: Fixture, retentionDays: number): void {
+function configurationOf(fixture: Fixture): void {
+  // 055: artifact bounds are hardcoded, so the document carries no `artifacts`
+  // block; retention tests advance TestClock past the fixed 30-day bound.
   const document = goldenConfigurationDocument(fixture.target, false);
-  document.artifacts.retentionDays = retentionDays;
   writeFileSync(fixture.configPath, JSON.stringify(document));
 }
 
-function setupFixture(retentionDays = 0): Fixture {
+function setupFixture(): Fixture {
   const base = mkdtempSync(join(tmpdir(), 'foundry-retention-'));
   const target = join(base, 'target');
   const runsRoot = join(target, '.agent', 'runs');
@@ -64,7 +65,7 @@ function setupFixture(retentionDays = 0): Fixture {
     workspace,
     cleanup: () => rmSync(base, { recursive: true, force: true }),
   };
-  configurationOf(fixture, retentionDays);
+  configurationOf(fixture);
   return fixture;
 }
 
@@ -225,19 +226,22 @@ function failingWorkspaceStore(): Layer.Layer<RunIdentityStore> {
 describe('retention cleanup list', () => {
   it.effect('excludes nonterminal runs and includes terminal runs past retention', () =>
     Effect.gen(function* () {
-      const fixture = setupFixture(0);
+      const fixture = setupFixture();
       try {
         writeIdentity(fixture);
         yield* seedTerminal(fixture);
         writeIdentity(fixture, 'RUN-ACTIVE', 'TASK-ACTIVE');
         yield* seedPlanning(fixture, 'RUN-ACTIVE', 'TASK-ACTIVE');
+        // The hardcoded retention bound is 30 days; advance past it so the
+        // terminal run is honestly eligible while the active run is excluded.
+        yield* TestClock.adjust(Duration.days(31));
 
         const report = yield* readRetentionCleanupList({
           configArg: fixture.configPath,
           cwd: fixture.base,
         }).pipe(Effect.provide(applicationLayers()));
 
-        expect(report.retentionDays).toBe(0);
+        expect(report.retentionDays).toBe(30);
         expect(report.runs.map((run) => run.runId)).toEqual([RUN_ID]);
         expect(report.runs[0]?.workflowState).toBe('abandoned');
         expect(report.runs[0]?.ownership).toBe('owned');
@@ -250,7 +254,7 @@ describe('retention cleanup list', () => {
 
   it.effect('uses the terminal transition time, not file mtime', () =>
     Effect.gen(function* () {
-      const fixture = setupFixture(30);
+      const fixture = setupFixture();
       try {
         writeIdentity(fixture);
         yield* seedTerminal(fixture);
@@ -283,7 +287,7 @@ describe('retention cleanup list', () => {
 describe('confirmed retention cleanup', () => {
   it.effect('refuses a nonterminal run and writes nothing', () =>
     Effect.gen(function* () {
-      const fixture = setupFixture(0);
+      const fixture = setupFixture();
       try {
         writeIdentity(fixture);
         yield* seedPlanning(fixture);
@@ -310,9 +314,12 @@ describe('confirmed retention cleanup', () => {
 
   it.effect('leaves the run untouched and names the failing check', () =>
     Effect.gen(function* () {
-      const fixture = setupFixture(0);
+      const fixture = setupFixture();
       try {
         yield* seedTerminal(fixture);
+        // Advance past the hardcoded 30-day bound so the run reaches the
+        // ownership check instead of stopping as within-retention.
+        yield* TestClock.adjust(Duration.days(31));
 
         const result = yield* runRetentionCleanup({
           configArg: fixture.configPath,
@@ -336,10 +343,13 @@ describe('confirmed retention cleanup', () => {
 
   it.effect('preserves the task branch and handoff while disposing owned resources', () =>
     Effect.gen(function* () {
-      const fixture = setupFixture(0);
+      const fixture = setupFixture();
       try {
         writeIdentity(fixture);
         yield* seedTerminal(fixture);
+        // Advance past the hardcoded 30-day bound so the terminal run is
+        // honestly eligible for disposal.
+        yield* TestClock.adjust(Duration.days(31));
 
         const report = yield* runRetentionCleanup({
           configArg: fixture.configPath,
@@ -364,10 +374,13 @@ describe('confirmed retention cleanup', () => {
 
   it.effect('allows partial success and keeps the run eligible afterwards', () =>
     Effect.gen(function* () {
-      const fixture = setupFixture(0);
+      const fixture = setupFixture();
       try {
         writeIdentity(fixture);
         yield* seedTerminal(fixture);
+        // Advance past the hardcoded 30-day bound so the terminal run is
+        // honestly eligible; the partial failure must keep it eligible.
+        yield* TestClock.adjust(Duration.days(31));
 
         const layers = applicationLayers(failingWorkspaceStore());
         const report = yield* runRetentionCleanup({
@@ -405,10 +418,13 @@ function cliLayers(): Layer.Layer<
 describe('retention cleanup CLI envelope', () => {
   it.effect('reports the eligible list with exit code 0', () =>
     Effect.gen(function* () {
-      const fixture = setupFixture(0);
+      const fixture = setupFixture();
       try {
         writeIdentity(fixture);
         yield* seedTerminal(fixture);
+        // Advance past the hardcoded 30-day bound so the terminal run is
+        // honestly eligible for listing.
+        yield* TestClock.adjust(Duration.days(31));
 
         const result = yield* runCli([
           'cleanup',
@@ -434,10 +450,13 @@ describe('retention cleanup CLI envelope', () => {
 
   it.effect('confirms deletion with exit code 0 and preserves the handoff', () =>
     Effect.gen(function* () {
-      const fixture = setupFixture(0);
+      const fixture = setupFixture();
       try {
         writeIdentity(fixture);
         yield* seedTerminal(fixture);
+        // Advance past the hardcoded 30-day bound so the terminal run is
+        // honestly eligible for confirmed disposal.
+        yield* TestClock.adjust(Duration.days(31));
 
         const result = yield* runCli([
           'cleanup',
@@ -467,7 +486,7 @@ describe('retention cleanup CLI envelope', () => {
 
   it.effect('refuses a nonterminal confirmation with exit code 1', () =>
     Effect.gen(function* () {
-      const fixture = setupFixture(0);
+      const fixture = setupFixture();
       try {
         writeIdentity(fixture);
         yield* seedPlanning(fixture);

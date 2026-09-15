@@ -2,10 +2,15 @@ import { Effect, Schema } from 'effect';
 import { resolve } from 'node:path';
 
 import {
+  HARDCODED_ARTIFACT_BOUNDS,
   PROJECT_CONFIGURATION_SCHEMA_VERSION,
   PUBLICATION_DRAFT,
   PUBLICATION_MAINTAINERS_CAN_MODIFY,
-  ROLE_HARNESS_PROTOCOL,
+  RESULT_PUBLICATION_DEFAULT_MERGE_METHOD,
+  RESULT_PUBLICATION_DEFAULT_MODE,
+  RESULT_PUBLICATION_MERGE_METHODS,
+  RESULT_PUBLICATION_MODES,
+  ROLE_HARNESS_NAMES,
   RUNTIME_DATA_POLICY,
   RUNTIME_TESTER_ACCESS,
   TASK_ID_PLACEHOLDER,
@@ -14,7 +19,7 @@ import {
 } from '../domain/project-configuration.js';
 
 import type { SchemaIssue } from 'effect';
-import type { CommandVector, ProjectConfiguration } from '../domain/project-configuration.js';
+import type { ProjectConfiguration } from '../domain/project-configuration.js';
 
 const PositiveInteger = Schema.Int.check(Schema.isGreaterThan(0));
 
@@ -24,10 +29,25 @@ const CommandVectorSchema = Schema.NonEmptyArray(Schema.NonEmptyString);
 
 const StringListSchema = Schema.Array(Schema.NonEmptyString);
 
-const RoleHarnessSchema = Schema.Struct({
-  protocol: Schema.Literal(ROLE_HARNESS_PROTOCOL),
-  command: CommandVectorSchema,
-  environmentAllowlist: StringListSchema,
+/**
+ * A model string is stored trimmed and must be non-empty after trimming.
+ * Config-time validation cannot know a harness's model catalog, so any
+ * trimmed non-empty value is accepted here; the adapter rejects unknown
+ * models against its own catalog at launch time and fails closed.
+ */
+const RoleModelSchema = Schema.Trim.pipe(Schema.check(Schema.isNonEmpty()));
+
+const RoleHarnessSelectionSchema = Schema.Struct({
+  harness: Schema.Literals(ROLE_HARNESS_NAMES),
+  model: RoleModelSchema,
+});
+
+const RolesSchema = Schema.Struct({
+  architect: RoleHarnessSelectionSchema,
+  coder: RoleHarnessSelectionSchema,
+  lead_coder: RoleHarnessSelectionSchema,
+  tester: RoleHarnessSelectionSchema,
+  reviewer: RoleHarnessSelectionSchema,
 });
 
 const TimeoutsSchema = Schema.Struct({
@@ -92,24 +112,18 @@ const DecisionPublicationSchema = Schema.Struct({
   maintainersCanModify: Schema.Boolean,
 });
 
-const ArtifactsSchema = Schema.Struct({
-  retentionDays: NonNegativeInteger,
-  maxRequestBytes: PositiveInteger,
-  maxGuidanceBytes: PositiveInteger,
-  maxRoleHandoffBytes: PositiveInteger,
-  maxEvidenceBytes: PositiveInteger,
-  maxTerminalCaptureBytes: PositiveInteger,
-  maxRunBytes: PositiveInteger,
-  redactionPatterns: StringListSchema,
+const ResultPublicationSchema = Schema.Struct({
+  mode: Schema.Literals(RESULT_PUBLICATION_MODES),
+  mergeMethod: Schema.optional(Schema.Literals(RESULT_PUBLICATION_MERGE_METHODS)),
 });
 
-export const ProjectConfigurationSchema = Schema.Struct({
+const ProjectConfigurationInputSchema = Schema.Struct({
   schemaVersion: Schema.Literal(PROJECT_CONFIGURATION_SCHEMA_VERSION),
   targetRepository: Schema.NonEmptyString,
   sourceRemote: Schema.NonEmptyString,
   sourceBranch: Schema.NonEmptyString,
   taskBranchPolicy: Schema.NonEmptyString,
-  roleHarness: RoleHarnessSchema,
+  roles: RolesSchema,
   timeouts: TimeoutsSchema,
   retryBudgets: RetryBudgetsSchema,
   operationalRetryBudgets: OperationalRetryBudgetsSchema,
@@ -117,8 +131,10 @@ export const ProjectConfigurationSchema = Schema.Struct({
   projectProfile: ProjectProfileSchema,
   runtimeProfile: Schema.NullOr(RuntimeProfileSchema),
   decisionPublication: Schema.NullOr(DecisionPublicationSchema),
-  artifacts: ArtifactsSchema,
+  resultPublication: Schema.optional(ResultPublicationSchema),
 });
+
+export const ProjectConfigurationSchema = ProjectConfigurationInputSchema;
 
 export class InvalidProjectConfiguration extends Schema.TaggedError<InvalidProjectConfiguration>()(
   'InvalidProjectConfiguration',
@@ -128,8 +144,6 @@ export class InvalidProjectConfiguration extends Schema.TaggedError<InvalidProje
     field: Schema.optional(Schema.String),
   },
 ) {}
-
-export type ResolvedProjectConfiguration = ProjectConfiguration;
 
 function invalidProjectConfiguration(
   detail: string,
@@ -154,6 +168,13 @@ function collectIssuePaths(
     }
     case 'Composite':
     case 'AnyOf': {
+      // Effect reports a failed literal union (for example an unknown harness
+      // name) as a composite with no children; attribute it to the current
+      // path instead of dropping it so field reporting stays precise.
+      if (issue.issues.length === 0) {
+        paths.push([...prefix]);
+        return;
+      }
       for (const child of issue.issues) {
         collectIssuePaths(child, prefix, paths);
       }
@@ -187,18 +208,6 @@ function fromSchemaError(error: Schema.SchemaError): InvalidProjectConfiguration
     error.message.replaceAll(/\s+/gu, ' ').trim(),
     issueFieldPath(error.issue),
   );
-}
-
-function containsPathSeparator(executable: string): boolean {
-  return executable.includes('/') || executable.includes('\\');
-}
-
-function resolveHarnessCommand(configDirectory: string, command: CommandVector): CommandVector {
-  const [executable, ...rest] = command;
-  if (!containsPathSeparator(executable)) {
-    return command;
-  }
-  return [resolve(configDirectory, executable), ...rest];
 }
 
 export const decodeProjectConfiguration = Effect.fn('decodeProjectConfiguration')(function* (
@@ -254,15 +263,34 @@ export const decodeProjectConfiguration = Effect.fn('decodeProjectConfiguration'
     }
   }
 
+  const resultPublication = decoded.resultPublication;
+  if (resultPublication !== undefined) {
+    if (
+      resultPublication.mergeMethod !== undefined &&
+      resultPublication.mode !== 'non-draft-pr-auto-merge'
+    ) {
+      return yield* invalidProjectConfiguration(
+        'resultPublication.mergeMethod is only legal with mode "non-draft-pr-auto-merge"',
+        'resultPublication.mergeMethod',
+      );
+    }
+    if (publication === null) {
+      return yield* invalidProjectConfiguration(
+        'resultPublication requires GitHub publication to be configured',
+        'resultPublication',
+      );
+    }
+  }
+
   yield* Effect.logDebug('Decoded Foundry project configuration');
 
   return {
     ...decoded,
-    targetRepository: resolve(configDirectory, decoded.targetRepository),
-    roleHarness: {
-      ...decoded.roleHarness,
-      command: resolveHarnessCommand(configDirectory, decoded.roleHarness.command),
+    artifacts: {
+      ...HARDCODED_ARTIFACT_BOUNDS,
+      redactionPatterns: [...HARDCODED_ARTIFACT_BOUNDS.redactionPatterns],
     },
+    targetRepository: resolve(configDirectory, decoded.targetRepository),
     projectProfile: {
       ...decoded.projectProfile,
       guidancePaths: decoded.projectProfile.guidancePaths.map((guidancePath) =>
@@ -285,5 +313,9 @@ export const decodeProjectConfiguration = Effect.fn('decodeProjectConfiguration'
             draft: PUBLICATION_DRAFT,
             maintainersCanModify: PUBLICATION_MAINTAINERS_CAN_MODIFY,
           },
+    resultPublication: {
+      mode: resultPublication?.mode ?? RESULT_PUBLICATION_DEFAULT_MODE,
+      mergeMethod: resultPublication?.mergeMethod ?? RESULT_PUBLICATION_DEFAULT_MERGE_METHOD,
+    },
   };
 });

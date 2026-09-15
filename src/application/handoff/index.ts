@@ -139,10 +139,17 @@ const HandoffHumanDecisionSchema = Schema.Struct({
   detail: Schema.NonEmptyString,
 });
 
+const HandoffMergeSchema = Schema.Struct({
+  commit: Schema.NonEmptyString,
+  sourceBranch: Schema.NonEmptyString,
+  fastForward: Schema.Boolean,
+});
+
 const HandoffPublicationSchema = Schema.Struct({
   created: Schema.Boolean,
   url: Schema.NullOr(Schema.NonEmptyString),
   kind: Schema.Literals(['result', 'none']),
+  merged: Schema.NullOr(HandoffMergeSchema),
   reason: Schema.NonEmptyString,
 });
 
@@ -560,7 +567,22 @@ function publicationOf(
       created: false,
       url: null,
       kind: 'none',
+      merged: null,
       reason: 'A completed no-change run records no Coder commit and creates no pull request.',
+    };
+  }
+  const merged = derived.resultMergeRecorded ?? null;
+  if (merged !== null) {
+    return {
+      created: false,
+      url: null,
+      kind: 'result',
+      merged: {
+        commit: merged.commit,
+        sourceBranch: merged.sourceBranch,
+        fastForward: merged.fastForward,
+      },
+      reason: `Reviewer approval recorded a direct merge of the accepted commit ${merged.commit} into "${merged.sourceBranch}".`,
     };
   }
   const recorded = derived.resultPrRecorded ?? null;
@@ -569,6 +591,7 @@ function publicationOf(
       created: true,
       url: recorded.url,
       kind: 'result',
+      merged: null,
       reason: `Reviewer approval recorded result pull request ${recorded.url} for the accepted commit ${recorded.commit}.`,
     };
   }
@@ -578,6 +601,7 @@ function publicationOf(
       created: false,
       url: null,
       kind: 'result',
+      merged: null,
       reason:
         'Reviewer approval completed the run locally; result publication is not settled, so resume the same run to reconcile it in place without a duplicate pull request.',
     };
@@ -586,6 +610,7 @@ function publicationOf(
     created: false,
     url: null,
     kind: 'none',
+    merged: null,
     reason:
       'Reviewer approval completes the run locally; no result pull request is recorded. A draft decision pull request remains the only channel for a recorded human_decision_required outcome.',
   };

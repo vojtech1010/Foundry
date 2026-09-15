@@ -27,11 +27,21 @@ Tester skip. Keep rejected attempts, discounted evidence, non-blocking
 limitations, and cleanup warnings discoverable even after successful completion.
 
 When Reviewer approves a changed implementation and publication is configured,
-Foundry publishes one ordinary (non-draft) result pull request for the task
-branch and the exact accepted result commit, and records its URL against that
-task branch and accepted commit. It is distinct from a decision pull request: it
-presents the approved result for the team's normal GitHub process and is never a
-Foundry decision channel.
+the resolved `resultPublication.mode` decides how the exact accepted commit is
+taken forward:
+
+- `draft-pr` opens one draft result pull request for the task branch and the
+  exact accepted result commit;
+- `non-draft-pr` opens one ordinary non-draft result pull request;
+- `non-draft-pr-auto-merge` opens the non-draft result pull request and asks
+  GitHub to auto-merge it once required checks pass; and
+- `direct-merge` pushes the exact accepted commit to the configured source
+  branch on the configured publication remote and opens no pull request.
+
+Every mode is idempotent and reconciles the same run in place on resume. The
+result surface is distinct from a decision pull request: it presents the
+approved result for the team's GitHub process and is never a Foundry decision
+channel.
 
 ## Canonical handoff
 
@@ -56,11 +66,12 @@ Promised coverage that is unavailable is listed in `missingCoverage` and sets
 The handoff is a report: editing it never changes workflow state.
 
 Reviewer approval completes the run locally. When publication is configured,
-Foundry then publishes a normal (non-draft) result pull request for the exact
-accepted commit after completion. An unconfigured run completes locally and
-reports that no result pull request was opened. If a push or pull-request
-creation is uncertain, the same run is resumed and reconciled in place; Foundry
-never opens a second run or a duplicate result pull request.
+Foundry then takes the accepted commit forward through the configured result
+mode: a result pull request (draft, ordinary, or auto-merge) or a direct update
+of the source branch. An unconfigured run completes locally and reports that no
+result was published. If any remote step is uncertain, the same run is resumed
+and reconciled in place; Foundry never opens a second run or a duplicate result
+pull request.
 
 An authenticated human `accept` decision also completes locally and retains the
 decision evidence and unresolved risk in the handoff; it is never rewritten as
@@ -125,25 +136,31 @@ The PR must not imply approval, completion, or merge readiness.
 
 | Outcome                           | Durable state             | Meaning                                                          |
 | --------------------------------- | ------------------------- | ---------------------------------------------------------------- |
-| Reviewer approved, unconfigured   | `completed`               | Local result is complete; no result PR opened                    |
-| Result PR published               | `completed`               | Ordinary result PR URL recorded for the accepted commit          |
+| Reviewer approved, unconfigured   | `completed`               | Local result is complete; no result published                    |
+| Result PR published               | `completed`               | Result PR URL recorded for the accepted commit                   |
+| Result auto-merge enabled         | `completed`               | Non-draft result PR recorded and GitHub auto-merge enabled       |
+| Result direct-merged              | `completed`               | Accepted commit pushed to the source branch; no PR opened        |
 | Result publication uncertain      | `completed`               | Resume the same run to reconcile; never a duplicate result PR    |
 | Authenticated `accept` option     | `completed`               | Human accepted the recorded decision risk; draft PR remains open |
 | Exact draft PR created/reused     | `human_decision_required` | Await one authenticated option command                           |
 | GitHub decision publication fails | `publish_failed`          | Reconcile the same run; do not create another run or PR          |
 | Remote is not eligible GitHub     | `blocked`                 | Decision cannot be published through the required channel        |
 
-Because PR creation has remote side effects, publication uses a durable
-transaction journal. The decision journal records the checkpoints `pre-push`,
-`pushed`, `pull-request-located`, `pull-request-created`, and `url-recorded`;
-only `url-recorded` carries the authoritative draft PR URL, so recovery resumes
-from the recorded checkpoint and never infers success from a branch or
-arbitrary PR alone. The result publication uses its own `result-pr-checkpoint`
-journal with the stages `pre-push`, `pushed`, `pull-request-created`, and
-`url-recorded`, plus a settled `result-pr-recorded` fact; the result journal is
-permitted only after a Reviewer-approved changed result, and
-`result-pr-recorded` makes a resumed reconciliation a no-op instead of a
-duplicate result pull request.
+Because publication has remote side effects, it uses a durable transaction
+journal. The decision journal records the checkpoints `pre-push`, `pushed`,
+`pull-request-located`, `pull-request-created`, and `url-recorded`; only
+`url-recorded` carries the authoritative draft PR URL, so recovery resumes from
+the recorded checkpoint and never infers success from a branch or arbitrary PR
+alone.
+
+The result channel has its own `result-pr-checkpoint` journal with the stages
+`pre-push`, `pushed`, `pull-request-created`, `url-recorded`, and, per mode,
+`auto-merge-enabled` or `source-branch-updated`. Pull-request modes settle with
+`result-pr-recorded`; `auto-merge-enabled` is journaled beside that fact, so a
+resume replays only the missing stages and never opens a duplicate result pull
+request. `direct-merge` settles with `result-merge-recorded` and opens no pull
+request. Both journals are permitted only after a Reviewer-approved changed
+result, and a settled fact makes a resumed reconciliation a no-op.
 
 Publication uses the GitHub HTTPS API with `GITHUB_TOKEN` supplied from the
 process environment. The required repository permissions are Metadata read,
@@ -155,10 +172,18 @@ available.
 
 The token permissions technically allow more GitHub operations than Foundry
 uses. The publication adapter exposes only repository identity lookup,
-task-branch non-force push, exact-PR lookup, draft-PR creation, decision-comment
-reading, collaborator-permission lookup, and owned draft-PR body refresh; merge,
-close, approval, review submission, release, deployment, and arbitrary branch
-mutation have no application service operation or CLI route.
+task-branch non-force push, pull-request lookup and creation, owned draft-PR
+body refresh, auto-merge enablement, decision-comment reading,
+collaborator-permission lookup, and the `direct-merge` source-branch push.
+Enabling auto-merge delegates the merge to GitHub rules; Foundry still never
+merges through a GitHub merge API, approves, closes, or rewrites history.
+`--force-with-lease` is the only force primitive in the product and exists only
+in the adapter's source-branch push: it is used only by `direct-merge`, only
+against the configured publication remote's configured source branch, and only
+with the lease pinned to the head just fetched, so a concurrent remote move
+aborts the push instead of clobbering it. Merge, close, approval, review
+submission, release, deployment, and arbitrary branch mutation have no
+application service operation or CLI route.
 
 ## Applying a human decision
 
@@ -206,6 +231,10 @@ Free-form comments, review approvals, closure, merge, reactions, labels, and
 branch activity are never decisions. Foundry does not close, approve, or merge
 the decision PR after applying an option.
 
-Foundry never force-pushes, merges, approves, closes, deploys, or rewrites
-history. See [recovery](recovery.md) for uncertain publication and
+Foundry never merges through a GitHub merge API, and never approves, closes,
+deploys, or rewrites history; enabling GitHub auto-merge on a result pull
+request delegates the merge to GitHub rules. `--force-with-lease` is permitted
+only in `direct-merge` mode, only against the configured source branch on the
+configured publication remote, with the lease pinned to the freshly fetched
+head. See [recovery](recovery.md) for uncertain publication and
 [inspection and reporting](inspection-and-reporting.md) for the handoff.

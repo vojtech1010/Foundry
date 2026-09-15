@@ -1,7 +1,12 @@
 import { Schema } from 'effect';
 
-import { ROLE_HARNESS_PROTOCOL } from './project-configuration.js';
+import { ROLE_HARNESS_PROTOCOL, ROLE_HOST_ROLES } from './role-harness.js';
 import { Identifier } from './run-identity.js';
+
+import type { RoleHarnessName, RoleHarnessSelections, RoleHostRole } from './role-harness.js';
+
+export { ROLE_HOST_ROLES } from './role-harness.js';
+export type { RoleHostRole } from './role-harness.js';
 
 export const ROLE_HOST_PROTOCOL_VERSION = 1 as const;
 
@@ -17,9 +22,46 @@ export const ROLE_HOST_OPERATIONS = [
 
 export type RoleHostOperation = (typeof ROLE_HOST_OPERATIONS)[number];
 
-export const ROLE_HOST_ROLES = ['architect', 'coder', 'lead_coder', 'tester', 'reviewer'] as const;
+/**
+ * The resolved routing for one role: which harness to launch and which model
+ * it must serve. Resolution is a pure projection of the configuration
+ * document, so the same document resolves the same routing on Linux and
+ * Windows; only executable resolution inside the adapter follows platform
+ * rules. This is the stable contract that reporting (`doctor`,
+ * `init --dry-run`) and launching consume.
+ */
+export interface RoleHostRoute {
+  readonly role: RoleHostRole;
+  readonly harness: RoleHarnessName;
+  readonly model: string;
+}
 
-export type RoleHostRole = (typeof ROLE_HOST_ROLES)[number];
+export function resolveRoleHostRoute(
+  selections: RoleHarnessSelections,
+  role: RoleHostRole,
+): RoleHostRoute {
+  const selection = selections[role];
+  return { role, harness: selection.harness, model: selection.model };
+}
+
+/** The resolved routing for every role, keyed by role. */
+export interface RoleHostRoutes {
+  readonly architect: RoleHostRoute;
+  readonly coder: RoleHostRoute;
+  readonly lead_coder: RoleHostRoute;
+  readonly tester: RoleHostRoute;
+  readonly reviewer: RoleHostRoute;
+}
+
+export function resolveAllRoleHostRoutes(selections: RoleHarnessSelections): RoleHostRoutes {
+  return {
+    architect: resolveRoleHostRoute(selections, 'architect'),
+    coder: resolveRoleHostRoute(selections, 'coder'),
+    lead_coder: resolveRoleHostRoute(selections, 'lead_coder'),
+    tester: resolveRoleHostRoute(selections, 'tester'),
+    reviewer: resolveRoleHostRoute(selections, 'reviewer'),
+  };
+}
 
 export const ROLE_HOST_FILESYSTEM_PROFILES = [
   'read_only_snapshot',
@@ -31,6 +73,32 @@ export const ROLE_HOST_FILESYSTEM_PROFILES = [
 export type RoleHostFilesystemProfile = (typeof ROLE_HOST_FILESYSTEM_PROFILES)[number];
 
 export const ROLE_HOST_NETWORK_PROFILES = ['network_denied', 'runtime_origin_only'] as const;
+
+/**
+ * Build identifier for the Foundry-bundled role host. The bundled host is
+ * Foundry's own ship: launch argv, model catalogs, and credential names are
+ * hardcoded per harness, so one version identifies the whole adapter
+ * contract. Bump it when the catalog or protocol surface changes.
+ */
+export const BUNDLED_ROLE_HOST_ADAPTER_VERSION = 'bundled-1' as const;
+
+/**
+ * The bundled host's static capability attestation. Foundry ships the host,
+ * so protocol, resumable sessions, runnable roles, and enforceable profiles
+ * are known without spawning anything; `evaluateRoleHostCapabilities`
+ * guards this table against drift from the required role/profile matrix.
+ */
+export const BUNDLED_ROLE_HOST_CAPABILITIES: RoleHostCapabilitiesResponse = {
+  schemaVersion: ROLE_HOST_PROTOCOL_VERSION,
+  protocol: ROLE_HOST_PROTOCOL_NAME,
+  resumable: true,
+  availableRoles: [...ROLE_HOST_ROLES],
+  capabilityProfiles: {
+    filesystem: [...ROLE_HOST_FILESYSTEM_PROFILES],
+    network: [...ROLE_HOST_NETWORK_PROFILES],
+  },
+  adapterVersion: BUNDLED_ROLE_HOST_ADAPTER_VERSION,
+};
 
 export type RoleHostNetworkProfile = (typeof ROLE_HOST_NETWORK_PROFILES)[number];
 

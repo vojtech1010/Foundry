@@ -9,9 +9,14 @@ import {
   decodeProjectConfiguration,
 } from '../src/application/project-configuration.js';
 import {
+  HARDCODED_ARTIFACT_BOUNDS,
   PROJECT_CONFIGURATION_SCHEMA_VERSION,
   PUBLICATION_DRAFT,
   PUBLICATION_MAINTAINERS_CAN_MODIFY,
+  RESULT_PUBLICATION_DEFAULT_MERGE_METHOD,
+  RESULT_PUBLICATION_DEFAULT_MODE,
+  RESULT_PUBLICATION_MERGE_METHODS,
+  RESULT_PUBLICATION_MODES,
   ROLE_HARNESS_PROTOCOL,
   RUNTIME_DATA_POLICY,
   RUNTIME_TESTER_ACCESS,
@@ -27,10 +32,12 @@ const exampleConfiguration = {
   sourceRemote: 'origin',
   sourceBranch: 'main',
   taskBranchPolicy: 'foundry/<task-id>',
-  roleHarness: {
-    protocol: 'foundry-role-host-v1',
-    command: ['foundry-role-host'],
-    environmentAllowlist: ['OPENAI_API_KEY'],
+  roles: {
+    architect: { harness: 'codex', model: 'gpt-5.6-luna' },
+    coder: { harness: 'codex', model: 'gpt-5.6-luna' },
+    lead_coder: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+    tester: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+    reviewer: { harness: 'codex', model: 'gpt-5.6-luna' },
   },
   timeouts: {
     roleMs: 1800000,
@@ -85,16 +92,6 @@ const exampleConfiguration = {
     draft: true,
     maintainersCanModify: false,
   },
-  artifacts: {
-    retentionDays: 30,
-    maxRequestBytes: 262144,
-    maxGuidanceBytes: 1048576,
-    maxRoleHandoffBytes: 262144,
-    maxEvidenceBytes: 26214400,
-    maxTerminalCaptureBytes: 10485760,
-    maxRunBytes: 104857600,
-    redactionPatterns: [],
-  },
 } as const;
 
 interface InvalidCase {
@@ -108,7 +105,7 @@ function withoutKey(source: Record<string, Schema.Json>, key: string): Schema.Js
 }
 
 const sections: ReadonlyArray<readonly [string, Record<string, Schema.Json>]> = [
-  ['roleHarness', exampleConfiguration.roleHarness],
+  ['roles', exampleConfiguration.roles],
   ['timeouts', exampleConfiguration.timeouts],
   ['retryBudgets', exampleConfiguration.retryBudgets],
   ['operationalRetryBudgets', exampleConfiguration.operationalRetryBudgets],
@@ -116,7 +113,6 @@ const sections: ReadonlyArray<readonly [string, Record<string, Schema.Json>]> = 
   ['projectProfile', exampleConfiguration.projectProfile],
   ['runtimeProfile', exampleConfiguration.runtimeProfile],
   ['decisionPublication', exampleConfiguration.decisionPublication],
-  ['artifacts', exampleConfiguration.artifacts],
 ];
 
 function expectInvalidConfiguration(document: Schema.Json, label: string) {
@@ -157,14 +153,6 @@ const unknownFieldCases: ReadonlyArray<InvalidCase> = [
     label: 'operating mode field',
     document: { ...exampleConfiguration, operatingMode: 'autonomous' },
     field: 'operatingMode',
-  },
-  {
-    label: 'unknown role harness field',
-    document: {
-      ...exampleConfiguration,
-      roleHarness: { ...exampleConfiguration.roleHarness, retries: 2 },
-    },
-    field: 'roleHarness.retries',
   },
   {
     label: 'unknown timeout field',
@@ -234,12 +222,20 @@ const unknownFieldCases: ReadonlyArray<InvalidCase> = [
     field: 'decisionPublication.labels',
   },
   {
-    label: 'unknown artifact field',
+    label: 'unknown result publication field',
     document: {
       ...exampleConfiguration,
-      artifacts: { ...exampleConfiguration.artifacts, maxCommentBytes: 65536 },
+      resultPublication: { mode: 'non-draft-pr', labels: ['foundry'] },
     },
-    field: 'artifacts.maxCommentBytes',
+    field: 'resultPublication.labels',
+  },
+  {
+    label: 'artifacts block is not part of the configuration document',
+    document: {
+      ...exampleConfiguration,
+      artifacts: { ...HARDCODED_ARTIFACT_BOUNDS },
+    },
+    field: 'artifacts',
   },
 ];
 
@@ -273,46 +269,6 @@ const mistypedFieldCases: ReadonlyArray<InvalidCase> = [
     label: 'empty source branch',
     document: { ...exampleConfiguration, sourceBranch: '' },
     field: 'sourceBranch',
-  },
-  {
-    label: 'wrong role harness protocol',
-    document: {
-      ...exampleConfiguration,
-      roleHarness: { ...exampleConfiguration.roleHarness, protocol: 'openai-role-host-v2' },
-    },
-    field: 'roleHarness.protocol',
-  },
-  {
-    label: 'role harness command as string',
-    document: {
-      ...exampleConfiguration,
-      roleHarness: { ...exampleConfiguration.roleHarness, command: 'foundry-role-host' },
-    },
-    field: 'roleHarness.command',
-  },
-  {
-    label: 'empty role harness command vector',
-    document: {
-      ...exampleConfiguration,
-      roleHarness: { ...exampleConfiguration.roleHarness, command: [] },
-    },
-    field: 'roleHarness.command.0',
-  },
-  {
-    label: 'empty role harness executable',
-    document: {
-      ...exampleConfiguration,
-      roleHarness: { ...exampleConfiguration.roleHarness, command: [''] },
-    },
-    field: 'roleHarness.command.0',
-  },
-  {
-    label: 'empty role harness environment name',
-    document: {
-      ...exampleConfiguration,
-      roleHarness: { ...exampleConfiguration.roleHarness, environmentAllowlist: [''] },
-    },
-    field: 'roleHarness.environmentAllowlist.0',
   },
   {
     label: 'timeout as float',
@@ -463,6 +419,11 @@ const mistypedFieldCases: ReadonlyArray<InvalidCase> = [
     field: 'runtimeProfile.testerAccess',
   },
   {
+    label: 'unknown result publication mode',
+    document: { ...exampleConfiguration, resultPublication: { mode: 'auto' } },
+    field: 'resultPublication.mode',
+  },
+  {
     label: 'empty runtime base url',
     document: {
       ...exampleConfiguration,
@@ -486,38 +447,6 @@ const mistypedFieldCases: ReadonlyArray<InvalidCase> = [
     },
     field: 'runtimeProfile.stop',
   },
-  {
-    label: 'negative retention days',
-    document: {
-      ...exampleConfiguration,
-      artifacts: { ...exampleConfiguration.artifacts, retentionDays: -1 },
-    },
-    field: 'artifacts.retentionDays',
-  },
-  {
-    label: 'zero artifact byte bound',
-    document: {
-      ...exampleConfiguration,
-      artifacts: { ...exampleConfiguration.artifacts, maxRunBytes: 0 },
-    },
-    field: 'artifacts.maxRunBytes',
-  },
-  {
-    label: 'fractional artifact byte bound',
-    document: {
-      ...exampleConfiguration,
-      artifacts: { ...exampleConfiguration.artifacts, maxRequestBytes: 1.5 },
-    },
-    field: 'artifacts.maxRequestBytes',
-  },
-  {
-    label: 'redaction patterns as string',
-    document: {
-      ...exampleConfiguration,
-      artifacts: { ...exampleConfiguration.artifacts, redactionPatterns: 'secret' },
-    },
-    field: 'artifacts.redactionPatterns',
-  },
 ];
 
 describe('project configuration contract', () => {
@@ -530,6 +459,15 @@ describe('project configuration contract', () => {
     expect(RUNTIME_TESTER_ACCESS).toBe('read_only');
     expect(TASK_ID_PLACEHOLDER).toBe('<task-id>');
     expect(VERIFICATION_COMMANDS).toEqual(['formatCheck', 'lint', 'typecheck', 'test', 'build']);
+    expect(RESULT_PUBLICATION_MODES).toEqual([
+      'draft-pr',
+      'non-draft-pr',
+      'non-draft-pr-auto-merge',
+      'direct-merge',
+    ]);
+    expect(RESULT_PUBLICATION_DEFAULT_MODE).toBe('non-draft-pr');
+    expect(RESULT_PUBLICATION_MERGE_METHODS).toEqual(['merge', 'squash', 'rebase']);
+    expect(RESULT_PUBLICATION_DEFAULT_MERGE_METHOD).toBe('merge');
   });
 
   it.effect('accepts the golden configuration document', () =>
@@ -541,10 +479,12 @@ describe('project configuration contract', () => {
       expect(decoded.sourceRemote).toBe('origin');
       expect(decoded.sourceBranch).toBe('main');
       expect(decoded.taskBranchPolicy).toBe('foundry/<task-id>');
-      expect(decoded.roleHarness).toEqual({
-        protocol: 'foundry-role-host-v1',
-        command: ['foundry-role-host'],
-        environmentAllowlist: ['OPENAI_API_KEY'],
+      expect(decoded.roles).toEqual({
+        architect: { harness: 'codex', model: 'gpt-5.6-luna' },
+        coder: { harness: 'codex', model: 'gpt-5.6-luna' },
+        lead_coder: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        tester: { harness: 'opencode', model: 'opencode-go/glm-5.3-flash' },
+        reviewer: { harness: 'codex', model: 'gpt-5.6-luna' },
       });
       expect(decoded.timeouts).toEqual(exampleConfiguration.timeouts);
       expect(decoded.retryBudgets).toEqual(exampleConfiguration.retryBudgets);
@@ -554,7 +494,53 @@ describe('project configuration contract', () => {
       expect(decoded.projectProfile.commands).toEqual(exampleConfiguration.projectProfile.commands);
       expect(decoded.runtimeProfile).toEqual(exampleConfiguration.runtimeProfile);
       expect(decoded.decisionPublication).toEqual(exampleConfiguration.decisionPublication);
-      expect(decoded.artifacts).toEqual(exampleConfiguration.artifacts);
+      expect(decoded.resultPublication).toEqual({ mode: 'non-draft-pr', mergeMethod: 'merge' });
+      expect(decoded.artifacts).toEqual({ ...HARDCODED_ARTIFACT_BOUNDS });
+    }),
+  );
+
+  it.effect('injects the immutable hardcoded artifact bounds', () =>
+    Effect.gen(function* () {
+      const decoded = yield* decodeProjectConfiguration(exampleConfiguration, configDirectory);
+
+      expect(decoded.artifacts).toEqual({
+        retentionDays: 30,
+        maxRequestBytes: 262144,
+        maxGuidanceBytes: 1048576,
+        maxRoleHandoffBytes: 262144,
+        maxEvidenceBytes: 26214400,
+        maxTerminalCaptureBytes: 10485760,
+        maxRunBytes: 104857600,
+        redactionPatterns: [],
+      });
+      expect(decoded.artifacts).toEqual({ ...HARDCODED_ARTIFACT_BOUNDS });
+    }),
+  );
+
+  it.effect('rejects a document carrying the removed artifacts block', () =>
+    Effect.gen(function* () {
+      const error = yield* expectInvalidConfiguration(
+        { ...exampleConfiguration, artifacts: { ...HARDCODED_ARTIFACT_BOUNDS } },
+        'artifacts block',
+      );
+      expect(error.field).toBe('artifacts');
+    }),
+  );
+
+  it.effect('rejects a document carrying the removed roleHarness block', () =>
+    Effect.gen(function* () {
+      const error = yield* expectInvalidConfiguration(
+        {
+          ...exampleConfiguration,
+          roleHarness: {
+            protocol: 'foundry-role-host-v1',
+            command: ['foundry-role-host'],
+            environmentAllowlist: ['OPENAI_API_KEY'],
+          },
+        },
+        'roleHarness block',
+      );
+      expect(error.field).toBe('roleHarness');
     }),
   );
 
@@ -572,7 +558,6 @@ describe('project configuration contract', () => {
           },
           runtimeProfile: null,
           decisionPublication: null,
-          artifacts: { ...exampleConfiguration.artifacts, retentionDays: 0 },
         },
         configDirectory,
       );
@@ -592,7 +577,8 @@ describe('project configuration contract', () => {
         maxCorrectionRounds: 0,
         maxControlRepairsPerAttempt: 0,
       });
-      expect(decoded.artifacts.retentionDays).toBe(0);
+      expect(decoded.artifacts).toEqual({ ...HARDCODED_ARTIFACT_BOUNDS });
+      expect(decoded.artifacts.retentionDays).toBe(30);
     }),
   );
 
@@ -720,15 +706,10 @@ describe('project configuration contract', () => {
 
   it.effect('resolves configuration-relative paths and leaves other commands alone', () =>
     Effect.gen(function* () {
-      const relativeCommand = './bin/role-host';
       const decoded = yield* decodeProjectConfiguration(
         {
           ...exampleConfiguration,
           targetRepository: '..',
-          roleHarness: {
-            ...exampleConfiguration.roleHarness,
-            command: [relativeCommand, '--stdio'],
-          },
           projectProfile: {
             ...exampleConfiguration.projectProfile,
             guidancePaths: ['AGENTS.md', 'docs/agents.md'],
@@ -738,36 +719,12 @@ describe('project configuration contract', () => {
       );
 
       expect(decoded.targetRepository).toBe(resolve(configDirectory, '..'));
-      expect(decoded.roleHarness.command).toEqual([
-        resolve(configDirectory, relativeCommand),
-        '--stdio',
-      ]);
       expect(decoded.projectProfile.guidancePaths).toEqual([
         resolve(configDirectory, 'AGENTS.md'),
         resolve(configDirectory, 'docs/agents.md'),
       ]);
       expect(decoded.projectProfile.commands).toEqual(exampleConfiguration.projectProfile.commands);
       expect(decoded.runtimeProfile?.reset).toEqual(exampleConfiguration.runtimeProfile.reset);
-    }),
-  );
-
-  it.effect('resolves role harness executables written with either path separator', () =>
-    Effect.gen(function* () {
-      const windowsSeparatorCommand = 'tools\\role-host';
-      const decoded = yield* decodeProjectConfiguration(
-        {
-          ...exampleConfiguration,
-          roleHarness: {
-            ...exampleConfiguration.roleHarness,
-            command: [windowsSeparatorCommand, 'serve'],
-          },
-        },
-        configDirectory,
-      );
-      expect(decoded.roleHarness.command).toEqual([
-        resolve(configDirectory, windowsSeparatorCommand),
-        'serve',
-      ]);
     }),
   );
 
@@ -784,6 +741,50 @@ describe('project configuration contract', () => {
 
       const stringDocumentError = yield* expectInvalidConfiguration('{}', 'string document');
       expect(stringDocumentError.message).toContain('Invalid project configuration');
+    }),
+  );
+
+  it.effect('resolves result publication modes additively and rejects illegal combinations', () =>
+    Effect.gen(function* () {
+      const legacy = yield* decodeProjectConfiguration(exampleConfiguration, configDirectory);
+      expect(legacy.resultPublication).toEqual({ mode: 'non-draft-pr', mergeMethod: 'merge' });
+
+      const autoMerge = yield* decodeProjectConfiguration(
+        {
+          ...exampleConfiguration,
+          resultPublication: { mode: 'non-draft-pr-auto-merge', mergeMethod: 'squash' },
+        },
+        configDirectory,
+      );
+      expect(autoMerge.resultPublication).toEqual({
+        mode: 'non-draft-pr-auto-merge',
+        mergeMethod: 'squash',
+      });
+
+      const directMerge = yield* decodeProjectConfiguration(
+        { ...exampleConfiguration, resultPublication: { mode: 'direct-merge' } },
+        configDirectory,
+      );
+      expect(directMerge.resultPublication).toEqual({ mode: 'direct-merge', mergeMethod: 'merge' });
+
+      const illegalMergeMethod = yield* expectInvalidConfiguration(
+        {
+          ...exampleConfiguration,
+          resultPublication: { mode: 'direct-merge', mergeMethod: 'squash' },
+        },
+        'merge method outside auto-merge mode',
+      );
+      expect(illegalMergeMethod.field).toBe('resultPublication.mergeMethod');
+
+      const withoutPublication = yield* expectInvalidConfiguration(
+        {
+          ...exampleConfiguration,
+          decisionPublication: null,
+          resultPublication: { mode: 'non-draft-pr' },
+        },
+        'result publication without decision publication',
+      );
+      expect(withoutPublication.field).toBe('resultPublication');
     }),
   );
 });
